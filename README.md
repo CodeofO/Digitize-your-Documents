@@ -31,7 +31,7 @@ uv pip install -e 'backend[dev]'
 
 `backend/pyproject.toml`이 변경되면 같은 설치 명령으로 `.venv`를 업데이트합니다.
 
-VLM 설정은 Home 화면 우측 상단 Setting 버튼에서 저장합니다. Save를 누르면 root `.env`가 자동 생성되며, 별도 환경 파일을 복사할 필요가 없습니다.
+VLM과 LibreOffice 경로 설정은 Home 화면 우측 상단 Setting 버튼에서 저장합니다. Save를 누르면 root `.env`가 자동 생성되며, 별도 환경 파일을 복사할 필요가 없습니다.
 
 저장되는 주요 값:
 
@@ -44,7 +44,7 @@ VLM_BASE_URL=
 VLM_TEMPERATURE=0
 VLM_MAX_RETRIES=2
 VLM_TIMEOUT_SECONDS=120
-LIBREOFFICE_PATH=
+LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
 ```
 
 Frontend는 기본적으로 `http://localhost:8000` backend를 사용합니다. 다른 backend 주소가 필요할 때만 실행 시점에 지정합니다.
@@ -121,7 +121,7 @@ VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev -- --host 127.0.0.1 --port 5
 
 업로드 옵션:
 
-- `include_images`: 지원 가능한 이미지를 HTML에 data URL로 포함합니다.
+- `include_images`: 지원 가능한 이미지를 HTML에 data URL로 포함합니다. UI 기본값은 on입니다.
 - `include_formulas`: XLSX cell formula와 DOCX/PPTX Office Math 텍스트를 포함합니다.
 
 Parser 전략:

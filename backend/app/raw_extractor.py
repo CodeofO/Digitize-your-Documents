@@ -39,7 +39,7 @@ IMAGE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
 
 @dataclass(frozen=True)
 class RawExtractionOptions:
-    include_images: bool = False
+    include_images: bool = True
     include_formulas: bool = False
 
 
@@ -251,6 +251,10 @@ def _docx_to_html(source_path: Path, options: RawExtractionOptions) -> str:
         allowed_attrs["img"] = ["alt", "src"]
     protocols = bleach.sanitizer.ALLOWED_PROTOCOLS | {"data"}
     content = bleach.clean(result.value, tags=allowed_tags, attributes=allowed_attrs, protocols=protocols, strip=True)
+    if options.include_images and "<img" not in content:
+        fallback_images = _embedded_package_images_section(source_path, "Document images", ["word/media/"])
+        if fallback_images:
+            content += fallback_images
     if options.include_formulas:
         formulas = _extract_ooxml_formulas(source_path, ["word/document.xml"])
         if formulas:
@@ -295,6 +299,7 @@ def _pptx_to_html(source_path: Path, options: RawExtractionOptions) -> str:
     presentation = Presentation(source_path)
     formulas_by_slide = _extract_pptx_formulas_by_slide(source_path) if options.include_formulas else {}
     sections: list[str] = []
+    image_count = 0
     for index, slide in enumerate(presentation.slides, start=1):
         fragments = [f"<h2>Slide {index}</h2>"]
         for shape in slide.shapes:
@@ -308,11 +313,16 @@ def _pptx_to_html(source_path: Path, options: RawExtractionOptions) -> str:
             if options.include_images and getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE:
                 image_html = _pptx_picture_to_html(shape, f"Slide {index} image")
                 if image_html:
+                    image_count += 1
                     fragments.append(image_html)
         formulas = formulas_by_slide.get(index, [])
         if formulas:
             fragments.append(_formula_list("Slide formulas", formulas, "h3"))
         sections.append(f"<section>{''.join(fragments)}</section>")
+    if options.include_images and image_count == 0:
+        fallback_images = _embedded_package_images_section(source_path, "Presentation images", ["ppt/media/"])
+        if fallback_images:
+            sections.append(fallback_images)
     return "\n".join(sections) or "<p>No readable slide content found.</p>"
 
 

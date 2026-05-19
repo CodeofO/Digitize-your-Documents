@@ -43,7 +43,11 @@ def test_root_env_upsert_creates_vlm_settings(monkeypatch, tmp_path) -> None:
     env_path = tmp_path / ".env"
     monkeypatch.setattr(config_module, "ROOT_ENV_PATH", env_path)
     config_module.upsert_root_env(
-        {"VLM_API_KEY": "test-secret", "VLM_MODEL_NAME": "test-model"},
+        {
+            "VLM_API_KEY": "test-secret",
+            "VLM_MODEL_NAME": "test-model",
+            "LIBREOFFICE_PATH": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        },
         include_defaults=True,
     )
 
@@ -51,6 +55,31 @@ def test_root_env_upsert_creates_vlm_settings(monkeypatch, tmp_path) -> None:
     assert 'APP_ENV="local"' in contents
     assert 'VLM_API_KEY="test-secret"' in contents
     assert 'VLM_MODEL_NAME="test-model"' in contents
+    assert 'LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"' in contents
+
+
+def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
+    from app import config as config_module
+
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(config_module, "ROOT_ENV_PATH", env_path)
+
+    with get_client() as client:
+        response = client.put(
+            "/api/settings/vlm",
+            json={
+                "api_key": "test-secret",
+                "model_name": "test-model",
+                "libreoffice_path": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                "provider": "openai",
+            },
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["libreoffice_path"] == "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+
+    contents = env_path.read_text(encoding="utf-8")
+    assert 'LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"' in contents
 
 
 def test_schema_validation_and_creation() -> None:
@@ -315,6 +344,36 @@ def test_raw_extraction_pdf_upload_with_images_option() -> None:
         assert "data:image/png;base64" in html_response.text
 
 
+def test_raw_extraction_pptx_upload_with_images_option(monkeypatch) -> None:
+    def fake_convert(source_path, suffix, pdf_path):
+        document = fitz.open()
+        page = document.new_page(width=240, height=120)
+        page.insert_text((24, 60), f"Preview for {source_path.name}")
+        document.save(pdf_path)
+        document.close()
+
+    monkeypatch.setattr("app.raw_extractor.convert_office_to_pdf", fake_convert)
+
+    with get_client() as client:
+        response = client.post(
+            "/api/raw-extractions",
+            data={"include_images": "true"},
+            files={
+                "file": (
+                    "deck_with_image.pptx",
+                    make_pptx_with_image_bytes(),
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+            },
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["status"] == "completed", payload
+        html_response = client.get(payload["html_url"])
+        assert html_response.status_code == 200
+        assert "data:image/png;base64" in html_response.text
+
+
 def test_raw_extraction_office_uploads(monkeypatch) -> None:
     def fake_convert(source_path, suffix, pdf_path):
         document = fitz.open()
@@ -503,6 +562,20 @@ def make_pptx_bytes() -> bytes:
     slide.shapes.title.text = "Roadmap"
     textbox = slide.shapes.add_textbox(Inches(1), Inches(1.6), Inches(6), Inches(1))
     textbox.text_frame.text = "Launch Raw Data Extractor"
+    buffer = io.BytesIO()
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
+def make_pptx_with_image_bytes() -> bytes:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    slide.shapes.title.text = "Image slide"
+    image_stream = io.BytesIO(ONE_BY_ONE_PNG)
+    slide.shapes.add_picture(image_stream, Inches(1), Inches(1.4), width=Inches(1))
     buffer = io.BytesIO()
     presentation.save(buffer)
     return buffer.getvalue()

@@ -196,6 +196,7 @@ type SystemStatus = {
 type VlmSettings = {
   provider: string;
   model_name: string | null;
+  libreoffice_path: string | null;
   has_api_key: boolean;
   env_path: string;
 };
@@ -303,12 +304,13 @@ export default function App() {
   const [recentJobs, setRecentJobs] = useState<ExtractionJob[]>([]);
   const [rawExtraction, setRawExtraction] = useState<RawExtraction | null>(null);
   const [recentRawExtractions, setRecentRawExtractions] = useState<RawExtraction[]>([]);
-  const [rawOptions, setRawOptions] = useState<RawExtractionOptions>({ includeImages: false, includeFormulas: false });
+  const [rawOptions, setRawOptions] = useState<RawExtractionOptions>({ includeImages: true, includeFormulas: false });
   const [rawHistoryCollapsed, setRawHistoryCollapsed] = useState(false);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [vlmSettings, setVlmSettings] = useState<VlmSettings | null>(null);
   const [vlmApiKey, setVlmApiKey] = useState("");
   const [vlmModelName, setVlmModelName] = useState("");
+  const [libreOfficePath, setLibreOfficePath] = useState("/Applications/LibreOffice.app/Contents/MacOS/soffice");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingRecommendation, setPendingRecommendation] = useState<SchemaRecommendation | null>(null);
@@ -409,6 +411,7 @@ export default function App() {
       const settings = await api<VlmSettings>("/api/settings/vlm");
       setVlmSettings(settings);
       setVlmModelName(settings.model_name ?? "");
+      setLibreOfficePath(settings.libreoffice_path ?? "/Applications/LibreOffice.app/Contents/MacOS/soffice");
     } catch {
       setVlmSettings(null);
     }
@@ -425,6 +428,7 @@ export default function App() {
         body: JSON.stringify({
           api_key: vlmApiKey,
           model_name: vlmModelName,
+          libreoffice_path: libreOfficePath,
           provider: "openai"
         })
       });
@@ -1003,19 +1007,21 @@ export default function App() {
             <RefreshCw size={16} />
             Refresh
           </button>
-          <button
-            type="button"
-            className="secondary compact"
-            disabled={Boolean(busy)}
-            onClick={() => {
-              setSettingsMessage(null);
-              setSettingsOpen(true);
-            }}
-            title="VLM setting"
-          >
-            <Settings size={16} />
-            Setting
-          </button>
+          {mode === "home" && (
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={Boolean(busy)}
+              onClick={() => {
+                setSettingsMessage(null);
+                setSettingsOpen(true);
+              }}
+              title="VLM and LibreOffice setting"
+            >
+              <Settings size={16} />
+              Setting
+            </button>
+          )}
           <div className="help-trigger">
             <button type="button" className="help-button" aria-label="Usage guide">
               <CircleHelp size={18} />
@@ -1201,10 +1207,12 @@ export default function App() {
           vlmSettings={vlmSettings}
           vlmApiKey={vlmApiKey}
           vlmModelName={vlmModelName}
+          libreOfficePath={libreOfficePath}
           settingsMessage={settingsMessage}
           busy={busy}
           onVlmApiKey={setVlmApiKey}
           onVlmModelName={setVlmModelName}
+          onLibreOfficePath={setLibreOfficePath}
           onSave={() => void saveVlmSettings()}
           onClose={() => setSettingsOpen(false)}
         />
@@ -1394,10 +1402,12 @@ function SettingsDialog(props: {
   vlmSettings: VlmSettings | null;
   vlmApiKey: string;
   vlmModelName: string;
+  libreOfficePath: string;
   settingsMessage: string | null;
   busy: string | null;
   onVlmApiKey: (value: string) => void;
   onVlmModelName: (value: string) => void;
+  onLibreOfficePath: (value: string) => void;
   onSave: () => void;
   onClose: () => void;
 }) {
@@ -1407,7 +1417,7 @@ function SettingsDialog(props: {
         <div className="modal-header">
           <div>
             <p className="eyebrow">Setting</p>
-            <h2 id="vlm-settings-title">API key와 model name</h2>
+            <h2 id="vlm-settings-title">API, model, LibreOffice</h2>
           </div>
           <button type="button" className="icon-only secondary" aria-label="Close settings" onClick={props.onClose}>
             <X size={16} />
@@ -1429,6 +1439,14 @@ function SettingsDialog(props: {
               value={props.vlmModelName}
               placeholder="gpt-4.1-mini"
               onChange={(event) => props.onVlmModelName(event.target.value)}
+            />
+          </label>
+          <label className="wide-field">
+            <span>LibreOffice path</span>
+            <input
+              value={props.libreOfficePath}
+              placeholder="/Applications/LibreOffice.app/Contents/MacOS/soffice"
+              onChange={(event) => props.onLibreOfficePath(event.target.value)}
             />
           </label>
           <button type="button" className="primary compact" disabled={Boolean(props.busy)} onClick={props.onSave}>
@@ -2251,7 +2269,7 @@ function formatApiDetail(detail: unknown): string | null {
 function toFriendlyError(error: unknown): string {
   const message = error instanceof Error ? error.message : "Unexpected error";
   if (message.includes("VLM API key and model name are required")) {
-    return "VLM credentials are missing. Use the Setting button to save API key and model name, or use VLM_PROVIDER=mock for a local demo.";
+    return "VLM credentials are missing. Go Home and use Setting to save API key and model name, or use VLM_PROVIDER=mock for a local demo.";
   }
   if (message.includes("Only openai or mock")) {
     return "Unsupported VLM_PROVIDER. Use openai for real extraction or mock for local demo mode.";

@@ -133,6 +133,7 @@ class RawExtractionRead(BaseModel):
 class VlmSettingsRead(BaseModel):
     provider: str
     model_name: str | None
+    libreoffice_path: str | None
     has_api_key: bool
     env_path: str
 
@@ -140,6 +141,7 @@ class VlmSettingsRead(BaseModel):
 class VlmSettingsUpdate(BaseModel):
     api_key: str | None = None
     model_name: str
+    libreoffice_path: str | None = None
     provider: str = "openai"
 
 

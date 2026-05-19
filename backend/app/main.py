@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
-from app.config import ROOT_ENV_PATH, get_settings, upsert_root_env
+from app.config import DEFAULT_LIBREOFFICE_PATH, ROOT_ENV_PATH, get_settings, upsert_root_env
 from app.database import get_db, init_db
 from app.document_processor import DocumentProcessingError, rasterize_document, save_upload_file
 from app.extraction import result_to_dict, run_extraction_job
@@ -105,6 +105,7 @@ def get_vlm_settings() -> VlmSettingsRead:
     return VlmSettingsRead(
         provider=settings.vlm_provider.lower(),
         model_name=settings.resolved_vlm_model_name,
+        libreoffice_path=settings.libreoffice_path or DEFAULT_LIBREOFFICE_PATH,
         has_api_key=bool(settings.resolved_vlm_api_key),
         env_path=str(ROOT_ENV_PATH),
     )
@@ -119,6 +120,7 @@ def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
     updates = {
         "VLM_PROVIDER": provider,
         "VLM_MODEL_NAME": payload.model_name.strip(),
+        "LIBREOFFICE_PATH": (payload.libreoffice_path or "").strip() or DEFAULT_LIBREOFFICE_PATH,
     }
     api_key = (payload.api_key or "").strip()
     if api_key:
@@ -131,7 +133,7 @@ def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
 @app.post("/api/raw-extractions", response_model=RawExtractionRead)
 def upload_raw_extraction(
     file: UploadFile = File(...),
-    include_images: bool = Form(default=False),
+    include_images: bool = Form(default=True),
     include_formulas: bool = Form(default=False),
     db: Session = Depends(get_db),
 ) -> RawExtractionRead:

@@ -8,6 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = BACKEND_DIR.parent
 ROOT_ENV_PATH = PROJECT_ROOT / ".env"
+DEFAULT_LIBREOFFICE_PATH = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
 DEFAULT_ENV_VALUES = {
     "APP_ENV": "local",
     "VLM_PROVIDER": "openai",
@@ -17,7 +18,7 @@ DEFAULT_ENV_VALUES = {
     "VLM_TEMPERATURE": "0",
     "VLM_MAX_RETRIES": "2",
     "VLM_TIMEOUT_SECONDS": "120",
-    "LIBREOFFICE_PATH": "",
+    "LIBREOFFICE_PATH": DEFAULT_LIBREOFFICE_PATH,
 }
 
 

@@ -20,7 +20,7 @@ Digitize Your Document는 다양한 문서를 디지털 정보로 변환하는 R
 
 - Python 친화적인 backend 중심 구조를 유지한다.
 - VLM secret은 frontend로 전달하지 않는다.
-- Home 화면 우측 상단 Setting popup에서 VLM API key/model name을 저장하면 root `.env`가 자동 생성/갱신된다.
+- Home 화면 우측 상단 Setting popup에서 VLM API key/model name과 LibreOffice path를 저장하면 root `.env`가 자동 생성/갱신된다.
 - 사용자는 별도 환경 파일 복사 절차 없이 git clone 후 Home에서 설정할 수 있다.
 
 ## 2. Raw Data Extractor
@@ -46,7 +46,7 @@ GET /api/raw-extractions/{id}/pdf
 GET /api/raw-extractions/{id}/html
 ```
 
-`POST /api/raw-extractions`는 multipart `file`과 form option `include_images`, `include_formulas`를 받는다.
+`POST /api/raw-extractions`는 multipart `file`과 form option `include_images`, `include_formulas`를 받는다. `include_images`의 UI/API 기본값은 true이고, `include_formulas`의 기본값은 false이다.
 
 응답 구조:
 
@@ -158,6 +158,7 @@ DOCX/PPTX는 LibreOffice로 PDF 변환 후 page image로 rasterize한다. 이후
 Home 우측 상단 Setting 버튼:
 
 - API key/model name 입력 popup 표시
+- LibreOffice path 입력. 기본값은 `/Applications/LibreOffice.app/Contents/MacOS/soffice`
 - Save 시 root `.env` 생성/갱신 후 popup 닫기
 - X 또는 Close 클릭 시 저장하지 않고 popup 닫기
 
@@ -198,7 +199,7 @@ VLM_BASE_URL=
 VLM_TEMPERATURE=0
 VLM_MAX_RETRIES=2
 VLM_TIMEOUT_SECONDS=120
-LIBREOFFICE_PATH=
+LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
 ```
 
 LibreOffice는 Python 패키지가 아니라 외부 시스템 앱/CLI이므로 `.venv` 안에 일반 pip 의존성처럼 설치하지 않는다.
