@@ -576,6 +576,24 @@ textarea {
   gap: 10px;
 }
 
+.schema-main-header {
+  align-items: flex-start;
+}
+
+.schema-header-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.schema-core-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .upload-notes p {
   color: #43504a;
   line-height: 1.5;
@@ -615,6 +633,26 @@ textarea {
   border-radius: 8px;
   margin-bottom: 12px;
   overflow: hidden;
+}
+
+.utility-dock {
+  border: 1px solid #d9e0da;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 12px;
+  padding: 8px;
+}
+
+.utility-dock button {
+  justify-content: center;
+  min-width: 0;
+  padding: 8px;
+}
+
+.utility-modal {
+  max-width: 760px;
 }
 
 .compact-panel {
@@ -703,6 +741,14 @@ textarea {
   display: grid;
   gap: 6px;
   padding: 8px;
+}
+
+.panel-description {
+  color: #53615a;
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+  padding: 10px 12px 0;
 }
 
 .batch-top {
@@ -817,6 +863,23 @@ progress {
   min-height: 0;
   padding: 8px 10px;
   text-align: left;
+}
+
+.tool-section {
+  border: 1px solid #d9e0da;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.tool-section h3 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.tool-section .panel-description {
+  padding: 0;
 }
 
 .batch-upload {
@@ -1181,6 +1244,10 @@ pre {
 
   .feature-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .utility-dock {
+    grid-template-columns: 1fr;
   }
 
   .side-pane {

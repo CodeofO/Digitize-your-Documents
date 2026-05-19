@@ -28,6 +28,7 @@ import X from "lucide-react/dist/esm/icons/x.js";
 import ZoomIn from "lucide-react/dist/esm/icons/zoom-in.js";
 import ZoomOut from "lucide-react/dist/esm/icons/zoom-out.js";
 import { ChangeEvent, DragEvent, PointerEvent, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const OUTPUT_FORMATS = ["string", "float", "date", "bool"] as const;
@@ -298,7 +299,7 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [zoomMode, setZoomMode] = useState<ZoomMode>("fitWidth");
   const [rotation, setRotation] = useState(0);
-  const [leftPanePercent, setLeftPanePercent] = useState(62);
+  const [leftPanePercent, setLeftPanePercent] = useState(50);
   const [recentDocuments, setRecentDocuments] = useState<UploadedDocument[]>([]);
   const [recentSchemas, setRecentSchemas] = useState<SavedSchema[]>([]);
   const [recentJobs, setRecentJobs] = useState<ExtractionJob[]>([]);
@@ -323,7 +324,9 @@ export default function App() {
   const [reviewedFields, setReviewedFields] = useState<string[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [historyTab, setHistoryTab] = useState<HistoryTab>("documents");
-  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -336,6 +339,12 @@ export default function App() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  useEffect(() => {
+    if (mode !== "home") {
+      setLeftPanePercent(50);
+    }
+  }, [mode]);
 
   useEffect(() => {
     if (schema?.id) {
@@ -375,6 +384,7 @@ export default function App() {
   const result = job?.result ?? null;
   const currentValues = Object.keys(edits).length ? edits : result?.corrected_output?.values ?? result?.validated_output.values ?? {};
   const templates = recentSchemas.filter((item) => item.is_template || item.pinned);
+  const hasPreparedSchema = Boolean(document) || Boolean(schema) || schemaDirty || hasMeaningfulSchema(fields);
 
   async function refreshAll() {
     await Promise.all([refreshHistory(), refreshRawHistory(), refreshSystemStatus(), loadVlmSettings(), refreshBatches(), searchArchive()]);
@@ -1101,35 +1111,7 @@ export default function App() {
         </button>
 
         <aside className="side-pane">
-          <ArchivePanel
-            query={archiveQuery}
-            status={archiveStatus}
-            results={archiveResults}
-            onQuery={(value) => {
-              setArchiveQuery(value);
-              void searchArchive(value, archiveStatus);
-            }}
-            onStatus={(value) => {
-              setArchiveStatus(value);
-              void searchArchive(archiveQuery, value);
-            }}
-            onOpen={(item) => void loadArchiveResult(item)}
-          />
-
-          <HistoryPanel
-            activeTab={historyTab}
-            documents={recentDocuments}
-            schemas={recentSchemas}
-            jobs={recentJobs}
-            collapsed={historyCollapsed}
-            onTab={setHistoryTab}
-            onLoadDocument={(id) => void loadDocument(id)}
-            onLoadSchema={(id) => void loadSchema(id)}
-            onLoadJob={(id) => void loadJob(id)}
-            onToggle={() => setHistoryCollapsed((collapsed) => !collapsed)}
-          />
-
-          {!document ? (
+          {!hasPreparedSchema ? (
             <UploadNotes onSampleSchema={applySampleSchema} />
           ) : step !== "review" ? (
             <SchemaBuilder
@@ -1190,9 +1172,71 @@ export default function App() {
               onSavePreset={() => void saveDefaultExportPreset()}
             />
           )}
-          <BatchPanel batches={batches} onRefresh={() => void refreshBatches()} onOpenJob={(jobId) => void loadJob(jobId)} />
+          <KieUtilityDock
+            onArchive={() => setArchiveOpen(true)}
+            onHistory={() => setHistoryOpen(true)}
+            onBatch={() => setBatchOpen(true)}
+          />
         </aside>
         </main>
+      )}
+      {archiveOpen && (
+        <UtilityModal title="Archive" eyebrow="Search" onClose={() => setArchiveOpen(false)}>
+          <ArchivePanel
+            query={archiveQuery}
+            status={archiveStatus}
+            results={archiveResults}
+            onQuery={(value) => {
+              setArchiveQuery(value);
+              void searchArchive(value, archiveStatus);
+            }}
+            onStatus={(value) => {
+              setArchiveStatus(value);
+              void searchArchive(archiveQuery, value);
+            }}
+            onOpen={(item) => {
+              setArchiveOpen(false);
+              void loadArchiveResult(item);
+            }}
+          />
+        </UtilityModal>
+      )}
+      {historyOpen && (
+        <UtilityModal title="Recent" eyebrow="History" onClose={() => setHistoryOpen(false)}>
+          <HistoryPanel
+            activeTab={historyTab}
+            documents={recentDocuments}
+            schemas={recentSchemas}
+            jobs={recentJobs}
+            collapsed={false}
+            onTab={setHistoryTab}
+            onLoadDocument={(id) => {
+              setHistoryOpen(false);
+              void loadDocument(id);
+            }}
+            onLoadSchema={(id) => {
+              setHistoryOpen(false);
+              void loadSchema(id);
+            }}
+            onLoadJob={(id) => {
+              setHistoryOpen(false);
+              void loadJob(id);
+            }}
+            onToggle={() => setHistoryOpen(false)}
+          />
+        </UtilityModal>
+      )}
+      {batchOpen && (
+        <UtilityModal title="Batch" eyebrow="Advanced" onClose={() => setBatchOpen(false)}>
+          <BatchPanel
+            batches={batches}
+            onRefresh={() => void refreshBatches()}
+            onOpenJob={(jobId) => {
+              setBatchOpen(false);
+              void loadJob(jobId);
+            }}
+          />
+        </UtilityModal>
       )}
       {pendingRecommendation && (
         <RecommendationDiffModal
@@ -1217,6 +1261,44 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
         />
       )}
+    </div>
+  );
+}
+
+function KieUtilityDock(props: { onArchive: () => void; onHistory: () => void; onBatch: () => void }) {
+  return (
+    <section className="utility-dock" aria-label="KIE utility actions">
+      <button type="button" className="secondary" onClick={props.onHistory}>
+        <History size={16} />
+        Recent
+      </button>
+      <button type="button" className="secondary" onClick={props.onArchive}>
+        <FileJson size={16} />
+        Archive
+      </button>
+      <button type="button" className="secondary" onClick={props.onBatch}>
+        <FileSpreadsheet size={16} />
+        Batch
+      </button>
+    </section>
+  );
+}
+
+function UtilityModal(props: { title: string; eyebrow: string; children: ReactNode; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel utility-modal" role="dialog" aria-modal="true" aria-label={props.title}>
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">{props.eyebrow}</p>
+            <h2>{props.title}</h2>
+          </div>
+          <button type="button" className="icon-only secondary" aria-label="Close" onClick={props.onClose}>
+            <X size={16} />
+          </button>
+        </div>
+        {props.children}
+      </section>
     </div>
   );
 }
@@ -1702,6 +1784,10 @@ function BatchPanel(props: { batches: Batch[]; onRefresh: () => void; onOpenJob:
           Refresh
         </button>
       </div>
+      <p className="panel-description">
+        Batch는 하나의 저장된 schema로 여러 문서를 순차 업로드하고 각 문서별 extraction job을 만드는 고급 기능입니다.
+        항목을 열면 해당 job의 원본 문서와 추출 결과를 함께 불러옵니다.
+      </p>
       <div className="mini-list">
         {props.batches.length ? (
           props.batches.map((batch) => (
@@ -1714,7 +1800,7 @@ function BatchPanel(props: { batches: Batch[]; onRefresh: () => void; onOpenJob:
               <span className="muted">
                 {batch.completed_count} done · {batch.failed_count} failed · {batch.total_count} total
               </span>
-              {batch.items.slice(0, 3).map((item) => (
+              {batch.items.map((item) => (
                 <button key={item.id} onClick={() => props.onOpenJob(item.job_id)}>
                   <strong>{item.filename}</strong>
                   <span>{item.status}</span>
@@ -1781,161 +1867,210 @@ function SchemaBuilder(props: {
   onBatchUpload: (files: FileList | null) => void;
   canExtract: boolean;
 }) {
+  const [toolsOpen, setToolsOpen] = useState(false);
+
   return (
     <div className="schema-builder">
-      <div className="pane-header">
+      <div className="pane-header schema-main-header">
         <div>
           <p className="eyebrow">Schema</p>
           <h2>Define extraction fields</h2>
         </div>
-        {props.savedSchema && (
-          <span className={`saved-badge ${props.schemaDirty ? "dirty" : ""}`}>
-            {props.schemaDirty ? "Draft changes" : `Saved v${props.savedSchema.current_version}`}
-          </span>
-        )}
-      </div>
-
-      {props.document && (
-        <div className="intel-card">
-          <div>
-            <span className="eyebrow">Document intelligence</span>
-            <strong>{props.document.document_type || "Unknown document type"}</strong>
-          </div>
-          <span>{props.document.language || "language unknown"} · {props.document.page_count} page(s)</span>
-          {props.document.recommendation_reasoning && <p>{props.document.recommendation_reasoning}</p>}
-        </div>
-      )}
-
-      {props.systemStatus?.is_mock && (
-        <div className="notice-card">Mock mode is active. AI recommendation and extraction use deterministic demo data.</div>
-      )}
-
-      <div className="action-row">
-        <button className="primary" onClick={() => void props.onRecommendSchema()}>
-          <Sparkles size={16} />
-          AI recommend schema
-        </button>
-        <button className="secondary" onClick={props.onSampleSchema}>
-          <ClipboardList size={16} />
-          Sample
-        </button>
-        <a className="secondary link-button" href={props.schemaDownloadUrl} download={`${props.schemaName || "schema"}.json`}>
-          <FileDown size={16} />
-          Export JSON
-        </a>
-      </div>
-
-      <div className="template-strip">
-        <div className="template-header">
-          <strong>Template library</strong>
-          <button className="secondary compact" onClick={props.onSaveTemplate}>
-            Pin current
+        <div className="schema-header-actions">
+          {props.savedSchema && (
+            <span className={`saved-badge ${props.schemaDirty ? "dirty" : ""}`}>
+              {props.schemaDirty ? "Draft changes" : `Saved v${props.savedSchema.current_version}`}
+            </span>
+          )}
+          <button type="button" className="secondary compact" onClick={() => setToolsOpen(true)}>
+            <Settings size={14} />
+            Tools
           </button>
         </div>
-        <div className="template-list">
-          {props.templates.length ? (
-            props.templates.slice(0, 4).map((template) => (
-              <button key={template.id} onClick={() => props.onLoadTemplate(template)}>
-                <strong>{template.display_name || template.name}</strong>
-                <span>{template.template_category || "General"} · {template.fields.length} fields</span>
-              </button>
-            ))
-          ) : (
-            <span className="muted">Save a schema as a template to reuse it here.</span>
-          )}
+      </div>
+
+      <div className="schema-core-panel">
+        <label className="field-stack">
+          <span>Schema name</span>
+          <input value={props.schemaName} onChange={(event) => props.onSchemaName(event.target.value)} />
+        </label>
+        <label className="field-stack">
+          <span>Schema description</span>
+          <textarea value={props.schemaDescription} onChange={(event) => props.onSchemaDescription(event.target.value)} />
+        </label>
+
+        <div className="field-list">
+          {props.fields.map((field, index) => (
+            <div className="field-row" key={field.local_id}>
+              <div className="field-grid">
+                <label>
+                  <span>key name</span>
+                  <input value={field.key_name} onChange={(event) => props.onUpdateField(index, { key_name: event.target.value })} />
+                </label>
+                <label>
+                  <span>description</span>
+                  <input
+                    value={field.description}
+                    placeholder="Where and how the value should be found"
+                    onChange={(event) => props.onUpdateField(index, { description: event.target.value })}
+                  />
+                </label>
+                <label>
+                  <span>output format</span>
+                  <select
+                    value={field.output_format}
+                    onChange={(event) => props.onUpdateField(index, { output_format: event.target.value as OutputFormat })}
+                  >
+                    {OUTPUT_FORMATS.map((format) => (
+                      <option key={format} value={format}>
+                        {format}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button className="ghost danger icon-only" title="Remove field" onClick={() => props.onRemoveField(index)}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="action-row">
+          <button className="secondary" onClick={props.onAddField}>
+            <Plus size={16} />
+            Add field
+          </button>
+          <button className="secondary" onClick={() => void props.onSaveSchema()}>
+            <Save size={16} />
+            Save schema
+          </button>
+          <button className="primary" disabled={!props.canExtract} onClick={() => void props.onRunExtraction()}>
+            <Play size={16} />
+            Extract
+          </button>
         </div>
       </div>
 
-      <label className="batch-upload">
-        <FileSpreadsheet size={16} />
-        <span>Batch upload with this schema</span>
-        <input type="file" accept=".pdf,.png,.jpg,.jpeg,.docx,.pptx" multiple onChange={(event) => props.onBatchUpload(event.target.files)} />
-      </label>
-
-      <label className="field-stack">
-        <span>Schema name</span>
-        <input value={props.schemaName} onChange={(event) => props.onSchemaName(event.target.value)} />
-      </label>
-      <label className="field-stack">
-        <span>Schema description</span>
-        <textarea value={props.schemaDescription} onChange={(event) => props.onSchemaDescription(event.target.value)} />
-      </label>
-
-      <details className="import-box">
-        <summary>
-          <FileUp size={16} />
-          Import schema JSON
-        </summary>
-        <textarea
-          value={props.schemaJsonInput}
-          onChange={(event) => props.onSchemaJsonInput(event.target.value)}
-          placeholder="Paste schema JSON here"
-        />
-        <button className="secondary" onClick={props.onImportSchemaJson}>
-          <FileUp size={16} />
-          Import
-        </button>
-      </details>
-
-      <div className="field-list">
-        {props.fields.map((field, index) => (
-          <div className="field-row" key={field.local_id}>
-            <div className="field-grid">
-              <label>
-                <span>key name</span>
-                <input value={field.key_name} onChange={(event) => props.onUpdateField(index, { key_name: event.target.value })} />
-              </label>
-              <label>
-                <span>description</span>
-                <input
-                  value={field.description}
-                  placeholder="Where and how the value should be found"
-                  onChange={(event) => props.onUpdateField(index, { description: event.target.value })}
-                />
-              </label>
-              <label>
-                <span>output format</span>
-                <select
-                  value={field.output_format}
-                  onChange={(event) => props.onUpdateField(index, { output_format: event.target.value as OutputFormat })}
-                >
-                  {OUTPUT_FORMATS.map((format) => (
-                    <option key={format} value={format}>
-                      {format}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button className="ghost danger icon-only" title="Remove field" onClick={() => props.onRemoveField(index)}>
-                <Trash2 size={16} />
+      {toolsOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel schema-tools-modal" role="dialog" aria-modal="true" aria-label="Schema tools">
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">Schema tools</p>
+                <h2>Optional tools</h2>
+              </div>
+              <button type="button" className="icon-only secondary" aria-label="Close schema tools" onClick={() => setToolsOpen(false)}>
+                <X size={16} />
               </button>
             </div>
-          </div>
-        ))}
-      </div>
 
-      <div className="action-row">
-        <button className="secondary" onClick={props.onAddField}>
-          <Plus size={16} />
-          Add field
-        </button>
-        <button className="secondary" onClick={() => void props.onSaveSchema()}>
-          <Save size={16} />
-          Save schema
-        </button>
-        <button className="primary" disabled={!props.canExtract} onClick={() => void props.onRunExtraction()}>
-          <Play size={16} />
-          Extract
-        </button>
-      </div>
+            {props.document && (
+              <div className="intel-card">
+                <div>
+                  <span className="eyebrow">Document intelligence</span>
+                  <strong>{props.document.document_type || "Unknown document type"}</strong>
+                </div>
+                <span>{props.document.language || "language unknown"} · {props.document.page_count} page(s)</span>
+                {props.document.recommendation_reasoning && <p>{props.document.recommendation_reasoning}</p>}
+              </div>
+            )}
 
-      <div className="preview-block">
-        <div className="preview-title">
-          <FileJson size={16} />
-          JSON preview
+            {props.systemStatus?.is_mock && (
+              <div className="notice-card">Mock mode is active. AI recommendation and extraction use deterministic demo data.</div>
+            )}
+
+            <div className="tool-section">
+              <h3>Schema actions</h3>
+              <div className="action-row">
+                <button
+                  className="primary"
+                  disabled={!props.document}
+                  onClick={() => {
+                    setToolsOpen(false);
+                    void props.onRecommendSchema();
+                  }}
+                >
+                  <Sparkles size={16} />
+                  AI recommend schema
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    props.onSampleSchema();
+                    setToolsOpen(false);
+                  }}
+                >
+                  <ClipboardList size={16} />
+                  Sample
+                </button>
+                <a className="secondary link-button" href={props.schemaDownloadUrl} download={`${props.schemaName || "schema"}.json`}>
+                  <FileDown size={16} />
+                  Export JSON
+                </a>
+              </div>
+            </div>
+
+            <div className="template-strip">
+              <div className="template-header">
+                <strong>Template library</strong>
+                <button className="secondary compact" onClick={props.onSaveTemplate}>
+                  Pin current
+                </button>
+              </div>
+              <div className="template-list">
+                {props.templates.length ? (
+                  props.templates.slice(0, 4).map((template) => (
+                    <button key={template.id} onClick={() => props.onLoadTemplate(template)}>
+                      <strong>{template.display_name || template.name}</strong>
+                      <span>{template.template_category || "General"} · {template.fields.length} fields</span>
+                    </button>
+                  ))
+                ) : (
+                  <span className="muted">Save a schema as a template to reuse it here.</span>
+                )}
+              </div>
+            </div>
+
+            <div className="tool-section">
+              <h3>Batch upload</h3>
+              <p className="panel-description">
+                Batch는 현재 schema를 여러 문서에 같은 기준으로 적용해 extraction job을 만드는 고급 기능입니다.
+                핵심 KIE 흐름을 가리지 않도록 popup 안에만 둡니다.
+              </p>
+              <label className="batch-upload">
+                <FileSpreadsheet size={16} />
+                <span>Batch upload with this schema</span>
+                <input type="file" accept=".pdf,.png,.jpg,.jpeg,.docx,.pptx" multiple onChange={(event) => props.onBatchUpload(event.target.files)} />
+              </label>
+            </div>
+
+            <details className="import-box">
+              <summary>
+                <FileUp size={16} />
+                Import schema JSON
+              </summary>
+              <textarea
+                value={props.schemaJsonInput}
+                onChange={(event) => props.onSchemaJsonInput(event.target.value)}
+                placeholder="Paste schema JSON here"
+              />
+              <button className="secondary" onClick={props.onImportSchemaJson}>
+                <FileUp size={16} />
+                Import
+              </button>
+            </details>
+
+            <div className="preview-block">
+              <div className="preview-title">
+                <FileJson size={16} />
+                JSON preview
+              </div>
+              <pre>{props.schemaPreview}</pre>
+            </div>
+          </section>
         </div>
-        <pre>{props.schemaPreview}</pre>
-      </div>
+      )}
     </div>
   );
 }
