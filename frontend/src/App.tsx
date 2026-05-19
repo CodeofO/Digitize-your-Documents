@@ -56,6 +56,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 ];
 
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
+type AppMode = "home" | "raw" | "kie";
 type Step = "upload" | "schema" | "review";
 type ReviewFilter = "all" | "warning" | "null" | "changed";
 type HistoryTab = "documents" | "schemas" | "jobs";
@@ -150,6 +151,20 @@ type ExtractionJob = {
   completed_at: string | null;
 };
 
+type RawExtraction = {
+  id: string;
+  filename: string;
+  source_format: string;
+  size_bytes: number;
+  status: string;
+  pdf_url: string | null;
+  html_url: string | null;
+  warnings: string[];
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 const initialFields: SchemaField[] = [
   {
     local_id: "field_1",
@@ -160,6 +175,7 @@ const initialFields: SchemaField[] = [
 ];
 
 export default function App() {
+  const [mode, setMode] = useState<AppMode>("home");
   const [step, setStep] = useState<Step>("upload");
   const [document, setDocument] = useState<UploadedDocument | null>(null);
   const [schemaName, setSchemaName] = useState("document_schema");
@@ -180,12 +196,15 @@ export default function App() {
   const [recentDocuments, setRecentDocuments] = useState<UploadedDocument[]>([]);
   const [recentSchemas, setRecentSchemas] = useState<SavedSchema[]>([]);
   const [recentJobs, setRecentJobs] = useState<ExtractionJob[]>([]);
+  const [rawExtraction, setRawExtraction] = useState<RawExtraction | null>(null);
+  const [recentRawExtractions, setRecentRawExtractions] = useState<RawExtraction[]>([]);
   const [historyTab, setHistoryTab] = useState<HistoryTab>("documents");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void refreshHistory();
+    void refreshRawHistory();
   }, []);
 
   const schemaPayloadFields = useMemo(() => fields.map(stripLocalId), [fields]);
@@ -214,6 +233,9 @@ export default function App() {
     return `${API_BASE}${document.pages[activePage].image_url}`;
   }, [document, activePage]);
 
+  const rawPdfUrl = rawExtraction?.pdf_url ? `${API_BASE}${rawExtraction.pdf_url}` : null;
+  const rawHtmlUrl = rawExtraction?.html_url ? `${API_BASE}${rawExtraction.html_url}` : null;
+
   const result = job?.result ?? null;
   const currentValues = Object.keys(edits).length ? edits : result?.corrected_output?.values ?? result?.validated_output.values ?? {};
 
@@ -234,6 +256,79 @@ export default function App() {
       await loadHistory();
     } catch {
       // History should not block the primary workflow.
+    }
+  }
+
+  async function loadRawHistory() {
+    const items = await api<RawExtraction[]>("/api/raw-extractions?limit=12");
+    setRecentRawExtractions(items);
+    return items;
+  }
+
+  async function refreshRawHistory() {
+    try {
+      await loadRawHistory();
+    } catch {
+      // Raw history should not block the primary workflow.
+    }
+  }
+
+  async function uploadRawFile(file: File) {
+    setBusy("Extracting raw data");
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const extracted = await api<RawExtraction>("/api/raw-extractions", {
+        method: "POST",
+        body: form
+      });
+      setRawExtraction(extracted);
+      setMode("raw");
+      await loadRawHistory();
+      if (extracted.status === "failed") {
+        setError(extracted.error_message || "Raw extraction failed.");
+      }
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function loadRawExtraction(rawId: string) {
+    setBusy("Loading raw extraction");
+    setError(null);
+    try {
+      const loaded = await api<RawExtraction>(`/api/raw-extractions/${rawId}`);
+      setRawExtraction(loaded);
+      setMode("raw");
+      if (loaded.status === "failed") {
+        setError(loaded.error_message || "Raw extraction failed.");
+      }
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function refreshRawWorkspace() {
+    setBusy("Refreshing raw extraction");
+    setError(null);
+    try {
+      await loadRawHistory();
+      if (rawExtraction) {
+        const refreshed = await api<RawExtraction>(`/api/raw-extractions/${rawExtraction.id}`);
+        setRawExtraction(refreshed);
+        if (refreshed.status === "failed") {
+          setError(refreshed.error_message || "Raw extraction failed.");
+        }
+      }
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -602,36 +697,68 @@ export default function App() {
     window.addEventListener("pointerup", onUp);
   }
 
+  const title =
+    mode === "home" ? "Digitize Your Document" : mode === "raw" ? "Raw Data Extractor" : "KIE MVP Workspace";
+
   return (
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">Key Information Extractor</p>
-          <h1>KIE MVP Workspace</h1>
+          <p className="eyebrow">Digitize Your Document</p>
+          <h1>{title}</h1>
         </div>
         <div className="status-strip">
-          <StepPill label="Upload" active={step === "upload"} done={Boolean(document)} />
-          <StepPill label="Schema" active={step === "schema"} done={Boolean(schema) && !schemaDirty} />
-          <StepPill label="Review" active={step === "review"} done={Boolean(result)} />
-          <button
-            type="button"
-            className="secondary compact"
-            disabled={Boolean(busy)}
-            onClick={() => void refreshWorkspace()}
-            title="Refresh workspace and recent history"
-          >
-            <RefreshCw size={16} className={busy === "Refreshing workspace" ? "spin" : ""} />
-            Refresh
-          </button>
+          {mode !== "home" && (
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={() => {
+                setMode("home");
+                setError(null);
+              }}
+            >
+              <ChevronLeft size={16} />
+              Home
+            </button>
+          )}
+          {mode === "kie" && (
+            <>
+              <StepPill label="Upload" active={step === "upload"} done={Boolean(document)} />
+              <StepPill label="Schema" active={step === "schema"} done={Boolean(schema) && !schemaDirty} />
+              <StepPill label="Review" active={step === "review"} done={Boolean(result)} />
+              <button
+                type="button"
+                className="secondary compact"
+                disabled={Boolean(busy)}
+                onClick={() => void refreshWorkspace()}
+                title="Refresh workspace and recent history"
+              >
+                <RefreshCw size={16} className={busy === "Refreshing workspace" ? "spin" : ""} />
+                Refresh
+              </button>
+            </>
+          )}
+          {mode === "raw" && (
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={Boolean(busy)}
+              onClick={() => void refreshRawWorkspace()}
+              title="Refresh raw extraction and recent history"
+            >
+              <RefreshCw size={16} className={busy === "Refreshing raw extraction" ? "spin" : ""} />
+              Refresh
+            </button>
+          )}
           <div className="help-trigger">
             <button type="button" className="help-button" aria-label="Usage guide">
               <CircleHelp size={18} />
             </button>
             <div className="help-panel" role="tooltip">
               <strong>Usage</strong>
-              <span>Upload a document, then define or ask AI to recommend a schema.</span>
-              <span>Save schema drafts before extraction. Existing schemas save as new versions.</span>
-              <span>Review warnings, nulls, edits, evidence, and page references before export.</span>
+              <span>Select a digitization tool from Home.</span>
+              <span>Raw Data Extractor converts Office/PDF files to PDF preview plus extracted HTML.</span>
+              <span>KIE extracts schema-defined fields from document images.</span>
             </div>
           </div>
         </div>
@@ -645,103 +772,285 @@ export default function App() {
         </div>
       )}
 
-      <main
-        className="workspace"
-        style={{ gridTemplateColumns: `minmax(320px, ${leftPanePercent}%) 12px minmax(380px, 1fr)` }}
-      >
-        <section className="document-pane">
-          {!document ? (
-            <label className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
-              <UploadCloud size={32} />
-              <strong>Upload a document</strong>
-              <span>PDF, PNG, JPG, or JPEG</span>
-              <input type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={onFileChange} />
-            </label>
-          ) : (
-            <DocumentViewer
-              document={document}
-              activePage={activePage}
-              activeImageUrl={activeImageUrl}
-              zoom={zoom}
-              zoomMode={zoomMode}
-              rotation={rotation}
-              onPage={setActivePage}
-              onZoom={setZoom}
-              onZoomMode={setZoomMode}
-              onRotation={setRotation}
-            />
-          )}
-        </section>
-
-        <button
-          className="splitter"
-          type="button"
-          title="Resize panes"
-          aria-label="Resize panes"
-          onPointerDown={startResize}
+      {mode === "home" ? (
+        <HomeScreen onRaw={() => setMode("raw")} onKie={() => setMode("kie")} />
+      ) : mode === "raw" ? (
+        <RawWorkspace
+          rawExtraction={rawExtraction}
+          recentRawExtractions={recentRawExtractions}
+          pdfUrl={rawPdfUrl}
+          htmlUrl={rawHtmlUrl}
+          leftPanePercent={leftPanePercent}
+          busy={busy}
+          onUpload={(file) => void uploadRawFile(file)}
+          onLoad={(id) => void loadRawExtraction(id)}
+          onResize={startResize}
+        />
+      ) : (
+        <main
+          className="workspace"
+          style={{ gridTemplateColumns: `minmax(320px, ${leftPanePercent}%) 12px minmax(380px, 1fr)` }}
         >
-          <GripVertical size={18} />
-        </button>
+          <section className="document-pane">
+            {!document ? (
+              <label className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
+                <UploadCloud size={32} />
+                <strong>Upload a document</strong>
+                <span>PDF, PNG, JPG, or JPEG</span>
+                <input type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={onFileChange} />
+              </label>
+            ) : (
+              <DocumentViewer
+                document={document}
+                activePage={activePage}
+                activeImageUrl={activeImageUrl}
+                zoom={zoom}
+                zoomMode={zoomMode}
+                rotation={rotation}
+                onPage={setActivePage}
+                onZoom={setZoom}
+                onZoomMode={setZoomMode}
+                onRotation={setRotation}
+              />
+            )}
+          </section>
 
-        <aside className="side-pane">
-          <HistoryPanel
-            activeTab={historyTab}
-            documents={recentDocuments}
-            schemas={recentSchemas}
-            jobs={recentJobs}
-            onTab={setHistoryTab}
-            onLoadDocument={(id) => void loadDocument(id)}
-            onLoadSchema={(id) => void loadSchema(id)}
-            onLoadJob={(id) => void loadJob(id)}
-          />
+          <button
+            className="splitter"
+            type="button"
+            title="Resize panes"
+            aria-label="Resize panes"
+            onPointerDown={startResize}
+          >
+            <GripVertical size={18} />
+          </button>
 
-          {!document ? (
-            <UploadNotes onSampleSchema={applySampleSchema} />
-          ) : step !== "review" ? (
-            <SchemaBuilder
-              schemaName={schemaName}
-              schemaDescription={schemaDescription}
-              fields={fields}
-              schemaPreview={schemaPreview}
-              schemaDownloadUrl={schemaDownloadUrl}
-              schemaJsonInput={schemaJsonInput}
-              savedSchema={schema}
-              schemaDirty={schemaDirty}
-              onSchemaName={(value) => {
-                setSchemaName(value);
-                setSchemaDirty(true);
-              }}
-              onSchemaDescription={(value) => {
-                setSchemaDescription(value);
-                setSchemaDirty(true);
-              }}
-              onSchemaJsonInput={setSchemaJsonInput}
-              onImportSchemaJson={importSchemaJson}
-              onUpdateField={updateField}
-              onAddField={addField}
-              onRemoveField={removeField}
-              onSaveSchema={saveSchema}
-              onRunExtraction={runExtraction}
-              onRecommendSchema={recommendSchema}
-              onSampleSchema={applySampleSchema}
-              canExtract={Boolean(document)}
+          <aside className="side-pane">
+            <HistoryPanel
+              activeTab={historyTab}
+              documents={recentDocuments}
+              schemas={recentSchemas}
+              jobs={recentJobs}
+              onTab={setHistoryTab}
+              onLoadDocument={(id) => void loadDocument(id)}
+              onLoadSchema={(id) => void loadSchema(id)}
+              onLoadJob={(id) => void loadJob(id)}
             />
-          ) : (
-            <ReviewPanel
-              fields={fields}
-              result={result}
-              values={currentValues}
-              editedKeys={editedKeys}
-              filter={reviewFilter}
-              onFilter={setReviewFilter}
-              onEdit={updateEdit}
-              onSaveCorrections={saveCorrections}
-              onGoToPage={goToPage}
-            />
-          )}
-        </aside>
-      </main>
+
+            {!document ? (
+              <UploadNotes onSampleSchema={applySampleSchema} />
+            ) : step !== "review" ? (
+              <SchemaBuilder
+                schemaName={schemaName}
+                schemaDescription={schemaDescription}
+                fields={fields}
+                schemaPreview={schemaPreview}
+                schemaDownloadUrl={schemaDownloadUrl}
+                schemaJsonInput={schemaJsonInput}
+                savedSchema={schema}
+                schemaDirty={schemaDirty}
+                onSchemaName={(value) => {
+                  setSchemaName(value);
+                  setSchemaDirty(true);
+                }}
+                onSchemaDescription={(value) => {
+                  setSchemaDescription(value);
+                  setSchemaDirty(true);
+                }}
+                onSchemaJsonInput={setSchemaJsonInput}
+                onImportSchemaJson={importSchemaJson}
+                onUpdateField={updateField}
+                onAddField={addField}
+                onRemoveField={removeField}
+                onSaveSchema={saveSchema}
+                onRunExtraction={runExtraction}
+                onRecommendSchema={recommendSchema}
+                onSampleSchema={applySampleSchema}
+                canExtract={Boolean(document)}
+              />
+            ) : (
+              <ReviewPanel
+                fields={fields}
+                result={result}
+                values={currentValues}
+                editedKeys={editedKeys}
+                filter={reviewFilter}
+                onFilter={setReviewFilter}
+                onEdit={updateEdit}
+                onSaveCorrections={saveCorrections}
+                onGoToPage={goToPage}
+              />
+            )}
+          </aside>
+        </main>
+      )}
     </div>
+  );
+}
+
+function HomeScreen(props: { onRaw: () => void; onKie: () => void }) {
+  return (
+    <main className="home-screen">
+      <section className="home-intro">
+        <p className="eyebrow">Workspace</p>
+        <h2>Digitize Your Document</h2>
+        <p>Choose a document digitization workflow.</p>
+      </section>
+      <section className="feature-grid">
+        <button className="feature-card active-feature" onClick={props.onRaw}>
+          <FileUp size={24} />
+          <strong>Raw Data Extractor</strong>
+          <span>Convert DOCX, XLSX, PPTX, or PDF into a PDF preview and extracted HTML.</span>
+        </button>
+        <button className="feature-card active-feature" onClick={props.onKie}>
+          <Sparkles size={24} />
+          <strong>Key Information Extractor</strong>
+          <span>Upload document images and extract values matching a user-defined schema.</span>
+        </button>
+        <button className="feature-card" disabled>
+          <FileJson size={24} />
+          <strong>OCR</strong>
+          <span>Coming soon</span>
+        </button>
+        <button className="feature-card" disabled>
+          <ClipboardList size={24} />
+          <strong>Intelligence Parse</strong>
+          <span>Coming soon</span>
+        </button>
+      </section>
+    </main>
+  );
+}
+
+function RawWorkspace(props: {
+  rawExtraction: RawExtraction | null;
+  recentRawExtractions: RawExtraction[];
+  pdfUrl: string | null;
+  htmlUrl: string | null;
+  leftPanePercent: number;
+  busy: string | null;
+  onUpload: (file: File) => void;
+  onLoad: (id: string) => void;
+  onResize: (event: PointerEvent<HTMLButtonElement>) => void;
+}) {
+  function onDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    const file = event.dataTransfer.files[0];
+    if (file) props.onUpload(file);
+  }
+
+  function onFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (file) props.onUpload(file);
+  }
+
+  return (
+    <main
+      className="workspace raw-workspace"
+      style={{ gridTemplateColumns: `minmax(320px, ${props.leftPanePercent}%) 12px minmax(380px, 1fr)` }}
+    >
+      <section className="document-pane">
+        <div className="pane-header">
+          <div>
+            <p className="eyebrow">Original</p>
+            <h2>{props.rawExtraction?.filename || "Upload a raw document"}</h2>
+          </div>
+          {props.rawExtraction && <span className={`status-badge ${props.rawExtraction.status}`}>{props.rawExtraction.status}</span>}
+        </div>
+        {props.pdfUrl ? (
+          <iframe className="preview-frame" src={props.pdfUrl} title="PDF preview" />
+        ) : (
+          <label className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
+            <UploadCloud size={32} />
+            <strong>Upload a raw document</strong>
+            <span>DOCX, XLSX, PPTX, or PDF</span>
+            <input type="file" accept=".docx,.xlsx,.pptx,.pdf" disabled={Boolean(props.busy)} onChange={onFileChange} />
+          </label>
+        )}
+      </section>
+
+      <button
+        className="splitter"
+        type="button"
+        title="Resize panes"
+        aria-label="Resize panes"
+        onPointerDown={props.onResize}
+      >
+        <GripVertical size={18} />
+      </button>
+
+      <aside className="side-pane raw-side">
+        <div className="pane-header">
+          <div>
+            <p className="eyebrow">HTML</p>
+            <h2>Extracted content</h2>
+          </div>
+          <label className="secondary compact file-action">
+            <FileUp size={16} />
+            Upload
+            <input type="file" accept=".docx,.xlsx,.pptx,.pdf" disabled={Boolean(props.busy)} onChange={onFileChange} />
+          </label>
+        </div>
+
+        {props.rawExtraction && (
+          <div className="raw-meta">
+            <span>{props.rawExtraction.source_format.toUpperCase()}</span>
+            <span>{formatBytes(props.rawExtraction.size_bytes)}</span>
+            <span>{formatDate(props.rawExtraction.updated_at)}</span>
+          </div>
+        )}
+        {props.rawExtraction?.warnings.length ? (
+          <div className="warning-list">{props.rawExtraction.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>
+        ) : null}
+
+        {props.htmlUrl ? (
+          <>
+            <div className="action-row">
+              <a className="secondary link-button" href={props.htmlUrl} target="_blank">
+                <FileJson size={16} />
+                Open HTML
+              </a>
+              <a className="secondary link-button" href={props.htmlUrl} download={`${props.rawExtraction?.filename || "content"}.html`}>
+                <Download size={16} />
+                HTML
+              </a>
+              {props.pdfUrl && (
+                <a className="secondary link-button" href={props.pdfUrl} target="_blank">
+                  <FileDown size={16} />
+                  PDF
+                </a>
+              )}
+            </div>
+            <iframe className="preview-frame html-frame" src={props.htmlUrl} title="Extracted HTML preview" sandbox="" />
+          </>
+        ) : (
+          <div className="empty-state">Upload a document to render extracted HTML.</div>
+        )}
+
+        <section className="history-panel raw-history">
+          <div className="history-header">
+            <div className="preview-title inline-title">
+              <History size={16} />
+              Recent raw files
+            </div>
+          </div>
+          <div className="history-list">
+            {props.recentRawExtractions.length ? (
+              props.recentRawExtractions.map((item) => (
+                <button key={item.id} onClick={() => props.onLoad(item.id)}>
+                  <strong>{item.filename}</strong>
+                  <span>
+                    {item.status} · {item.source_format.toUpperCase()} · {formatDate(item.created_at)}
+                  </span>
+                </button>
+              ))
+            ) : (
+              <span className="muted">No raw extractions yet.</span>
+            )}
+          </div>
+        </section>
+      </aside>
+    </main>
   );
 }
 
@@ -1283,6 +1592,18 @@ function formatDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleDateString();
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function formatConfidence(value: number | null | undefined) {

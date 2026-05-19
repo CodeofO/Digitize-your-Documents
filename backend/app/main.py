@@ -13,15 +13,18 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.database import get_db, init_db
+from app.config import get_settings
 from app.document_processor import DocumentProcessingError, rasterize_document, save_upload_file
 from app.extraction import result_to_dict, run_extraction_job
-from app.models import Document, DocumentPage, ExtractionJob, ExtractionResult, Schema, SchemaVersion
+from app.models import Document, DocumentPage, ExtractionJob, ExtractionResult, RawExtraction, Schema, SchemaVersion
+from app.raw_extractor import RawExtractionError, create_raw_outputs, save_raw_upload, validate_raw_upload
 from app.schemas import (
     DocumentPageRead,
     DocumentRead,
     ExtractionJobCreate,
     ExtractionJobRead,
     ExtractionResultPatch,
+    RawExtractionRead,
     SchemaCreate,
     SchemaRecommendationRead,
     SchemaRecommendationRequest,
@@ -56,6 +59,98 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/system/status")
+def system_status() -> dict[str, Any]:
+    settings = get_settings()
+    provider = settings.vlm_provider.lower()
+    return {
+        "app_env": settings.app_env,
+        "vlm_provider": provider,
+        "vlm_model_name": settings.resolved_vlm_model_name,
+        "has_vlm_credentials": bool(settings.resolved_vlm_api_key and settings.resolved_vlm_model_name),
+        "is_mock": provider == "mock",
+    }
+
+
+@app.post("/api/raw-extractions", response_model=RawExtractionRead)
+def upload_raw_extraction(file: UploadFile = File(...), db: Session = Depends(get_db)) -> RawExtractionRead:
+    try:
+        source_format = validate_raw_upload(file.filename or "")[1:]
+    except RawExtractionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    raw = RawExtraction(
+        filename=file.filename or "uploaded_document",
+        source_format=source_format,
+        size_bytes=0,
+        status="processing",
+    )
+    db.add(raw)
+    db.flush()
+
+    try:
+        filename, source_format, original_path, size_bytes = save_raw_upload(file, raw.id)
+        raw.filename = filename
+        raw.source_format = source_format
+        raw.storage_path = str(original_path)
+        raw.size_bytes = size_bytes
+        pdf_path, html_path, warnings = create_raw_outputs(original_path, source_format)
+        raw.pdf_path = str(pdf_path)
+        raw.html_path = str(html_path)
+        raw.warnings = json.dumps(warnings, ensure_ascii=False)
+        raw.status = "completed"
+        raw.error_message = None
+    except Exception as exc:
+        raw.status = "failed"
+        raw.error_message = str(exc)
+    db.commit()
+    db.refresh(raw)
+    return _raw_extraction_read(raw)
+
+
+@app.get("/api/raw-extractions", response_model=list[RawExtractionRead])
+def list_raw_extractions(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[RawExtractionRead]:
+    rows = db.query(RawExtraction).order_by(RawExtraction.created_at.desc()).limit(limit).all()
+    return [_raw_extraction_read(row) for row in rows]
+
+
+@app.get("/api/raw-extractions/{raw_id}/pdf")
+def get_raw_extraction_pdf(raw_id: str, db: Session = Depends(get_db)) -> FileResponse:
+    raw = db.get(RawExtraction, raw_id)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Raw extraction not found")
+    if not raw.pdf_path:
+        raise HTTPException(status_code=404, detail="Raw extraction PDF preview is not available")
+    path = Path(raw.pdf_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Raw extraction PDF preview is missing")
+    return FileResponse(path, media_type="application/pdf")
+
+
+@app.get("/api/raw-extractions/{raw_id}/html")
+def get_raw_extraction_html(raw_id: str, db: Session = Depends(get_db)) -> FileResponse:
+    raw = db.get(RawExtraction, raw_id)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Raw extraction not found")
+    if not raw.html_path:
+        raise HTTPException(status_code=404, detail="Raw extraction HTML is not available")
+    path = Path(raw.html_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Raw extraction HTML is missing")
+    return FileResponse(path, media_type="text/html")
+
+
+@app.get("/api/raw-extractions/{raw_id}", response_model=RawExtractionRead)
+def get_raw_extraction(raw_id: str, db: Session = Depends(get_db)) -> RawExtractionRead:
+    raw = db.get(RawExtraction, raw_id)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Raw extraction not found")
+    return _raw_extraction_read(raw)
 
 
 @app.post("/api/documents", response_model=DocumentRead)
@@ -340,6 +435,22 @@ def _document_read(document: Document) -> DocumentRead:
             )
             for page in document.pages
         ],
+    )
+
+
+def _raw_extraction_read(raw: RawExtraction) -> RawExtractionRead:
+    return RawExtractionRead(
+        id=raw.id,
+        filename=raw.filename,
+        source_format=raw.source_format,
+        size_bytes=raw.size_bytes,
+        status=raw.status,
+        pdf_url=f"/api/raw-extractions/{raw.id}/pdf" if raw.pdf_path else None,
+        html_url=f"/api/raw-extractions/{raw.id}/html" if raw.html_path else None,
+        warnings=json.loads(raw.warnings or "[]"),
+        error_message=raw.error_message,
+        created_at=raw.created_at,
+        updated_at=raw.updated_at,
     )
 
 

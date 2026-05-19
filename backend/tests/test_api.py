@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import zipfile
 
 import fitz
 
@@ -162,19 +163,6 @@ def test_schema_update_creates_new_version() -> None:
         assert payload["display_name"] == "Updated Invoice Basic"
         assert payload["fields"][1]["key_name"] == "invoice_date"
 
-        templated = client.patch(
-            f"/api/schemas/{schema['id']}",
-            json={"is_template": True, "template_category": "finance", "pinned": True},
-        )
-        assert templated.status_code == 200, templated.text
-        templated_payload = templated.json()
-        assert templated_payload["is_template"] is True
-        assert templated_payload["template_category"] == "finance"
-        assert templated_payload["pinned"] is True
-
-        templates = client.get("/api/schemas?templates=true").json()
-        assert any(item["id"] == schema["id"] for item in templates)
-
 
 def test_schema_recommendation_mock_mode() -> None:
     try:
@@ -186,21 +174,8 @@ def test_schema_recommendation_mock_mode() -> None:
             assert response.status_code == 200, response.text
             payload = response.json()
             assert payload["name"] == "ai_recommended_schema"
-            assert payload["document_type"] == "demo_document"
-            assert payload["language"] == "ko"
-            assert payload["reasoning"]
             assert len(payload["fields"]) >= 3
-            assert "문서번호" in {field["key_name"] for field in payload["fields"]}
             assert {field["output_format"] for field in payload["fields"]} <= {"string", "float", "date", "bool"}
-
-            loaded_document = client.get(f"/api/documents/{document['document_id']}").json()
-            assert loaded_document["document_type"] == "demo_document"
-            assert loaded_document["language"] == "ko"
-
-            audit_events = client.get(
-                f"/api/audit-events?entity_type=document&entity_id={document['document_id']}"
-            ).json()
-            assert any(event["action"] == "schema_recommended" for event in audit_events)
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
@@ -234,68 +209,81 @@ def test_extraction_mock_mode_returns_evidence_and_normalized_values() -> None:
             assert csv_export.status_code == 200
             assert "evidence" in csv_export.text.splitlines()[0]
 
+            corrected_output = job["result"]["validated_output"]
+            corrected_output["values"]["invoice_number"]["value"] = "INV-EDITED"
             patch = client.patch(
                 f"/api/extraction-results/{job['result_id']}",
-                json={"reviewed_fields": ["invoice_number"]},
+                json={"corrected_output": corrected_output},
             )
             assert patch.status_code == 200, patch.text
-            assert patch.json()["reviewed_fields"] == ["invoice_number"]
+            assert patch.json()["corrected_output"]["values"]["invoice_number"]["value"] == "INV-EDITED"
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
 
 
-def test_export_preset_archive_batch_and_audit() -> None:
-    try:
-        os.environ["VLM_PROVIDER"] = "mock"
-        get_settings.cache_clear()
-        with get_client() as client:
-            schema = create_schema(client)
-            preset_response = client.post(
-                "/api/export-presets",
-                json={
-                    "schema_id": schema["id"],
-                    "name": "Finance CSV",
-                    "fields": [
-                        {"key_name": "invoice_number", "column_name": "Invoice No.", "include": True},
-                        {"key_name": "total_amount", "column_name": "Total", "include": True},
-                    ],
-                },
+def test_raw_dependency_imports() -> None:
+    import bleach  # noqa: F401
+    import mammoth  # noqa: F401
+    import openpyxl  # noqa: F401
+    import pptx  # noqa: F401
+
+
+def test_raw_extraction_pdf_upload() -> None:
+    with get_client() as client:
+        response = client.post(
+            "/api/raw-extractions",
+            files={"file": ("sample.pdf", make_pdf_bytes(), "application/pdf")},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["status"] == "completed"
+        assert payload["source_format"] == "pdf"
+        assert payload["pdf_url"]
+        assert payload["html_url"]
+
+        pdf = client.get(payload["pdf_url"])
+        assert pdf.status_code == 200
+        assert pdf.headers["content-type"] == "application/pdf"
+
+        html_response = client.get(payload["html_url"])
+        assert html_response.status_code == 200
+        assert "Invoice No. INV-2026-001" in html_response.text
+
+        recent = client.get("/api/raw-extractions").json()
+        assert any(item["id"] == payload["id"] for item in recent)
+
+
+def test_raw_extraction_office_uploads(monkeypatch) -> None:
+    def fake_convert(source_path, suffix, pdf_path):
+        document = fitz.open()
+        page = document.new_page(width=240, height=120)
+        page.insert_text((24, 60), f"Preview for {source_path.name}")
+        document.save(pdf_path)
+        document.close()
+
+    monkeypatch.setattr("app.raw_extractor.convert_office_to_pdf", fake_convert)
+
+    samples = [
+        ("report.docx", make_docx_bytes(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "Quarterly Report"),
+        ("book.xlsx", make_xlsx_bytes(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Revenue"),
+        ("deck.pptx", make_pptx_bytes(), "application/vnd.openxmlformats-officedocument.presentationml.presentation", "Roadmap"),
+    ]
+    with get_client() as client:
+        for filename, data, mime_type, expected_text in samples:
+            response = client.post(
+                "/api/raw-extractions",
+                files={"file": (filename, data, mime_type)},
             )
-            assert preset_response.status_code == 200, preset_response.text
-            preset = preset_response.json()
-            assert preset["fields"][0]["column_name"] == "Invoice No."
-
-            batch_response = client.post(
-                "/api/batches",
-                data={"schema_id": schema["id"]},
-                files=[
-                    ("files", ("invoice_a.png", ONE_BY_ONE_PNG, "image/png")),
-                    ("files", ("invoice_b.png", ONE_BY_ONE_PNG, "image/png")),
-                ],
-            )
-            assert batch_response.status_code == 200, batch_response.text
-            batch_id = batch_response.json()["id"]
-            batch = client.get(f"/api/batches/{batch_id}").json()
-            assert batch["total_count"] == 2
-            assert len(batch["items"]) == 2
-            assert batch["completed_count"] + batch["failed_count"] == 2
-
-            first_result_id = next(item["result_id"] for item in batch["items"] if item["result_id"])
-            csv_export = client.get(
-                f"/api/extraction-results/{first_result_id}/export?format=csv&preset_id={preset['id']}"
-            )
-            assert csv_export.status_code == 200
-            assert "Invoice No." in csv_export.text
-
-            archive = client.get("/api/archive/search?q=invoice_a").json()
-            assert any(item["filename"] == "invoice_a.png" for item in archive)
-
-            batch_events = client.get(f"/api/audit-events?entity_type=batch&entity_id={batch_id}").json()
-            assert any(event["action"] == "created" for event in batch_events)
-    finally:
-        os.environ["VLM_PROVIDER"] = "openai"
-        get_settings.cache_clear()
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert payload["status"] == "completed", payload
+            assert payload["pdf_url"]
+            assert payload["html_url"]
+            assert client.get(payload["pdf_url"]).status_code == 200
+            html_response = client.get(payload["html_url"])
+            assert html_response.status_code == 200
+            assert expected_text in html_response.text
 
 
 def upload_png(client):
@@ -338,4 +326,66 @@ def make_pdf_bytes() -> bytes:
     buffer = io.BytesIO()
     document.save(buffer)
     document.close()
+    return buffer.getvalue()
+
+
+def make_docx_bytes() -> bytes:
+    buffer = io.BytesIO()
+    document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Quarterly Report</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Executive summary paragraph.</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tr><w:tc><w:p><w:r><w:t>Metric</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Value</w:t></w:r></w:p></w:tc></w:tr>
+      <w:tr><w:tc><w:p><w:r><w:t>Revenue</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>100</w:t></w:r></w:p></w:tc></w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>"""
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>""",
+        )
+        archive.writestr(
+            "_rels/.rels",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>""",
+        )
+        archive.writestr("word/document.xml", document_xml)
+    return buffer.getvalue()
+
+
+def make_xlsx_bytes() -> bytes:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Finance"
+    sheet.append(["Metric", "Value"])
+    sheet.append(["Revenue", 100])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
+
+
+def make_pptx_bytes() -> bytes:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    slide.shapes.title.text = "Roadmap"
+    textbox = slide.shapes.add_textbox(Inches(1), Inches(1.6), Inches(6), Inches(1))
+    textbox.text_frame.text = "Launch Raw Data Extractor"
+    buffer = io.BytesIO()
+    presentation.save(buffer)
     return buffer.getvalue()

@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     app_env: str = "local"
     database_url: str | None = None
     document_storage_dir: str | None = None
+    raw_storage_dir: str | None = None
+    libreoffice_path: str | None = None
 
     vlm_provider: str = "openai"
     vlm_api_key: str | None = None
@@ -39,6 +41,14 @@ class Settings(BaseSettings):
     @property
     def resolved_storage_dir(self) -> Path:
         raw = self.document_storage_dir or str(BACKEND_DIR / "storage" / "documents")
+        path = Path(raw)
+        if not path.is_absolute():
+            path = BACKEND_DIR / path
+        return path
+
+    @property
+    def resolved_raw_storage_dir(self) -> Path:
+        raw = self.raw_storage_dir or str(BACKEND_DIR / "storage" / "raw")
         path = Path(raw)
         if not path.is_absolute():
             path = BACKEND_DIR / path

@@ -121,3 +121,25 @@ class ExtractionResult(Base):
     )
 
     job: Mapped[ExtractionJob] = relationship(back_populates="result")
+
+
+class RawExtraction(Base):
+    __tablename__ = "raw_extractions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("raw"))
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    source_format: Mapped[str] = mapped_column(String, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_path: Mapped[str] = mapped_column(String, nullable=False, default="")
+    pdf_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    html_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="processing")
+    warnings: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

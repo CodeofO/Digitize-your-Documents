@@ -221,6 +221,59 @@ textarea {
   overflow: hidden;
 }
 
+.home-screen {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 22px;
+  margin-top: 22px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.home-intro h2 {
+  font-size: 34px;
+  letter-spacing: 0;
+  margin: 0 0 8px;
+}
+
+.home-intro p:last-child {
+  color: #4f5d56;
+  margin: 0;
+}
+
+.feature-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+}
+
+.feature-card {
+  align-items: flex-start;
+  background: #ffffff;
+  border-color: #d7ded8;
+  flex-direction: column;
+  justify-content: flex-start;
+  min-height: 180px;
+  padding: 18px;
+  text-align: left;
+}
+
+.feature-card strong {
+  color: #1d2529;
+  font-size: 18px;
+}
+
+.feature-card span {
+  color: #58655f;
+  line-height: 1.45;
+}
+
+.feature-card.active-feature:hover {
+  border-color: #157f78;
+  box-shadow: 0 10px 28px rgba(21, 127, 120, 0.12);
+}
+
 .document-pane,
 .side-pane {
   background: #ffffff;
@@ -526,6 +579,75 @@ textarea {
   color: #755500;
 }
 
+.status-badge.processing {
+  background: #eaf5f3;
+  color: #0f625e;
+}
+
+.status-badge.failed {
+  background: #fff1e8;
+  color: #9a3412;
+}
+
+.preview-frame {
+  background: #ffffff;
+  border: 0;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.raw-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.raw-side .pane-header {
+  align-items: center;
+}
+
+.file-action {
+  cursor: pointer;
+}
+
+.file-action input {
+  display: none;
+}
+
+.raw-meta,
+.warning-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.raw-meta span,
+.warning-list span {
+  background: #eef3ef;
+  border: 1px solid #d8e0da;
+  border-radius: 999px;
+  color: #44514b;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.warning-list span {
+  background: #fff1e8;
+  border-color: #f2b58e;
+  color: #7f3510;
+}
+
+.html-frame {
+  border: 1px solid #d9e0da;
+  border-radius: 8px;
+  min-height: 420px;
+}
+
+.raw-history {
+  margin-bottom: 0;
+}
+
 .field-stack,
 .field-row label,
 .field-grid label {
@@ -777,6 +899,10 @@ pre {
     min-height: 520px;
   }
 
+  .feature-grid {
+    grid-template-columns: repeat(2, minmax(160px, 1fr));
+  }
+
   .image-stage,
   .upload-zone {
     min-height: 460px;
@@ -817,5 +943,9 @@ pre {
 
   .topbar h1 {
     font-size: 23px;
+  }
+
+  .feature-grid {
+    grid-template-columns: 1fr;
   }
 }

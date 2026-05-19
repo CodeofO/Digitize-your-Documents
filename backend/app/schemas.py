@@ -103,6 +103,20 @@ class DocumentRead(BaseModel):
     created_at: datetime
 
 
+class RawExtractionRead(BaseModel):
+    id: str
+    filename: str
+    source_format: str
+    size_bytes: int
+    status: str
+    pdf_url: str | None
+    html_url: str | None
+    warnings: list[str]
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SchemaRecommendationRequest(BaseModel):
     document_id: str
 
