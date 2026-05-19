@@ -135,6 +135,35 @@ def test_pdf_upload() -> None:
         assert document["pages"][0]["height"] > 0
 
 
+def test_office_upload_for_key_information_extractor(monkeypatch) -> None:
+    def fake_convert(source_path, suffix, pdf_path):
+        document = fitz.open()
+        page = document.new_page(width=240, height=120)
+        page.insert_text((24, 60), f"Converted {source_path.name}")
+        document.save(pdf_path)
+        document.close()
+
+    monkeypatch.setattr("app.document_processor.convert_office_to_pdf", fake_convert)
+
+    samples = [
+        ("report.docx", make_docx_bytes(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        ("deck.pptx", make_pptx_bytes(), "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    ]
+    with get_client() as client:
+        for filename, data, mime_type in samples:
+            response = client.post(
+                "/api/documents",
+                files={"file": (filename, data, mime_type)},
+            )
+            assert response.status_code == 200, response.text
+            document = response.json()
+            assert document["filename"] == filename
+            assert document["page_count"] == 1
+            image = client.get(document["pages"][0]["image_url"])
+            assert image.status_code == 200
+            assert image.headers["content-type"] == "image/png"
+
+
 def test_extraction_fails_without_vlm_credentials() -> None:
     with get_client() as client:
         document = upload_png(client)

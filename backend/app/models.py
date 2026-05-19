@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -21,6 +21,10 @@ class Document(Base):
     page_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     storage_path: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="ready")
+    document_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    language: Mapped[str | None] = mapped_column(String, nullable=True)
+    ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recommendation_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     pages: Mapped[list["DocumentPage"]] = relationship(
@@ -52,6 +56,9 @@ class Schema(Base):
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_template: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    template_category: Mapped[str | None] = mapped_column(String, nullable=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -112,6 +119,7 @@ class ExtractionResult(Base):
     validated_output: Mapped[str] = mapped_column(Text, nullable=False)
     corrected_output: Mapped[str | None] = mapped_column(Text, nullable=True)
     validation_warnings: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    reviewed_fields: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -143,3 +151,67 @@ class RawExtraction(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class Batch(Base):
+    __tablename__ = "batches"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("batch"))
+    schema_id: Mapped[str] = mapped_column(ForeignKey("schemas.id"), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    schema: Mapped[Schema] = relationship()
+    items: Mapped[list["BatchItem"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="BatchItem.created_at",
+    )
+
+
+class BatchItem(Base):
+    __tablename__ = "batch_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("batch_item"))
+    batch_id: Mapped[str] = mapped_column(ForeignKey("batches.id"), nullable=False)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    job_id: Mapped[str] = mapped_column(ForeignKey("extraction_jobs.id"), nullable=False)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    batch: Mapped[Batch] = relationship(back_populates="items")
+    document: Mapped[Document] = relationship()
+    job: Mapped[ExtractionJob] = relationship()
+
+
+class ExportPreset(Base):
+    __tablename__ = "export_presets"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("preset"))
+    schema_id: Mapped[str | None] = mapped_column(ForeignKey("schemas.id"), nullable=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    schema: Mapped[Schema | None] = relationship()
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("audit"))
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

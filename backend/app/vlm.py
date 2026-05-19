@@ -16,7 +16,10 @@ Return data that matches the requested structured output schema."""
 
 SCHEMA_RECOMMENDATION_PROMPT = """You are a document schema design assistant.
 Look at the uploaded document images and recommend practical key information fields for extraction.
-Return concise key names in snake_case.
+Return concise key names in the document's primary language.
+For Korean documents, key_name values should be natural Korean labels such as 성명, 계급, 군번, 소집기간, 훈련장소.
+For English documents, key_name values should be concise English snake_case labels.
+Do not add a separate field display label; key_name is what users will see in the UI and exports.
 Each field description must explain where or how to find the value in the document.
 Use only these output formats: string, float, date, bool."""
 
@@ -70,7 +73,8 @@ def recommend_schema_with_vlm(image_paths: list[str]) -> dict[str, Any]:
 
     prompt = (
         "Recommend 5 to 8 fields that a user is likely to want from this document. "
-        "Prefer visible business-critical fields over generic metadata."
+        "Prefer visible business-critical fields over generic metadata. "
+        "Choose key_name values in the document's primary language."
     )
     content = _build_multimodal_content(prompt, image_paths)
     return _invoke_structured_llm(SCHEMA_RECOMMENDATION_PROMPT, content, _schema_recommendation_output_schema())
@@ -134,23 +138,29 @@ def _schema_recommendation_output_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "key_name": {"type": "string", "description": "snake_case JSON key for the extracted value."},
+            "key_name": {
+                "type": "string",
+                "description": "User-facing key for the extracted value, written in the document's primary language.",
+            },
             "description": {"type": "string", "description": "Field-level instruction for locating the value."},
             "output_format": {"type": "string", "enum": ["string", "float", "date", "bool"]},
         },
         "required": ["key_name", "description", "output_format"],
     }
     return {
-        "title": "SchemaRecommendation",
+        "title": "KeyInformationSchemaRecommendation",
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "name": {"type": "string"},
             "display_name": {"type": "string"},
             "description": {"type": "string"},
+            "document_type": {"type": "string"},
+            "language": {"type": "string"},
+            "reasoning": {"type": "string"},
             "fields": {"type": "array", "minItems": 1, "maxItems": 12, "items": field_schema},
         },
-        "required": ["name", "display_name", "description", "fields"],
+        "required": ["name", "display_name", "description", "document_type", "language", "reasoning", "fields"],
     }
 
 
@@ -205,29 +215,32 @@ def _mock_schema_recommendation() -> dict[str, Any]:
         "name": "ai_recommended_schema",
         "display_name": "AI Recommended Schema",
         "description": "Mock schema recommendation for local demo and UI testing.",
+        "document_type": "demo_document",
+        "language": "ko",
+        "reasoning": "Mock mode returns deterministic Korean field names to exercise the localized schema UI.",
         "fields": [
             {
-                "key_name": "document_number",
+                "key_name": "문서번호",
                 "description": "Primary document, invoice, receipt, or application number visible near the top.",
                 "output_format": "string",
             },
             {
-                "key_name": "document_date",
+                "key_name": "문서일자",
                 "description": "Main issued, submitted, or effective date printed on the document.",
                 "output_format": "date",
             },
             {
-                "key_name": "issuer_name",
+                "key_name": "발급기관",
                 "description": "Organization, bank, vendor, or authority that issued the document.",
                 "output_format": "string",
             },
             {
-                "key_name": "recipient_name",
+                "key_name": "수신자",
                 "description": "Person or organization that the document is addressed to or belongs to.",
                 "output_format": "string",
             },
             {
-                "key_name": "total_amount",
+                "key_name": "금액",
                 "description": "Final total, balance, transaction amount, or payment amount if one is visible.",
                 "output_format": "float",
             },

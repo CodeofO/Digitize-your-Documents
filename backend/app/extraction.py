@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.audit import log_audit_event
 from app.database import SessionLocal
 from app.models import Document, ExtractionJob, ExtractionResult, SchemaVersion
 from app.schemas import FieldDefinition
@@ -67,11 +68,27 @@ def _run_extraction_job(db: Session, job_id: str) -> None:
         job.result_id = result.id
         job.status = "needs_review" if warnings else "completed"
         job.completed_at = datetime.utcnow()
+        log_audit_event(
+            db,
+            entity_type="extraction_job",
+            entity_id=job.id,
+            action=job.status,
+            message="Extraction completed" if job.status == "completed" else "Extraction completed with review warnings",
+            metadata={"result_id": result.id, "warning_count": len(warnings)},
+        )
         db.commit()
     except Exception as exc:
         job.status = "failed"
         job.error_message = str(exc)
         job.completed_at = datetime.utcnow()
+        log_audit_event(
+            db,
+            entity_type="extraction_job",
+            entity_id=job.id,
+            action="failed",
+            message=str(exc),
+            metadata={"document_id": job.document_id, "schema_id": job.schema_id},
+        )
         db.commit()
 
 
@@ -83,6 +100,7 @@ def result_to_dict(result: ExtractionResult) -> dict[str, Any]:
         "validated_output": json.loads(result.validated_output),
         "corrected_output": json.loads(result.corrected_output) if result.corrected_output else None,
         "validation_warnings": json.loads(result.validation_warnings),
+        "reviewed_fields": json.loads(result.reviewed_fields),
         "created_at": result.created_at,
         "updated_at": result.updated_at,
     }

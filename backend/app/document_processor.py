@@ -6,10 +6,12 @@ import fitz
 from fastapi import UploadFile
 
 from app.config import get_settings
+from app.raw_extractor import convert_office_to_pdf
 
 
-ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".docx", ".pptx"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+OFFICE_EXTENSIONS = {".docx", ".pptx"}
 
 
 class DocumentProcessingError(ValueError):
@@ -19,7 +21,7 @@ class DocumentProcessingError(ValueError):
 def validate_upload(filename: str) -> str:
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
-        raise DocumentProcessingError("Only PDF, PNG, JPG, and JPEG files are supported")
+        raise DocumentProcessingError("Only PDF, PNG, JPG, JPEG, DOCX, and PPTX files are supported")
     return suffix
 
 
@@ -51,7 +53,15 @@ def rasterize_document(source_path: Path) -> list[dict[str, int | str]]:
         return _rasterize_pdf(source_path, page_dir)
     if suffix in IMAGE_EXTENSIONS:
         return _rasterize_image(source_path, page_dir)
+    if suffix in OFFICE_EXTENSIONS:
+        return _rasterize_office(source_path, suffix, page_dir)
     raise DocumentProcessingError("Unsupported document type")
+
+
+def _rasterize_office(source_path: Path, suffix: str, page_dir: Path) -> list[dict[str, int | str]]:
+    pdf_path = source_path.parent / "preview.pdf"
+    convert_office_to_pdf(source_path, suffix, pdf_path)
+    return _rasterize_pdf(pdf_path, page_dir)
 
 
 def _rasterize_pdf(source_path: Path, page_dir: Path) -> list[dict[str, int | str]]:

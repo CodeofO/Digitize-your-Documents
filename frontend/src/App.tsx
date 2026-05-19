@@ -1,5 +1,7 @@
+import ChevronDown from "lucide-react/dist/esm/icons/chevron-down.js";
 import ChevronLeft from "lucide-react/dist/esm/icons/chevron-left.js";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right.js";
+import ChevronUp from "lucide-react/dist/esm/icons/chevron-up.js";
 import CircleHelp from "lucide-react/dist/esm/icons/circle-help.js";
 import ClipboardList from "lucide-react/dist/esm/icons/clipboard-list.js";
 import Download from "lucide-react/dist/esm/icons/download.js";
@@ -18,9 +20,11 @@ import Plus from "lucide-react/dist/esm/icons/plus.js";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
 import RotateCw from "lucide-react/dist/esm/icons/rotate-cw.js";
 import Save from "lucide-react/dist/esm/icons/save.js";
+import Settings from "lucide-react/dist/esm/icons/settings.js";
 import Sparkles from "lucide-react/dist/esm/icons/sparkles.js";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
 import UploadCloud from "lucide-react/dist/esm/icons/upload-cloud.js";
+import X from "lucide-react/dist/esm/icons/x.js";
 import ZoomIn from "lucide-react/dist/esm/icons/zoom-in.js";
 import ZoomOut from "lucide-react/dist/esm/icons/zoom-out.js";
 import { ChangeEvent, DragEvent, PointerEvent, useEffect, useMemo, useState } from "react";
@@ -58,7 +62,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 type AppMode = "home" | "raw" | "key-info";
 type Step = "upload" | "schema" | "review";
-type ReviewFilter = "all" | "warning" | "null" | "changed";
+type ReviewFilter = "needs_review" | "all" | "warning" | "null" | "changed" | "low_confidence" | "unreviewed";
 type HistoryTab = "documents" | "schemas" | "jobs";
 type ZoomMode = "manual" | "fitWidth" | "fitPage";
 
@@ -82,6 +86,10 @@ type UploadedDocument = {
   size_bytes: number;
   page_count: number;
   status: string;
+  document_type: string | null;
+  language: string | null;
+  ai_summary: string | null;
+  recommendation_reasoning: string | null;
   pages: DocumentPage[];
   created_at: string;
 };
@@ -102,6 +110,9 @@ type SavedSchema = {
   display_name: string | null;
   description: string | null;
   current_version: number;
+  is_template: boolean;
+  template_category: string | null;
+  pinned: boolean;
   fields: FieldDefinition[];
   created_at: string;
   updated_at: string;
@@ -111,6 +122,9 @@ type SchemaRecommendation = {
   name: string;
   display_name: string | null;
   description: string | null;
+  document_type: string | null;
+  language: string | null;
+  reasoning: string | null;
   fields: FieldDefinition[];
 };
 
@@ -138,6 +152,7 @@ type ExtractionResult = {
   validated_output: ValidatedOutput;
   corrected_output: ValidatedOutput | null;
   validation_warnings: string[];
+  reviewed_fields: string[];
   created_at: string;
   updated_at: string;
 };
@@ -170,11 +185,83 @@ type RawExtraction = {
   updated_at: string;
 };
 
+type SystemStatus = {
+  app_env: string;
+  vlm_provider: string;
+  vlm_model_name: string | null;
+  has_vlm_credentials: boolean;
+  is_mock: boolean;
+};
+
 type VlmSettings = {
   provider: string;
   model_name: string | null;
   has_api_key: boolean;
   env_path: string;
+};
+
+type ExportPresetField = {
+  key_name: string;
+  column_name?: string | null;
+  include: boolean;
+};
+
+type ExportPreset = {
+  id: string;
+  schema_id: string | null;
+  name: string;
+  fields: ExportPresetField[];
+  created_at: string;
+  updated_at: string;
+};
+
+type BatchItem = {
+  id: string;
+  document_id: string;
+  job_id: string;
+  filename: string;
+  status: string;
+  result_id: string | null;
+  error_message: string | null;
+  created_at: string;
+};
+
+type Batch = {
+  id: string;
+  schema_id: string;
+  schema_version: number;
+  status: string;
+  total_count: number;
+  completed_count: number;
+  failed_count: number;
+  progress: number;
+  items: BatchItem[];
+  created_at: string;
+  completed_at: string | null;
+};
+
+type ArchiveSearchResult = {
+  document_id: string;
+  filename: string;
+  document_type: string | null;
+  language: string | null;
+  job_id: string | null;
+  result_id: string | null;
+  schema_id: string | null;
+  schema_name: string | null;
+  status: string | null;
+  matched_text: string | null;
+  created_at: string;
+};
+
+type AuditEvent = {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  action: string;
+  message: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
 };
 
 const initialFields: SchemaField[] = [
@@ -217,32 +304,42 @@ export default function App() {
   const [rawExtraction, setRawExtraction] = useState<RawExtraction | null>(null);
   const [recentRawExtractions, setRecentRawExtractions] = useState<RawExtraction[]>([]);
   const [rawOptions, setRawOptions] = useState<RawExtractionOptions>({ includeImages: false, includeFormulas: false });
+  const [rawHistoryCollapsed, setRawHistoryCollapsed] = useState(false);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [vlmSettings, setVlmSettings] = useState<VlmSettings | null>(null);
   const [vlmApiKey, setVlmApiKey] = useState("");
   const [vlmModelName, setVlmModelName] = useState("");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pendingRecommendation, setPendingRecommendation] = useState<SchemaRecommendation | null>(null);
+  const [archiveQuery, setArchiveQuery] = useState("");
+  const [archiveStatus, setArchiveStatus] = useState("");
+  const [archiveResults, setArchiveResults] = useState<ArchiveSearchResult[]>([]);
+  const [batches, setBatches] = useState<Batch[]>([]);
+  const [exportPresets, setExportPresets] = useState<ExportPreset[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [reviewedFields, setReviewedFields] = useState<string[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [historyTab, setHistoryTab] = useState<HistoryTab>("documents");
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void refreshHistory();
-    void refreshRawHistory();
-    void loadVlmSettings();
+    void refreshAll();
   }, []);
 
   useEffect(() => {
-    const onNavigation = () => {
-      setMode(modeFromLocation());
-      setError(null);
-    };
-    window.addEventListener("popstate", onNavigation);
-    window.addEventListener("hashchange", onNavigation);
-    return () => {
-      window.removeEventListener("popstate", onNavigation);
-      window.removeEventListener("hashchange", onNavigation);
-    };
+    const onPopState = () => setMode(modeFromLocation());
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  useEffect(() => {
+    if (schema?.id) {
+      void loadExportPresets(schema.id);
+    }
+  }, [schema?.id]);
 
   const schemaPayloadFields = useMemo(() => fields.map(stripLocalId), [fields]);
   const schemaPreview = useMemo(
@@ -270,60 +367,40 @@ export default function App() {
     return `${API_BASE}${document.pages[activePage].image_url}`;
   }, [document, activePage]);
 
-  const rawPdfUrl = rawExtraction?.pdf_url ? `${API_BASE}${rawExtraction.pdf_url}` : null;
-  const rawHtmlUrl = rawExtraction?.html_url ? `${API_BASE}${rawExtraction.html_url}` : null;
+  const rawPdfUrl = useMemo(() => (rawExtraction?.pdf_url ? `${API_BASE}${rawExtraction.pdf_url}` : null), [rawExtraction]);
+  const rawHtmlUrl = useMemo(() => (rawExtraction?.html_url ? `${API_BASE}${rawExtraction.html_url}` : null), [rawExtraction]);
 
   const result = job?.result ?? null;
   const currentValues = Object.keys(edits).length ? edits : result?.corrected_output?.values ?? result?.validated_output.values ?? {};
+  const templates = recentSchemas.filter((item) => item.is_template || item.pinned);
 
-  function navigateMode(nextMode: AppMode, replace = false) {
-    const targetUrl =
-      nextMode === "home"
-        ? `${window.location.pathname}${window.location.search}`
-        : `${window.location.pathname}${window.location.search}#${nextMode}`;
-    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    if (currentUrl !== targetUrl) {
-      if (replace) {
-        window.history.replaceState({ mode: nextMode }, "", targetUrl);
-      } else {
-        window.history.pushState({ mode: nextMode }, "", targetUrl);
-      }
+  async function refreshAll() {
+    await Promise.all([refreshHistory(), refreshRawHistory(), refreshSystemStatus(), loadVlmSettings(), refreshBatches(), searchArchive()]);
+    if (rawExtraction) {
+      void loadRawExtraction(rawExtraction.id);
     }
-    setMode(nextMode);
-    setError(null);
-  }
-
-  async function loadHistory() {
-    const [documents, schemas, jobs] = await Promise.all([
-      api<UploadedDocument[]>("/api/documents?limit=12"),
-      api<SavedSchema[]>("/api/schemas"),
-      api<ExtractionJob[]>("/api/extraction-jobs?limit=12")
-    ]);
-    setRecentDocuments(documents);
-    setRecentSchemas(schemas.slice(0, 12));
-    setRecentJobs(jobs);
-    return { documents, schemas, jobs };
   }
 
   async function refreshHistory() {
     try {
-      await loadHistory();
+      const [documents, schemas, jobs] = await Promise.all([
+        api<UploadedDocument[]>("/api/documents?limit=12"),
+        api<SavedSchema[]>("/api/schemas"),
+        api<ExtractionJob[]>("/api/extraction-jobs?limit=12")
+      ]);
+      setRecentDocuments(documents);
+      setRecentSchemas(schemas.slice(0, 12));
+      setRecentJobs(jobs);
     } catch {
       // History should not block the primary workflow.
     }
   }
 
-  async function loadRawHistory() {
-    const items = await api<RawExtraction[]>("/api/raw-extractions?limit=12");
-    setRecentRawExtractions(items);
-    return items;
-  }
-
-  async function refreshRawHistory() {
+  async function refreshSystemStatus() {
     try {
-      await loadRawHistory();
+      setSystemStatus(await api<SystemStatus>("/api/system/status"));
     } catch {
-      // Raw history should not block the primary workflow.
+      setSystemStatus(null);
     }
   }
 
@@ -331,14 +408,14 @@ export default function App() {
     try {
       const settings = await api<VlmSettings>("/api/settings/vlm");
       setVlmSettings(settings);
-      setVlmModelName(settings.model_name || "");
+      setVlmModelName(settings.model_name ?? "");
     } catch {
-      // Settings are helpful on Home, but should not block document workflows.
+      setVlmSettings(null);
     }
   }
 
   async function saveVlmSettings() {
-    setBusy("Saving VLM settings");
+    setBusy(".env 저장 중");
     setError(null);
     setSettingsMessage(null);
     try {
@@ -346,14 +423,16 @@ export default function App() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          provider: "openai",
-          api_key: vlmApiKey.trim() || null,
-          model_name: vlmModelName.trim()
+          api_key: vlmApiKey,
+          model_name: vlmModelName,
+          provider: "openai"
         })
       });
       setVlmSettings(settings);
       setVlmApiKey("");
       setSettingsMessage(".env 저장 완료");
+      setSettingsOpen(false);
+      await refreshSystemStatus();
     } catch (err) {
       setError(toFriendlyError(err));
     } finally {
@@ -361,8 +440,25 @@ export default function App() {
     }
   }
 
-  async function uploadRawFile(file: File, options = rawOptions) {
-    setBusy("Extracting raw data");
+  async function refreshBatches() {
+    try {
+      setBatches(await api<Batch[]>("/api/batches?limit=8"));
+    } catch {
+      setBatches([]);
+    }
+  }
+
+  async function refreshRawHistory() {
+    try {
+      const items = await api<RawExtraction[]>("/api/raw-extractions?limit=12");
+      setRecentRawExtractions(items);
+    } catch {
+      setRecentRawExtractions([]);
+    }
+  }
+
+  async function uploadRawFile(file: File, options: RawExtractionOptions) {
+    setBusy("Raw extraction processing");
     setError(null);
     try {
       const form = new FormData();
@@ -374,8 +470,7 @@ export default function App() {
         body: form
       });
       setRawExtraction(extracted);
-      navigateMode("raw");
-      await loadRawHistory();
+      await refreshRawHistory();
       if (extracted.status === "failed") {
         setError(extracted.error_message || "Raw extraction failed.");
       }
@@ -392,7 +487,6 @@ export default function App() {
     try {
       const loaded = await api<RawExtraction>(`/api/raw-extractions/${rawId}`);
       setRawExtraction(loaded);
-      navigateMode("raw");
       if (loaded.status === "failed") {
         setError(loaded.error_message || "Raw extraction failed.");
       }
@@ -403,59 +497,31 @@ export default function App() {
     }
   }
 
-  async function refreshRawWorkspace() {
-    setBusy("Refreshing raw extraction");
-    setError(null);
+  async function searchArchive(nextQuery = archiveQuery, nextStatus = archiveStatus) {
     try {
-      await loadRawHistory();
-      if (rawExtraction) {
-        const refreshed = await api<RawExtraction>(`/api/raw-extractions/${rawExtraction.id}`);
-        setRawExtraction(refreshed);
-        if (refreshed.status === "failed") {
-          setError(refreshed.error_message || "Raw extraction failed.");
-        }
-      }
-    } catch (err) {
-      setError(toFriendlyError(err));
-    } finally {
-      setBusy(null);
+      const params = new URLSearchParams();
+      if (nextQuery.trim()) params.set("q", nextQuery.trim());
+      if (nextStatus) params.set("status", nextStatus);
+      params.set("limit", "12");
+      setArchiveResults(await api<ArchiveSearchResult[]>(`/api/archive/search?${params.toString()}`));
+    } catch {
+      setArchiveResults([]);
     }
   }
 
-  async function refreshWorkspace() {
-    setBusy("Refreshing workspace");
-    setError(null);
+  async function loadAuditEvents(entityType: string, entityId: string) {
     try {
-      await loadHistory();
+      setAuditEvents(await api<AuditEvent[]>(`/api/audit-events?entity_type=${entityType}&entity_id=${entityId}&limit=8`));
+    } catch {
+      setAuditEvents([]);
+    }
+  }
 
-      if (document) {
-        const refreshedDocument = await api<UploadedDocument>(`/api/documents/${document.document_id}`);
-        setDocument(refreshedDocument);
-        setActivePage((current) => Math.min(Math.max(0, current), Math.max(0, refreshedDocument.page_count - 1)));
-      }
-
-      if (schema && !schemaDirty) {
-        const refreshedSchema = await api<SavedSchema>(`/api/schemas/${schema.id}`);
-        applySchema(refreshedSchema);
-      }
-
-      if (job) {
-        const refreshedJob = await api<ExtractionJob>(`/api/extraction-jobs/${job.job_id}`);
-        setJob(refreshedJob);
-        if (refreshedJob.result && editedKeys.length === 0) {
-          setEdits(refreshedJob.result.corrected_output?.values ?? refreshedJob.result.validated_output.values);
-        }
-        if (refreshedJob.result && step !== "review") {
-          setStep("review");
-        }
-        if (refreshedJob.status === "failed") {
-          setError(refreshedJob.error_message || "Extraction failed.");
-        }
-      }
-    } catch (err) {
-      setError(toFriendlyError(err));
-    } finally {
-      setBusy(null);
+  async function loadExportPresets(schemaId: string) {
+    try {
+      setExportPresets(await api<ExportPreset[]>(`/api/export-presets?schema_id=${schemaId}`));
+    } catch {
+      setExportPresets([]);
     }
   }
 
@@ -492,17 +558,29 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ document_id: document.document_id })
       });
-      setSchema(null);
-      setSchemaName(recommendation.name || "ai_recommended_schema");
-      setSchemaDescription(recommendation.description ?? "");
-      setFields(toSchemaFields(recommendation.fields));
-      setSchemaDirty(true);
-      setStep("schema");
+      if (schemaDirty || hasMeaningfulSchema(fields)) {
+        setPendingRecommendation(recommendation);
+      } else {
+        applyRecommendation(recommendation);
+      }
+      const updatedDocument = await api<UploadedDocument>(`/api/documents/${document.document_id}`);
+      setDocument(updatedDocument);
+      await refreshHistory();
     } catch (err) {
       setError(toFriendlyError(err));
     } finally {
       setBusy(null);
     }
+  }
+
+  function applyRecommendation(recommendation: SchemaRecommendation) {
+    setSchema(null);
+    setSchemaName(recommendation.name || "ai_recommended_schema");
+    setSchemaDescription(recommendation.description ?? "");
+    setFields(toSchemaFields(recommendation.fields));
+    setSchemaDirty(true);
+    setPendingRecommendation(null);
+    setStep("schema");
   }
 
   async function saveSchema() {
@@ -564,8 +642,10 @@ export default function App() {
         const nextValues = completed.result.corrected_output?.values ?? completed.result.validated_output.values;
         setEdits(nextValues);
         setEditedKeys([]);
-        setReviewFilter("all");
+        setReviewedFields(completed.result.reviewed_fields ?? []);
+        setReviewFilter("needs_review");
         setStep("review");
+        void loadAuditEvents("extraction_result", completed.result.id);
       }
       if (completed.status === "failed") {
         setError(completed.error_message || "Extraction failed.");
@@ -590,11 +670,11 @@ export default function App() {
       const updated = await api<ExtractionResult>(`/api/extraction-results/${result.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ corrected_output: correctedOutput })
+        body: JSON.stringify({ corrected_output: correctedOutput, reviewed_fields: reviewedFields })
       });
       setJob((current) => (current ? { ...current, result: updated } : current));
-      setEdits(updated.corrected_output?.values ?? updated.validated_output.values);
-      setEditedKeys([]);
+      setReviewedFields(updated.reviewed_fields ?? []);
+      await loadAuditEvents("extraction_result", updated.id);
       await refreshHistory();
     } catch (err) {
       setError(toFriendlyError(err));
@@ -609,7 +689,25 @@ export default function App() {
     try {
       const loaded = await api<UploadedDocument>(`/api/documents/${documentId}`);
       applyDocument(loaded);
-      setStep("schema");
+      void loadAuditEvents("document", loaded.document_id);
+      const jobs = await api<ExtractionJob[]>(`/api/extraction-jobs?document_id=${documentId}&limit=1`);
+      if (jobs[0]) {
+        setJob(jobs[0]);
+        const loadedSchema = await api<SavedSchema>(`/api/schemas/${jobs[0].schema_id}`);
+        applySchema(loadedSchema);
+        if (jobs[0].result) {
+          setEdits(jobs[0].result.corrected_output?.values ?? jobs[0].result.validated_output.values);
+          setReviewedFields(jobs[0].result.reviewed_fields ?? []);
+          setEditedKeys([]);
+          setReviewFilter("needs_review");
+          setStep("review");
+          void loadAuditEvents("extraction_result", jobs[0].result.id);
+        } else {
+          setStep("schema");
+        }
+      } else {
+        setStep("schema");
+      }
     } catch (err) {
       setError(toFriendlyError(err));
     } finally {
@@ -645,8 +743,11 @@ export default function App() {
       setJob(loadedJob);
       if (loadedJob.result) {
         setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
+        setReviewedFields(loadedJob.result.reviewed_fields ?? []);
         setEditedKeys([]);
+        setReviewFilter("needs_review");
         setStep("review");
+        void loadAuditEvents("extraction_result", loadedJob.result.id);
       } else {
         setStep("schema");
       }
@@ -664,6 +765,8 @@ export default function App() {
     setJob(null);
     setEdits({});
     setEditedKeys([]);
+    setReviewedFields([]);
+    setAuditEvents([]);
   }
 
   function applySchema(nextSchema: SavedSchema) {
@@ -748,6 +851,94 @@ export default function App() {
     }));
   }
 
+  function toggleReviewed(key: string) {
+    setReviewedFields((current) => (current.includes(key) ? current.filter((item) => item !== key) : [...current, key]));
+  }
+
+  async function markSchemaAsTemplate(category = "General") {
+    if (!schema) {
+      setError("Save the schema before adding it to templates.");
+      return;
+    }
+    setBusy("Saving template");
+    setError(null);
+    try {
+      const updated = await api<SavedSchema>(`/api/schemas/${schema.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_template: true, template_category: category, pinned: true })
+      });
+      applySchema(updated);
+      await refreshHistory();
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function uploadBatch(files: FileList | null) {
+    if (!files?.length) return;
+    const activeSchema = !schema || schemaDirty ? await saveSchema() : schema;
+    if (!activeSchema) return;
+    setBusy("Creating batch");
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append("schema_id", activeSchema.id);
+      form.append("schema_version", String(activeSchema.current_version));
+      Array.from(files).forEach((file) => form.append("files", file));
+      const batch = await api<Batch>("/api/batches", { method: "POST", body: form });
+      setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 8));
+      await refreshBatches();
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function saveDefaultExportPreset() {
+    if (!schema) {
+      setError("Save the schema before creating an export preset.");
+      return;
+    }
+    const name = `${schemaName || "schema"} export`;
+    setBusy("Saving export preset");
+    setError(null);
+    try {
+      const preset = await api<ExportPreset>("/api/export-presets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          schema_id: schema.id,
+          name,
+          fields: fields.map((field) => ({ key_name: field.key_name, column_name: field.key_name, include: true }))
+        })
+      });
+      setExportPresets((current) => [preset, ...current]);
+      setSelectedPresetId(preset.id);
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function loadArchiveResult(item: ArchiveSearchResult) {
+    if (item.job_id) {
+      await loadJob(item.job_id);
+    } else {
+      await loadDocument(item.document_id);
+    }
+  }
+
+  function navigateMode(nextMode: AppMode) {
+    const hash = nextMode === "home" ? "" : `#${nextMode}`;
+    window.history.pushState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+    setMode(nextMode);
+  }
+
   function goToPage(page: number | null) {
     if (!document || !page) return;
     setActivePage(Math.min(document.page_count - 1, Math.max(0, page - 1)));
@@ -787,26 +978,17 @@ export default function App() {
     window.addEventListener("pointerup", onUp);
   }
 
-  const title =
-    mode === "home" ? "Digitize Your Document" : mode === "raw" ? "Raw Data Extractor" : "Key Information Extractor";
-
   return (
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">Document AI Workspace</p>
-          <h1>{title}</h1>
+          <p className="eyebrow">Digitize Your Document</p>
+          <h1>{mode === "home" ? "Digitize Your Document" : mode === "raw" ? "Raw Data Extractor" : "Key Information Workspace"}</h1>
         </div>
         <div className="status-strip">
+          <ProviderPill status={systemStatus} />
           {mode !== "home" && (
-            <button
-              type="button"
-              className="secondary compact"
-              onClick={() => {
-                navigateMode("home");
-              }}
-            >
-              <ChevronLeft size={16} />
+            <button type="button" className="secondary compact" onClick={() => navigateMode("home")}>
               Home
             </button>
           )}
@@ -815,39 +997,34 @@ export default function App() {
               <StepPill label="Upload" active={step === "upload"} done={Boolean(document)} />
               <StepPill label="Schema" active={step === "schema"} done={Boolean(schema) && !schemaDirty} />
               <StepPill label="Review" active={step === "review"} done={Boolean(result)} />
-              <button
-                type="button"
-                className="secondary compact"
-                disabled={Boolean(busy)}
-                onClick={() => void refreshWorkspace()}
-                title="Refresh workspace and recent history"
-              >
-                <RefreshCw size={16} className={busy === "Refreshing workspace" ? "spin" : ""} />
-                Refresh
-              </button>
             </>
           )}
-          {mode === "raw" && (
-            <button
-              type="button"
-              className="secondary compact"
-              disabled={Boolean(busy)}
-              onClick={() => void refreshRawWorkspace()}
-              title="Refresh raw extraction and recent history"
-            >
-              <RefreshCw size={16} className={busy === "Refreshing raw extraction" ? "spin" : ""} />
-              Refresh
-            </button>
-          )}
+          <button type="button" className="secondary compact" onClick={() => void refreshAll()} title="Refresh workspace">
+            <RefreshCw size={16} />
+            Refresh
+          </button>
+          <button
+            type="button"
+            className="secondary compact"
+            disabled={Boolean(busy)}
+            onClick={() => {
+              setSettingsMessage(null);
+              setSettingsOpen(true);
+            }}
+            title="VLM setting"
+          >
+            <Settings size={16} />
+            Setting
+          </button>
           <div className="help-trigger">
-            <button type="button" className="help-button" aria-label="사용법">
+            <button type="button" className="help-button" aria-label="Usage guide">
               <CircleHelp size={18} />
             </button>
             <div className="help-panel" role="tooltip">
-              <strong>사용법</strong>
-              <span>Home에서 필요한 문서 처리 기능을 선택합니다.</span>
-              <span>Raw Data Extractor는 Office/PDF를 PDF preview와 HTML로 변환합니다.</span>
-              <span>Key Information Extractor는 사용자가 정한 schema 값만 추출합니다.</span>
+              <strong>Usage</strong>
+              <span>Upload a document, then define or ask AI to recommend a schema.</span>
+              <span>Save schema drafts before extraction. Existing schemas save as new versions.</span>
+              <span>Review warnings, nulls, edits, evidence, and page references before export.</span>
             </div>
           </div>
         </div>
@@ -862,30 +1039,20 @@ export default function App() {
       )}
 
       {mode === "home" ? (
-        <HomeScreen
-          vlmSettings={vlmSettings}
-          vlmApiKey={vlmApiKey}
-          vlmModelName={vlmModelName}
-          settingsMessage={settingsMessage}
-          busy={busy}
-          onVlmApiKey={setVlmApiKey}
-          onVlmModelName={setVlmModelName}
-          onSaveVlmSettings={() => void saveVlmSettings()}
-          onRaw={() => navigateMode("raw")}
-          onKie={() => navigateMode("key-info")}
-        />
+        <HomeScreen onRaw={() => navigateMode("raw")} onKie={() => navigateMode("key-info")} />
       ) : mode === "raw" ? (
         <RawWorkspace
           rawExtraction={rawExtraction}
           recentRawExtractions={recentRawExtractions}
           rawOptions={rawOptions}
+          historyCollapsed={rawHistoryCollapsed}
           pdfUrl={rawPdfUrl}
           htmlUrl={rawHtmlUrl}
           leftPanePercent={leftPanePercent}
-          busy={busy}
           onUpload={(file, options) => void uploadRawFile(file, options)}
           onLoad={(id) => void loadRawExtraction(id)}
           onRawOptions={setRawOptions}
+          onToggleHistory={() => setRawHistoryCollapsed((collapsed) => !collapsed)}
           onResize={startResize}
         />
       ) : (
@@ -893,157 +1060,166 @@ export default function App() {
           className="workspace"
           style={{ gridTemplateColumns: `minmax(320px, ${leftPanePercent}%) 12px minmax(380px, 1fr)` }}
         >
-          <section className="document-pane">
-            {!document ? (
-              <label className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
+        <section className="document-pane">
+          {!document ? (
+            <label className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
                 <UploadCloud size={32} />
                 <strong>Upload a document</strong>
-                <span>PDF, PNG, JPG, or JPEG</span>
-                <input type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={onFileChange} />
+                <span>PDF, PNG, JPG, JPEG, DOCX, or PPTX</span>
+                <input type="file" accept=".pdf,.png,.jpg,.jpeg,.docx,.pptx" onChange={onFileChange} />
               </label>
-            ) : (
-              <DocumentViewer
-                document={document}
-                activePage={activePage}
-                activeImageUrl={activeImageUrl}
-                zoom={zoom}
-                zoomMode={zoomMode}
-                rotation={rotation}
-                onPage={setActivePage}
-                onZoom={setZoom}
-                onZoomMode={setZoomMode}
-                onRotation={setRotation}
-              />
-            )}
-          </section>
-
-          <button
-            className="splitter"
-            type="button"
-            title="Resize panes"
-            aria-label="Resize panes"
-            onPointerDown={startResize}
-          >
-            <GripVertical size={18} />
-          </button>
-
-          <aside className="side-pane">
-            <HistoryPanel
-              activeTab={historyTab}
-              documents={recentDocuments}
-              schemas={recentSchemas}
-              jobs={recentJobs}
-              onTab={setHistoryTab}
-              onLoadDocument={(id) => void loadDocument(id)}
-              onLoadSchema={(id) => void loadSchema(id)}
-              onLoadJob={(id) => void loadJob(id)}
+          ) : (
+            <DocumentViewer
+              document={document}
+              activePage={activePage}
+              activeImageUrl={activeImageUrl}
+              zoom={zoom}
+              zoomMode={zoomMode}
+              rotation={rotation}
+              onPage={setActivePage}
+              onZoom={setZoom}
+              onZoomMode={setZoomMode}
+              onRotation={setRotation}
             />
+          )}
+        </section>
 
-            {!document ? (
-              <UploadNotes onSampleSchema={applySampleSchema} />
-            ) : step !== "review" ? (
-              <SchemaBuilder
-                schemaName={schemaName}
-                schemaDescription={schemaDescription}
-                fields={fields}
-                schemaPreview={schemaPreview}
-                schemaDownloadUrl={schemaDownloadUrl}
-                schemaJsonInput={schemaJsonInput}
-                savedSchema={schema}
-                schemaDirty={schemaDirty}
-                onSchemaName={(value) => {
-                  setSchemaName(value);
-                  setSchemaDirty(true);
-                }}
-                onSchemaDescription={(value) => {
-                  setSchemaDescription(value);
-                  setSchemaDirty(true);
-                }}
-                onSchemaJsonInput={setSchemaJsonInput}
-                onImportSchemaJson={importSchemaJson}
-                onUpdateField={updateField}
-                onAddField={addField}
-                onRemoveField={removeField}
-                onSaveSchema={saveSchema}
-                onRunExtraction={runExtraction}
-                onRecommendSchema={recommendSchema}
-                onSampleSchema={applySampleSchema}
-                canExtract={Boolean(document)}
-              />
-            ) : (
-              <ReviewPanel
-                fields={fields}
-                result={result}
-                values={currentValues}
-                editedKeys={editedKeys}
-                filter={reviewFilter}
-                onFilter={setReviewFilter}
-                onEdit={updateEdit}
-                onSaveCorrections={saveCorrections}
-                onGoToPage={goToPage}
-              />
-            )}
-          </aside>
+        <button
+          className="splitter"
+          type="button"
+          title="Resize panes"
+          aria-label="Resize panes"
+          onPointerDown={startResize}
+        >
+          <GripVertical size={18} />
+        </button>
+
+        <aside className="side-pane">
+          <ArchivePanel
+            query={archiveQuery}
+            status={archiveStatus}
+            results={archiveResults}
+            onQuery={(value) => {
+              setArchiveQuery(value);
+              void searchArchive(value, archiveStatus);
+            }}
+            onStatus={(value) => {
+              setArchiveStatus(value);
+              void searchArchive(archiveQuery, value);
+            }}
+            onOpen={(item) => void loadArchiveResult(item)}
+          />
+
+          <HistoryPanel
+            activeTab={historyTab}
+            documents={recentDocuments}
+            schemas={recentSchemas}
+            jobs={recentJobs}
+            collapsed={historyCollapsed}
+            onTab={setHistoryTab}
+            onLoadDocument={(id) => void loadDocument(id)}
+            onLoadSchema={(id) => void loadSchema(id)}
+            onLoadJob={(id) => void loadJob(id)}
+            onToggle={() => setHistoryCollapsed((collapsed) => !collapsed)}
+          />
+
+          {!document ? (
+            <UploadNotes onSampleSchema={applySampleSchema} />
+          ) : step !== "review" ? (
+            <SchemaBuilder
+              schemaName={schemaName}
+              schemaDescription={schemaDescription}
+              fields={fields}
+              schemaPreview={schemaPreview}
+              schemaDownloadUrl={schemaDownloadUrl}
+              schemaJsonInput={schemaJsonInput}
+              savedSchema={schema}
+              schemaDirty={schemaDirty}
+              document={document}
+              systemStatus={systemStatus}
+              templates={templates}
+              onSchemaName={(value) => {
+                setSchemaName(value);
+                setSchemaDirty(true);
+              }}
+              onSchemaDescription={(value) => {
+                setSchemaDescription(value);
+                setSchemaDirty(true);
+              }}
+              onSchemaJsonInput={setSchemaJsonInput}
+              onImportSchemaJson={importSchemaJson}
+              onUpdateField={updateField}
+              onAddField={addField}
+              onRemoveField={removeField}
+              onSaveSchema={saveSchema}
+              onRunExtraction={runExtraction}
+              onRecommendSchema={recommendSchema}
+              onSampleSchema={applySampleSchema}
+              onLoadTemplate={(template) => {
+                applySchema(template);
+                setSchema(null);
+                setSchemaDirty(true);
+              }}
+              onSaveTemplate={() => void markSchemaAsTemplate()}
+              onBatchUpload={(files) => void uploadBatch(files)}
+              canExtract={Boolean(document)}
+            />
+          ) : (
+            <ReviewPanel
+              fields={fields}
+              result={result}
+              values={currentValues}
+              editedKeys={editedKeys}
+              reviewedFields={reviewedFields}
+              filter={reviewFilter}
+              exportPresets={exportPresets}
+              selectedPresetId={selectedPresetId}
+              auditEvents={auditEvents}
+              onFilter={setReviewFilter}
+              onEdit={updateEdit}
+              onToggleReviewed={toggleReviewed}
+              onSaveCorrections={saveCorrections}
+              onGoToPage={goToPage}
+              onPreset={setSelectedPresetId}
+              onSavePreset={() => void saveDefaultExportPreset()}
+            />
+          )}
+          <BatchPanel batches={batches} onRefresh={() => void refreshBatches()} onOpenJob={(jobId) => void loadJob(jobId)} />
+        </aside>
         </main>
+      )}
+      {pendingRecommendation && (
+        <RecommendationDiffModal
+          currentFields={fields}
+          recommendation={pendingRecommendation}
+          onApply={() => applyRecommendation(pendingRecommendation)}
+          onCancel={() => setPendingRecommendation(null)}
+        />
+      )}
+      {settingsOpen && (
+        <SettingsDialog
+          vlmSettings={vlmSettings}
+          vlmApiKey={vlmApiKey}
+          vlmModelName={vlmModelName}
+          settingsMessage={settingsMessage}
+          busy={busy}
+          onVlmApiKey={setVlmApiKey}
+          onVlmModelName={setVlmModelName}
+          onSave={() => void saveVlmSettings()}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
     </div>
   );
 }
 
-function HomeScreen(props: {
-  vlmSettings: VlmSettings | null;
-  vlmApiKey: string;
-  vlmModelName: string;
-  settingsMessage: string | null;
-  busy: string | null;
-  onVlmApiKey: (value: string) => void;
-  onVlmModelName: (value: string) => void;
-  onSaveVlmSettings: () => void;
-  onRaw: () => void;
-  onKie: () => void;
-}) {
+function HomeScreen(props: { onRaw: () => void; onKie: () => void }) {
   return (
     <main className="home-screen">
-      <section className="home-intro">
-        <p className="eyebrow">Home</p>
+      <section className="home-hero">
+        <p className="eyebrow">Workspace</p>
         <h2>문서 처리 방식을 선택하세요</h2>
         <p>원본 정보 추출, key information extraction, OCR, intelligence parsing을 하나의 workspace에서 확장합니다.</p>
-      </section>
-      <section className="settings-panel">
-        <div>
-          <p className="eyebrow">VLM 설정</p>
-          <h3>API key와 model name</h3>
-        </div>
-        <div className="settings-grid">
-          <label>
-            <span>API key</span>
-            <input
-              type="password"
-              value={props.vlmApiKey}
-              placeholder={props.vlmSettings?.has_api_key ? "저장된 key 유지" : "VLM_API_KEY"}
-              disabled={Boolean(props.busy)}
-              onChange={(event) => props.onVlmApiKey(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>Model name</span>
-            <input
-              value={props.vlmModelName}
-              placeholder="gpt-4.1-mini"
-              disabled={Boolean(props.busy)}
-              onChange={(event) => props.onVlmModelName(event.target.value)}
-            />
-          </label>
-          <button type="button" className="primary compact" disabled={Boolean(props.busy)} onClick={props.onSaveVlmSettings}>
-            <Save size={16} />
-            Save
-          </button>
-        </div>
-        <div className="settings-status">
-          <span>{props.vlmSettings?.has_api_key ? "API key 저장됨" : "API key 미설정"}</span>
-          <span>{props.vlmSettings?.model_name || "Model name 미설정"}</span>
-          {props.settingsMessage && <span className="success-text">{props.settingsMessage}</span>}
-        </div>
       </section>
       <section className="feature-grid">
         <button className="feature-card active-feature" onClick={props.onRaw}>
@@ -1054,7 +1230,7 @@ function HomeScreen(props: {
         <button className="feature-card active-feature" onClick={props.onKie}>
           <Sparkles size={24} />
           <strong>Key Information Extractor</strong>
-          <span>사용자가 정의한 schema에 맞는 값만 문서 이미지에서 추출합니다.</span>
+          <span>PDF, 이미지, DOCX, PPTX에서 schema에 맞는 값만 추출합니다.</span>
         </button>
         <button className="feature-card" disabled>
           <FileJson size={24} />
@@ -1075,13 +1251,14 @@ function RawWorkspace(props: {
   rawExtraction: RawExtraction | null;
   recentRawExtractions: RawExtraction[];
   rawOptions: RawExtractionOptions;
+  historyCollapsed: boolean;
   pdfUrl: string | null;
   htmlUrl: string | null;
   leftPanePercent: number;
-  busy: string | null;
   onUpload: (file: File, options: RawExtractionOptions) => void;
   onLoad: (id: string) => void;
   onRawOptions: (options: RawExtractionOptions) => void;
+  onToggleHistory: () => void;
   onResize: (event: PointerEvent<HTMLButtonElement>) => void;
 }) {
   function onDrop(event: DragEvent<HTMLLabelElement>) {
@@ -1093,7 +1270,6 @@ function RawWorkspace(props: {
   function onFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (file) props.onUpload(file, props.rawOptions);
-    event.target.value = "";
   }
 
   return (
@@ -1104,19 +1280,18 @@ function RawWorkspace(props: {
       <section className="document-pane">
         <div className="pane-header">
           <div>
-            <p className="eyebrow">Original</p>
-            <h2>{props.rawExtraction?.filename || "Upload a raw document"}</h2>
+            <p className="eyebrow">PDF Preview</p>
+            <h2>{props.rawExtraction?.filename || "Upload raw document"}</h2>
           </div>
-          {props.rawExtraction && <span className={`status-badge ${props.rawExtraction.status}`}>{props.rawExtraction.status}</span>}
         </div>
         {props.pdfUrl ? (
-          <iframe className="preview-frame" src={props.pdfUrl} title="PDF preview" />
+          <iframe className="raw-frame" src={props.pdfUrl} title="PDF preview" />
         ) : (
           <label className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
             <UploadCloud size={32} />
             <strong>Upload a raw document</strong>
             <span>DOCX, XLSX, PPTX, or PDF</span>
-            <input type="file" accept=".docx,.xlsx,.pptx,.pdf" disabled={Boolean(props.busy)} onChange={onFileChange} />
+            <input type="file" accept=".docx,.xlsx,.pptx,.pdf" onChange={onFileChange} />
           </label>
         )}
       </section>
@@ -1131,99 +1306,146 @@ function RawWorkspace(props: {
         <GripVertical size={18} />
       </button>
 
-      <aside className="side-pane raw-side">
-        <div className="pane-header">
-          <div>
-            <p className="eyebrow">HTML</p>
-            <h2>Extracted content</h2>
-          </div>
-          <label className="secondary compact file-action">
-            <FileUp size={16} />
-            Upload
-            <input type="file" accept=".docx,.xlsx,.pptx,.pdf" disabled={Boolean(props.busy)} onChange={onFileChange} />
-          </label>
-        </div>
-
-        <div className="raw-options">
-          <label className="toggle-row">
-            <input
-              type="checkbox"
-              checked={props.rawOptions.includeImages}
-              disabled={Boolean(props.busy)}
-              onChange={(event) => props.onRawOptions({ ...props.rawOptions, includeImages: event.currentTarget.checked })}
-            />
-            <span>Extract images</span>
-          </label>
-          <label className="toggle-row">
-            <input
-              type="checkbox"
-              checked={props.rawOptions.includeFormulas}
-              disabled={Boolean(props.busy)}
-              onChange={(event) => props.onRawOptions({ ...props.rawOptions, includeFormulas: event.currentTarget.checked })}
-            />
-            <span>Extract formulas</span>
-          </label>
-        </div>
-
-        {props.rawExtraction && (
-          <div className="raw-meta">
-            <span>{props.rawExtraction.source_format.toUpperCase()}</span>
-            <span>{formatBytes(props.rawExtraction.size_bytes)}</span>
-            <span>{formatDate(props.rawExtraction.updated_at)}</span>
-          </div>
-        )}
-        {props.rawExtraction?.warnings.length ? (
-          <div className="warning-list">{props.rawExtraction.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>
-        ) : null}
-
-        {props.htmlUrl ? (
-          <>
-            <div className="action-row">
-              <a className="secondary link-button" href={props.htmlUrl} target="_blank">
-                <FileJson size={16} />
+      <aside className="side-pane">
+        <section className="service-panel raw-controls">
+          <div className="history-header">
+            <div className="preview-title inline-title">
+              <FileJson size={16} />
+              HTML Preview
+            </div>
+            {props.htmlUrl && (
+              <a className="secondary compact link-button" href={props.htmlUrl} target="_blank">
                 Open HTML
               </a>
-              <a className="secondary link-button" href={props.htmlUrl} download={`${props.rawExtraction?.filename || "content"}.html`}>
-                <Download size={16} />
-                HTML
-              </a>
-              {props.pdfUrl && (
-                <a className="secondary link-button" href={props.pdfUrl} target="_blank">
-                  <FileDown size={16} />
-                  PDF
-                </a>
-              )}
+            )}
+          </div>
+          <label className="batch-upload">
+            <UploadCloud size={16} />
+            <span>Upload Raw Data Extractor file</span>
+            <input type="file" accept=".docx,.xlsx,.pptx,.pdf" onChange={onFileChange} />
+          </label>
+          <div className="option-list">
+            <label>
+              <input
+                type="checkbox"
+                checked={props.rawOptions.includeImages}
+                onChange={(event) => props.onRawOptions({ ...props.rawOptions, includeImages: event.target.checked })}
+              />
+              이미지 추출
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={props.rawOptions.includeFormulas}
+                onChange={(event) => props.onRawOptions({ ...props.rawOptions, includeFormulas: event.target.checked })}
+              />
+              수식 추출
+            </label>
+          </div>
+          {props.rawExtraction && (
+            <div className={`raw-status ${props.rawExtraction.status}`}>
+              <strong>{props.rawExtraction.status}</strong>
+              <span>{props.rawExtraction.source_format.toUpperCase()} · {formatDate(props.rawExtraction.created_at)}</span>
+              {props.rawExtraction.error_message && <span>{props.rawExtraction.error_message}</span>}
+              {props.rawExtraction.warnings.length > 0 && <span>{props.rawExtraction.warnings.join(", ")}</span>}
             </div>
-            <iframe className="preview-frame html-frame" src={props.htmlUrl} title="Extracted HTML preview" sandbox="" />
-          </>
-        ) : (
-          <div className="empty-state">Upload a document to render extracted HTML.</div>
-        )}
+          )}
+          {props.htmlUrl ? (
+            <iframe className="raw-frame html-frame" src={props.htmlUrl} title="HTML extraction preview" />
+          ) : (
+            <div className="empty-state">업로드 후 추출 HTML이 여기에 표시됩니다.</div>
+          )}
+        </section>
 
-        <section className="history-panel raw-history">
+        <section className="history-panel">
           <div className="history-header">
             <div className="preview-title inline-title">
               <History size={16} />
-              Recent raw files
+              Recent Raw
             </div>
+            <button type="button" className="secondary compact" onClick={props.onToggleHistory}>
+              {props.historyCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+              {props.historyCollapsed ? "Open" : "Close"}
+            </button>
           </div>
-          <div className="history-list">
-            {props.recentRawExtractions.length ? (
-              props.recentRawExtractions.map((item) => (
-                <button key={item.id} onClick={() => props.onLoad(item.id)}>
-                  <strong>{item.filename}</strong>
-                  <span>
-                    {item.status} · {item.source_format.toUpperCase()} · {formatDate(item.created_at)}
-                  </span>
-                </button>
-              ))
-            ) : (
-              <span className="muted">No raw extractions yet.</span>
-            )}
-          </div>
+          {!props.historyCollapsed && (
+            <div className="history-list">
+              {props.recentRawExtractions.length ? (
+                props.recentRawExtractions.map((item) => (
+                  <button key={item.id} onClick={() => props.onLoad(item.id)}>
+                    <strong>{item.filename}</strong>
+                    <span>
+                      {item.status} · {item.source_format.toUpperCase()} · {formatDate(item.created_at)}
+                    </span>
+                  </button>
+                ))
+              ) : (
+                <span className="muted">No raw extractions yet.</span>
+              )}
+            </div>
+          )}
         </section>
       </aside>
     </main>
+  );
+}
+
+function SettingsDialog(props: {
+  vlmSettings: VlmSettings | null;
+  vlmApiKey: string;
+  vlmModelName: string;
+  settingsMessage: string | null;
+  busy: string | null;
+  onVlmApiKey: (value: string) => void;
+  onVlmModelName: (value: string) => void;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="settings-panel modal-panel" role="dialog" aria-modal="true" aria-labelledby="vlm-settings-title">
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">Setting</p>
+            <h2 id="vlm-settings-title">API key와 model name</h2>
+          </div>
+          <button type="button" className="icon-only secondary" aria-label="Close settings" onClick={props.onClose}>
+            <X size={16} />
+          </button>
+        </div>
+        <div className="settings-grid">
+          <label>
+            <span>API key</span>
+            <input
+              type="password"
+              value={props.vlmApiKey}
+              placeholder={props.vlmSettings?.has_api_key ? "저장된 key 유지" : "VLM_API_KEY"}
+              onChange={(event) => props.onVlmApiKey(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Model name</span>
+            <input
+              value={props.vlmModelName}
+              placeholder="gpt-4.1-mini"
+              onChange={(event) => props.onVlmModelName(event.target.value)}
+            />
+          </label>
+          <button type="button" className="primary compact" disabled={Boolean(props.busy)} onClick={props.onSave}>
+            <Save size={16} />
+            Save
+          </button>
+          <button type="button" className="secondary compact" disabled={Boolean(props.busy)} onClick={props.onClose}>
+            Close
+          </button>
+        </div>
+        <div className="settings-status">
+          <span>{props.vlmSettings?.has_api_key ? "API key 저장됨" : "API key 미설정"}</span>
+          <span>env: {props.vlmSettings?.env_path || ".env"}</span>
+          {props.settingsMessage && <span className="success-text">{props.settingsMessage}</span>}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1330,10 +1552,12 @@ function HistoryPanel(props: {
   documents: UploadedDocument[];
   schemas: SavedSchema[];
   jobs: ExtractionJob[];
+  collapsed: boolean;
   onTab: (tab: HistoryTab) => void;
   onLoadDocument: (id: string) => void;
   onLoadSchema: (id: string) => void;
   onLoadJob: (id: string) => void;
+  onToggle: () => void;
 }) {
   return (
     <section className="history-panel">
@@ -1342,52 +1566,147 @@ function HistoryPanel(props: {
           <History size={16} />
           Recent
         </div>
-        <div className="segmented">
-          <button className={props.activeTab === "documents" ? "active" : ""} onClick={() => props.onTab("documents")}>
-            Docs
-          </button>
-          <button className={props.activeTab === "schemas" ? "active" : ""} onClick={() => props.onTab("schemas")}>
-            Schemas
-          </button>
-          <button className={props.activeTab === "jobs" ? "active" : ""} onClick={() => props.onTab("jobs")}>
-            Jobs
+        <div className="history-controls">
+          {!props.collapsed && (
+            <div className="segmented">
+              <button className={props.activeTab === "documents" ? "active" : ""} onClick={() => props.onTab("documents")}>
+                Docs
+              </button>
+              <button className={props.activeTab === "schemas" ? "active" : ""} onClick={() => props.onTab("schemas")}>
+                Schemas
+              </button>
+              <button className={props.activeTab === "jobs" ? "active" : ""} onClick={() => props.onTab("jobs")}>
+                Jobs
+              </button>
+            </div>
+          )}
+          <button type="button" className="secondary compact" onClick={props.onToggle}>
+            {props.collapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+            {props.collapsed ? "Open" : "Close"}
           </button>
         </div>
       </div>
-      <div className="history-list">
-        {props.activeTab === "documents" &&
-          (props.documents.length ? (
-            props.documents.map((item) => (
-              <button key={item.document_id} onClick={() => props.onLoadDocument(item.document_id)}>
-                <strong>{item.filename}</strong>
-                <span>{item.page_count} page(s) · {formatDate(item.created_at)}</span>
-              </button>
-            ))
-          ) : (
-            <span className="muted">No documents yet.</span>
-          ))}
-        {props.activeTab === "schemas" &&
-          (props.schemas.length ? (
-            props.schemas.map((item) => (
-              <button key={item.id} onClick={() => props.onLoadSchema(item.id)}>
-                <strong>{item.display_name || item.name}</strong>
-                <span>v{item.current_version} · {item.fields.length} field(s)</span>
-              </button>
-            ))
-          ) : (
-            <span className="muted">No schemas yet.</span>
-          ))}
-        {props.activeTab === "jobs" &&
-          (props.jobs.length ? (
-            props.jobs.map((item) => (
-              <button key={item.job_id} onClick={() => props.onLoadJob(item.job_id)}>
-                <strong>{item.status}</strong>
-                <span>{item.result_id || "no result"} · {formatDate(item.created_at)}</span>
-              </button>
-            ))
-          ) : (
-            <span className="muted">No jobs yet.</span>
-          ))}
+      {!props.collapsed && (
+        <div className="history-list">
+          {props.activeTab === "documents" &&
+            (props.documents.length ? (
+              props.documents.map((item) => (
+                <button key={item.document_id} onClick={() => props.onLoadDocument(item.document_id)}>
+                  <strong>{item.filename}</strong>
+                  <span>{item.page_count} page(s) · {formatDate(item.created_at)}</span>
+                </button>
+              ))
+            ) : (
+              <span className="muted">No documents yet.</span>
+            ))}
+          {props.activeTab === "schemas" &&
+            (props.schemas.length ? (
+              props.schemas.map((item) => (
+                <button key={item.id} onClick={() => props.onLoadSchema(item.id)}>
+                  <strong>{item.display_name || item.name}</strong>
+                  <span>v{item.current_version} · {item.fields.length} field(s)</span>
+                </button>
+              ))
+            ) : (
+              <span className="muted">No schemas yet.</span>
+            ))}
+          {props.activeTab === "jobs" &&
+            (props.jobs.length ? (
+              props.jobs.map((item) => (
+                <button key={item.job_id} onClick={() => props.onLoadJob(item.job_id)}>
+                  <strong>{item.status}</strong>
+                  <span>{item.result_id || "no result"} · {formatDate(item.created_at)}</span>
+                </button>
+              ))
+            ) : (
+              <span className="muted">No jobs yet.</span>
+            ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ArchivePanel(props: {
+  query: string;
+  status: string;
+  results: ArchiveSearchResult[];
+  onQuery: (value: string) => void;
+  onStatus: (value: string) => void;
+  onOpen: (item: ArchiveSearchResult) => void;
+}) {
+  return (
+    <section className="service-panel compact-panel">
+      <div className="history-header">
+        <div className="preview-title inline-title">
+          <FileJson size={16} />
+          Archive
+        </div>
+        <select value={props.status} onChange={(event) => props.onStatus(event.target.value)}>
+          <option value="">All</option>
+          <option value="completed">Completed</option>
+          <option value="needs_review">Needs review</option>
+          <option value="failed">Failed</option>
+        </select>
+      </div>
+      <input
+        className="search-input"
+        value={props.query}
+        placeholder="Search documents, schemas, extracted values"
+        onChange={(event) => props.onQuery(event.target.value)}
+      />
+      <div className="mini-list">
+        {props.results.length ? (
+          props.results.slice(0, 4).map((item) => (
+            <button key={`${item.document_id}_${item.job_id ?? "doc"}`} onClick={() => props.onOpen(item)}>
+              <strong>{item.filename}</strong>
+              <span>{item.document_type || item.schema_name || item.status || "document"} · {formatDate(item.created_at)}</span>
+            </button>
+          ))
+        ) : (
+          <span className="muted">No archive matches.</span>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function BatchPanel(props: { batches: Batch[]; onRefresh: () => void; onOpenJob: (jobId: string) => void }) {
+  return (
+    <section className="service-panel">
+      <div className="history-header">
+        <div className="preview-title inline-title">
+          <FileSpreadsheet size={16} />
+          Batch
+        </div>
+        <button className="secondary compact" onClick={props.onRefresh}>
+          <RefreshCw size={14} />
+          Refresh
+        </button>
+      </div>
+      <div className="mini-list">
+        {props.batches.length ? (
+          props.batches.map((batch) => (
+            <div className="batch-card" key={batch.id}>
+              <div className="batch-top">
+                <strong>{batch.status}</strong>
+                <span>{Math.round(batch.progress * 100)}%</span>
+              </div>
+              <progress max={1} value={batch.progress} />
+              <span className="muted">
+                {batch.completed_count} done · {batch.failed_count} failed · {batch.total_count} total
+              </span>
+              {batch.items.slice(0, 3).map((item) => (
+                <button key={item.id} onClick={() => props.onOpenJob(item.job_id)}>
+                  <strong>{item.filename}</strong>
+                  <span>{item.status}</span>
+                </button>
+              ))}
+            </div>
+          ))
+        ) : (
+          <span className="muted">No batches yet.</span>
+        )}
       </div>
     </section>
   );
@@ -1399,18 +1718,18 @@ function UploadNotes({ onSampleSchema }: { onSampleSchema: () => void }) {
       <div className="pane-header">
         <div>
           <p className="eyebrow">Start</p>
-          <h2>먼저 문서를 업로드하세요</h2>
+          <h2>Upload first</h2>
         </div>
       </div>
-      <p>업로드 후 schema builder가 열립니다. 지금 sample schema를 먼저 준비할 수도 있습니다.</p>
+      <p>Schema builder opens after upload. You can also prepare a sample schema now.</p>
       <button className="secondary" onClick={onSampleSchema}>
         <ClipboardList size={16} />
-        Sample schema
+        Use sample schema
       </button>
       <div className="note-list">
-        <span>지원 포맷: PDF, PNG, JPG, JPEG</span>
-        <span>Schema field: key name, description, output format</span>
-        <span>API key 없이 데모가 필요하면 VLM_PROVIDER=mock을 사용할 수 있습니다.</span>
+        <span>Supported: PDF, PNG, JPG, JPEG, DOCX, PPTX</span>
+        <span>Schema fields: key name, description, output format</span>
+        <span>Use the Setting button to save API key and model name.</span>
       </div>
     </div>
   );
@@ -1425,6 +1744,9 @@ function SchemaBuilder(props: {
   schemaJsonInput: string;
   savedSchema: SavedSchema | null;
   schemaDirty: boolean;
+  document: UploadedDocument | null;
+  systemStatus: SystemStatus | null;
+  templates: SavedSchema[];
   onSchemaName: (value: string) => void;
   onSchemaDescription: (value: string) => void;
   onSchemaJsonInput: (value: string) => void;
@@ -1436,6 +1758,9 @@ function SchemaBuilder(props: {
   onRunExtraction: () => Promise<void>;
   onRecommendSchema: () => Promise<void>;
   onSampleSchema: () => void;
+  onLoadTemplate: (schema: SavedSchema) => void;
+  onSaveTemplate: () => void;
+  onBatchUpload: (files: FileList | null) => void;
   canExtract: boolean;
 }) {
   return (
@@ -1452,6 +1777,21 @@ function SchemaBuilder(props: {
         )}
       </div>
 
+      {props.document && (
+        <div className="intel-card">
+          <div>
+            <span className="eyebrow">Document intelligence</span>
+            <strong>{props.document.document_type || "Unknown document type"}</strong>
+          </div>
+          <span>{props.document.language || "language unknown"} · {props.document.page_count} page(s)</span>
+          {props.document.recommendation_reasoning && <p>{props.document.recommendation_reasoning}</p>}
+        </div>
+      )}
+
+      {props.systemStatus?.is_mock && (
+        <div className="notice-card">Mock mode is active. AI recommendation and extraction use deterministic demo data.</div>
+      )}
+
       <div className="action-row">
         <button className="primary" onClick={() => void props.onRecommendSchema()}>
           <Sparkles size={16} />
@@ -1466,6 +1806,33 @@ function SchemaBuilder(props: {
           Export JSON
         </a>
       </div>
+
+      <div className="template-strip">
+        <div className="template-header">
+          <strong>Template library</strong>
+          <button className="secondary compact" onClick={props.onSaveTemplate}>
+            Pin current
+          </button>
+        </div>
+        <div className="template-list">
+          {props.templates.length ? (
+            props.templates.slice(0, 4).map((template) => (
+              <button key={template.id} onClick={() => props.onLoadTemplate(template)}>
+                <strong>{template.display_name || template.name}</strong>
+                <span>{template.template_category || "General"} · {template.fields.length} fields</span>
+              </button>
+            ))
+          ) : (
+            <span className="muted">Save a schema as a template to reuse it here.</span>
+          )}
+        </div>
+      </div>
+
+      <label className="batch-upload">
+        <FileSpreadsheet size={16} />
+        <span>Batch upload with this schema</span>
+        <input type="file" accept=".pdf,.png,.jpg,.jpeg,.docx,.pptx" multiple onChange={(event) => props.onBatchUpload(event.target.files)} />
+      </label>
 
       <label className="field-stack">
         <span>Schema name</span>
@@ -1560,11 +1927,18 @@ function ReviewPanel(props: {
   result: ExtractionResult | null;
   values: Record<string, ExtractionValue>;
   editedKeys: string[];
+  reviewedFields: string[];
   filter: ReviewFilter;
+  exportPresets: ExportPreset[];
+  selectedPresetId: string;
+  auditEvents: AuditEvent[];
   onFilter: (filter: ReviewFilter) => void;
   onEdit: (key: string, value: string) => void;
+  onToggleReviewed: (key: string) => void;
   onSaveCorrections: () => Promise<void>;
   onGoToPage: (page: number | null) => void;
+  onPreset: (presetId: string) => void;
+  onSavePreset: () => void;
 }) {
   if (!props.result) {
     return <div className="empty-state">No extraction result yet.</div>;
@@ -1572,11 +1946,16 @@ function ReviewPanel(props: {
 
   const visibleFields = props.fields.filter((field) => {
     const value = props.values[field.key_name];
+    const needsReview = !props.reviewedFields.includes(field.key_name) && (Boolean(value?.warnings?.length) || value?.value === null || value?.value === undefined || value?.value === "" || (value?.confidence ?? 1) < 0.75);
+    if (props.filter === "needs_review") return needsReview;
     if (props.filter === "warning") return Boolean(value?.warnings?.length);
     if (props.filter === "null") return value?.value === null || value?.value === undefined || value?.value === "";
     if (props.filter === "changed") return props.editedKeys.includes(field.key_name);
+    if (props.filter === "low_confidence") return (value?.confidence ?? 1) < 0.75;
+    if (props.filter === "unreviewed") return !props.reviewedFields.includes(field.key_name);
     return true;
   });
+  const reviewedCount = props.fields.filter((field) => props.reviewedFields.includes(field.key_name)).length;
 
   return (
     <div className="review-panel">
@@ -1588,9 +1967,14 @@ function ReviewPanel(props: {
         <span className={`status-badge ${props.result.validated_output.status}`}>{props.result.validated_output.status}</span>
       </div>
 
+      <div className="progress-card">
+        <strong>{reviewedCount} / {props.fields.length} reviewed</strong>
+        <progress max={props.fields.length || 1} value={reviewedCount} />
+      </div>
+
       <div className="filter-row">
         <Filter size={16} />
-        {(["all", "warning", "null", "changed"] as ReviewFilter[]).map((filter) => (
+        {(["needs_review", "all", "warning", "null", "low_confidence", "unreviewed", "changed"] as ReviewFilter[]).map((filter) => (
           <button key={filter} className={props.filter === filter ? "active" : ""} onClick={() => props.onFilter(filter)}>
             {filter}
           </button>
@@ -1599,23 +1983,27 @@ function ReviewPanel(props: {
 
       <div className="result-table">
         <div className="result-head">
-          <span>key name</span>
+          <span>field</span>
           <span>value</span>
           <span>page</span>
           <span>confidence</span>
           <span>warnings</span>
+          <span>reviewed</span>
         </div>
         {visibleFields.map((field) => {
           const value = props.values[field.key_name];
+          const originalValue = props.result?.validated_output.values[field.key_name];
+          const isEdited = props.editedKeys.includes(field.key_name);
           return (
             <div className="result-row" key={field.key_name}>
               <span className="mono">
                 {field.key_name}
-                {props.editedKeys.includes(field.key_name) && <em>edited</em>}
+                {isEdited && <em>edited</em>}
               </span>
               <label>
                 <input value={stringifyValue(value?.value)} onChange={(event) => props.onEdit(field.key_name, event.target.value)} />
                 {value?.evidence && <small>{value.evidence}</small>}
+                {isEdited && <small>Original: {stringifyValue(originalValue?.value)}</small>}
               </label>
               <button className="ghost page-link" onClick={() => props.onGoToPage(value?.page ?? null)}>
                 {value?.page ?? "-"}
@@ -1624,6 +2012,13 @@ function ReviewPanel(props: {
               <span className={value?.warnings?.length ? "warn-text" : "muted"}>
                 {value?.warnings?.length ? value.warnings.join(", ") : "valid"}
               </span>
+              <label className="review-check">
+                <input
+                  type="checkbox"
+                  checked={props.reviewedFields.includes(field.key_name)}
+                  onChange={() => props.onToggleReviewed(field.key_name)}
+                />
+              </label>
             </div>
           );
         })}
@@ -1634,15 +2029,29 @@ function ReviewPanel(props: {
           <Save size={16} />
           Save corrections
         </button>
-        <a className="secondary link-button" href={`${API_BASE}/api/extraction-results/${props.result.id}/export?format=json`} target="_blank">
+        <select value={props.selectedPresetId} onChange={(event) => props.onPreset(event.target.value)}>
+          <option value="">Default export</option>
+          {props.exportPresets.map((preset) => (
+            <option key={preset.id} value={preset.id}>
+              {preset.name}
+            </option>
+          ))}
+        </select>
+        <button className="secondary" onClick={props.onSavePreset}>
+          <Save size={16} />
+          Save preset
+        </button>
+        <a className="secondary link-button" href={exportHref(props.result.id, "json", props.selectedPresetId)} target="_blank">
           <Download size={16} />
           JSON
         </a>
-        <a className="secondary link-button" href={`${API_BASE}/api/extraction-results/${props.result.id}/export?format=csv`} target="_blank">
+        <a className="secondary link-button" href={exportHref(props.result.id, "csv", props.selectedPresetId)} target="_blank">
           <FileSpreadsheet size={16} />
           CSV
         </a>
       </div>
+
+      <AuditPanel events={props.auditEvents} />
 
       <div className="preview-block">
         <div className="preview-title">Raw model output</div>
@@ -1652,8 +2061,87 @@ function ReviewPanel(props: {
   );
 }
 
+function AuditPanel({ events }: { events: AuditEvent[] }) {
+  return (
+    <div className="audit-panel">
+      <div className="preview-title">Audit log</div>
+      <div className="mini-list">
+        {events.length ? (
+          events.map((event) => (
+            <div className="audit-row" key={event.id}>
+              <strong>{event.action}</strong>
+              <span>{event.message || event.entity_type} · {formatDate(event.created_at)}</span>
+            </div>
+          ))
+        ) : (
+          <span className="muted">No audit events loaded.</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RecommendationDiffModal(props: {
+  currentFields: SchemaField[];
+  recommendation: SchemaRecommendation;
+  onApply: () => void;
+  onCancel: () => void;
+}) {
+  const currentKeys = new Set(props.currentFields.map((field) => field.key_name).filter(Boolean));
+  const nextKeys = new Set(props.recommendation.fields.map((field) => field.key_name));
+  const added = props.recommendation.fields.filter((field) => !currentKeys.has(field.key_name));
+  const removed = props.currentFields.filter((field) => field.key_name && !nextKeys.has(field.key_name));
+  const changed = props.recommendation.fields.filter((field) => {
+    const current = props.currentFields.find((item) => item.key_name === field.key_name);
+    return current && (current.description !== field.description || current.output_format !== field.output_format);
+  });
+
+  return (
+    <div className="modal-backdrop">
+      <div className="diff-modal">
+        <div className="pane-header">
+          <div>
+            <p className="eyebrow">AI recommendation</p>
+            <h2>Apply recommended schema?</h2>
+          </div>
+        </div>
+        <p>{props.recommendation.reasoning || "AI generated a new schema draft for this document."}</p>
+        <div className="diff-grid">
+          <DiffList title="Added" items={added.map((field) => field.key_name)} />
+          <DiffList title="Changed" items={changed.map((field) => field.key_name)} />
+          <DiffList title="Removed" items={removed.map((field) => field.key_name)} />
+        </div>
+        <div className="action-row">
+          <button className="secondary" onClick={props.onCancel}>Cancel</button>
+          <button className="primary" onClick={props.onApply}>Apply recommendation</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DiffList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="diff-list">
+      <strong>{title}</strong>
+      {items.length ? items.map((item) => <span key={item}>{item}</span>) : <span className="muted">None</span>}
+    </div>
+  );
+}
+
 function StepPill({ label, active, done }: { label: string; active: boolean; done: boolean }) {
   return <span className={`step-pill ${active ? "active" : ""} ${done ? "done" : ""}`}>{label}</span>;
+}
+
+function ProviderPill({ status }: { status: SystemStatus | null }) {
+  if (!status) return <span className="provider-pill warning">API unknown</span>;
+  const label = status.is_mock ? "Mock mode" : "OpenAI mode";
+  const detail = status.vlm_model_name || (status.has_vlm_credentials ? "model ready" : "missing model");
+  return (
+    <span className={`provider-pill ${status.is_mock ? "mock" : status.has_vlm_credentials ? "ready" : "warning"}`}>
+      {label} · {detail}
+    </span>
+  );
 }
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -1688,6 +2176,16 @@ function validateFields(fields: FieldDefinition[]) {
   if (fields.some((field) => !OUTPUT_FORMATS.includes(field.output_format))) return "Every field needs a supported output format.";
   if (new Set(keys).size !== keys.length) return "Field key names must be unique.";
   return null;
+}
+
+function hasMeaningfulSchema(fields: SchemaField[]) {
+  return fields.some((field) => field.key_name.trim() || field.description.trim());
+}
+
+function exportHref(resultId: string, format: "json" | "csv", presetId: string) {
+  const params = new URLSearchParams({ format });
+  if (presetId) params.set("preset_id", presetId);
+  return `${API_BASE}/api/extraction-results/${resultId}/export?${params.toString()}`;
 }
 
 function parseEditedValue(value: string, format: OutputFormat): unknown {
@@ -1753,10 +2251,10 @@ function formatApiDetail(detail: unknown): string | null {
 function toFriendlyError(error: unknown): string {
   const message = error instanceof Error ? error.message : "Unexpected error";
   if (message.includes("VLM API key and model name are required")) {
-    return "VLM 설정이 없습니다. Home에서 API key와 model name을 저장하거나 로컬 데모용으로 VLM_PROVIDER=mock을 사용하세요.";
+    return "VLM credentials are missing. Use the Setting button to save API key and model name, or use VLM_PROVIDER=mock for a local demo.";
   }
   if (message.includes("Only openai or mock")) {
-    return "지원하지 않는 VLM_PROVIDER입니다. 실제 추출은 openai, 로컬 데모는 mock을 사용하세요.";
+    return "Unsupported VLM_PROVIDER. Use openai for real extraction or mock for local demo mode.";
   }
   return message;
 }
@@ -1765,18 +2263,6 @@ function formatDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleDateString();
-}
-
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let size = value;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-  return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function formatConfidence(value: number | null | undefined) {

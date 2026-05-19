@@ -35,6 +35,9 @@ class SchemaCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     display_name: str | None = Field(default=None, max_length=120)
     description: str | None = None
+    is_template: bool = False
+    template_category: str | None = Field(default=None, max_length=120)
+    pinned: bool = False
     fields: list[FieldDefinition] = Field(min_length=1)
 
     @field_validator("name")
@@ -54,6 +57,9 @@ class SchemaUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     display_name: str | None = Field(default=None, max_length=120)
     description: str | None = None
+    is_template: bool | None = None
+    template_category: str | None = Field(default=None, max_length=120)
+    pinned: bool | None = None
     fields: list[FieldDefinition] | None = Field(default=None, min_length=1)
 
     @field_validator("name")
@@ -77,6 +83,9 @@ class SchemaRead(BaseModel):
     display_name: str | None
     description: str | None
     current_version: int
+    is_template: bool
+    template_category: str | None
+    pinned: bool
     fields: list[FieldDefinition]
     created_at: datetime
     updated_at: datetime
@@ -99,6 +108,10 @@ class DocumentRead(BaseModel):
     size_bytes: int
     page_count: int
     status: str
+    document_type: str | None = None
+    language: str | None = None
+    ai_summary: str | None = None
+    recommendation_reasoning: str | None = None
     pages: list[DocumentPageRead]
     created_at: datetime
 
@@ -138,6 +151,9 @@ class SchemaRecommendationRead(BaseModel):
     name: str
     display_name: str | None = None
     description: str | None = None
+    document_type: str | None = None
+    language: str | None = None
+    reasoning: str | None = None
     fields: list[FieldDefinition]
 
 
@@ -164,6 +180,7 @@ class ExtractionResultRead(BaseModel):
     validated_output: dict[str, Any]
     corrected_output: dict[str, Any] | None
     validation_warnings: list[str]
+    reviewed_fields: list[str]
     created_at: datetime
     updated_at: datetime
 
@@ -183,4 +200,89 @@ class ExtractionJobRead(BaseModel):
 
 
 class ExtractionResultPatch(BaseModel):
-    corrected_output: dict[str, Any]
+    corrected_output: dict[str, Any] | None = None
+    reviewed_fields: list[str] | None = None
+
+
+class SystemStatusRead(BaseModel):
+    app_env: str
+    vlm_provider: str
+    vlm_model_name: str | None
+    has_vlm_credentials: bool
+    is_mock: bool
+
+
+class BatchItemRead(BaseModel):
+    id: str
+    document_id: str
+    job_id: str
+    filename: str
+    status: str
+    result_id: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+
+
+class BatchRead(BaseModel):
+    id: str
+    schema_id: str
+    schema_version: int
+    status: str
+    total_count: int
+    completed_count: int
+    failed_count: int
+    progress: float
+    items: list[BatchItemRead]
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class ExportPresetField(BaseModel):
+    key_name: str
+    column_name: str | None = None
+    include: bool = True
+
+
+class ExportPresetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    schema_id: str | None = None
+    fields: list[ExportPresetField] = Field(default_factory=list)
+
+
+class ExportPresetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    schema_id: str | None = None
+    fields: list[ExportPresetField] | None = None
+
+
+class ExportPresetRead(BaseModel):
+    id: str
+    schema_id: str | None
+    name: str
+    fields: list[ExportPresetField]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ArchiveSearchResult(BaseModel):
+    document_id: str
+    filename: str
+    document_type: str | None
+    language: str | None
+    job_id: str | None = None
+    result_id: str | None = None
+    schema_id: str | None = None
+    schema_name: str | None = None
+    status: str | None = None
+    matched_text: str | None = None
+    created_at: datetime
+
+
+class AuditEventRead(BaseModel):
+    id: str
+    entity_type: str
+    entity_id: str
+    action: str
+    message: str | None
+    metadata: dict[str, Any]
+    created_at: datetime

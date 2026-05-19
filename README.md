@@ -5,8 +5,8 @@ React + FastAPI 기반의 문서 디지털화 워크스페이스입니다. 현�
 ## 현재 기능
 
 - **Raw Data Extractor**: `.docx`, `.xlsx`, `.pptx`, `.pdf`를 업로드하면 PDF preview와 HTML 추출 결과를 생성합니다.
-- **Key Information Extractor**: PDF/image 문서를 업로드하고 사용자가 정의한 schema 기준으로 VLM structured output 값을 추출합니다.
-- **Home VLM 설정**: Home 화면에서 API key와 model name을 입력하고 Save를 누르면 프로젝트 root `.env`가 자동 생성/갱신됩니다.
+- **Key Information Extractor**: PDF/image/DOCX/PPTX 문서를 업로드하고 사용자가 정의한 schema 기준으로 VLM structured output 값을 추출합니다.
+- **Home VLM 설정**: Home 화면 우측 상단 Setting 버튼에서 API key와 model name을 입력하고 Save를 누르면 프로젝트 root `.env`가 자동 생성/갱신됩니다.
 
 ## 디렉터리
 
@@ -31,7 +31,7 @@ uv pip install -e 'backend[dev]'
 
 `backend/pyproject.toml`이 변경되면 같은 설치 명령으로 `.venv`를 업데이트합니다.
 
-VLM 설정은 Home 화면에서 저장합니다. Save를 누르면 root `.env`가 자동 생성되며, 별도 환경 파일을 복사할 필요가 없습니다.
+VLM 설정은 Home 화면 우측 상단 Setting 버튼에서 저장합니다. Save를 누르면 root `.env`가 자동 생성되며, 별도 환경 파일을 복사할 필요가 없습니다.
 
 저장되는 주요 값:
 
@@ -142,6 +142,17 @@ Raw API:
 ## Key Information Extractor
 
 Home 화면에서 진입합니다.
+
+지원 입력:
+
+- `.pdf`
+- `.png`
+- `.jpg`
+- `.jpeg`
+- `.docx`
+- `.pptx`
+
+DOCX/PPTX는 LibreOffice로 PDF preview를 만든 뒤 page image로 rasterize하여 기존 VLM image extraction 경로를 사용합니다.
 
 주요 API:
 

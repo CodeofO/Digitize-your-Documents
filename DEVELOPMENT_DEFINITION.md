@@ -9,7 +9,7 @@ Digitize Your Document는 다양한 문서를 디지털 정보로 변환하는 R
 현재 구현 기능:
 
 - **Raw Data Extractor**: Office/PDF 문서를 PDF preview와 HTML 정보 추출 결과로 변환
-- **Key Information Extractor**: 사용자가 정의한 schema 기준으로 문서 이미지에서 key information 추출
+- **Key Information Extractor**: 사용자가 정의한 schema 기준으로 PDF/image/DOCX/PPTX에서 key information 추출
 
 예정 기능:
 
@@ -20,7 +20,7 @@ Digitize Your Document는 다양한 문서를 디지털 정보로 변환하는 R
 
 - Python 친화적인 backend 중심 구조를 유지한다.
 - VLM secret은 frontend로 전달하지 않는다.
-- Home 화면에서 VLM API key/model name을 저장하면 root `.env`가 자동 생성/갱신된다.
+- Home 화면 우측 상단 Setting popup에서 VLM API key/model name을 저장하면 root `.env`가 자동 생성/갱신된다.
 - 사용자는 별도 환경 파일 복사 절차 없이 git clone 후 Home에서 설정할 수 있다.
 
 ## 2. Raw Data Extractor
@@ -99,7 +99,7 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 ### 3.1 UX
 
 1. 사용자가 Home 화면에서 Key Information Extractor를 선택한다.
-2. PDF/image 문서를 업로드한다.
+2. PDF/image/DOCX/PPTX 문서를 업로드한다.
 3. 좌측 문서 viewer에서 페이지를 확인한다.
 4. 우측 schema builder에서 `key_name`, `description`, `output_format`을 정의한다.
 5. schema 저장 후 extraction을 실행한다.
@@ -133,6 +133,17 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 - VLM 응답이 stringified JSON이면 실패 처리한다.
 - 저장되는 결과는 사용자 schema에 명시된 key만 허용한다.
 
+지원 입력:
+
+- `.pdf`
+- `.png`
+- `.jpg`
+- `.jpeg`
+- `.docx`
+- `.pptx`
+
+DOCX/PPTX는 LibreOffice로 PDF 변환 후 page image로 rasterize한다. 이후 VLM에는 기존과 동일하게 page image data URL을 전달한다.
+
 ## 4. Frontend
 
 첫 화면은 `Digitize Your Document` Home이다.
@@ -143,6 +154,12 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 - Key Information Extractor: enabled
 - OCR: disabled, coming soon
 - Intelligence Parse: disabled, coming soon
+
+Home 우측 상단 Setting 버튼:
+
+- API key/model name 입력 popup 표시
+- Save 시 root `.env` 생성/갱신 후 popup 닫기
+- X 또는 Close 클릭 시 저장하지 않고 popup 닫기
 
 Raw workspace:
 
@@ -205,7 +222,7 @@ Backend:
 
 - health/system status
 - VLM settings read/write
-- image/PDF document upload
+- image/PDF/DOCX/PPTX document upload
 - schema create/update
 - extraction failure without credentials
 - mock extraction success
@@ -218,8 +235,9 @@ Backend:
 Frontend:
 
 - Home 화면의 기능 카드 진입
-- Home VLM settings 저장 UI
+- Home VLM settings popup 열기/저장/닫기
 - 브라우저 Back으로 app Home 복귀
+- Recent panel 접기/펼치기
 - Raw Data Extractor upload/preview layout
 - 이미지/수식 추출 옵션 toggle
 - Key Information Extractor 진입 및 기존 schema/review flow 유지
