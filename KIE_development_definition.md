@@ -168,6 +168,23 @@ LIBREOFFICE_PATH=
 
 `LIBREOFFICE_PATH`는 선택값이다. 기본 macOS 경로는 `/Applications/LibreOffice.app/Contents/MacOS/soffice`이다.
 
+LibreOffice는 Python 패키지가 아니라 외부 시스템 앱/CLI이므로 `.venv` 안에 일반 pip 의존성처럼 설치하지 않는다. Raw Data Extractor는 `soffice` CLI를 호출해 Office 문서를 PDF preview로 변환한다.
+
+macOS 설치 방법:
+
+```bash
+brew install --cask libreoffice
+soffice --version
+```
+
+Homebrew를 쓰지 않는 경우 공식 LibreOffice 다운로드 페이지에서 설치한다.
+
+설치 후 자동 탐색이 되지 않으면 `.env`에 명시한다.
+
+```env
+LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
+```
+
 ## 6. 테스트 기준
 
 Backend:

@@ -55,6 +55,47 @@ OPENAI_MODEL_NAME=
 
 `LIBREOFFICE_PATH` is optional. On macOS the backend checks `/Applications/LibreOffice.app/Contents/MacOS/soffice` by default.
 
+## LibreOffice
+
+LibreOffice cannot be installed into `.venv` as a normal Python dependency. The backend uses the external `soffice` CLI for Office-to-PDF preview conversion, so LibreOffice must be installed at the OS level.
+
+This machine currently has LibreOffice available at:
+
+```bash
+/Applications/LibreOffice.app/Contents/MacOS/soffice --version
+which soffice
+```
+
+Expected local paths:
+
+- `/Applications/LibreOffice.app/Contents/MacOS/soffice`
+- `/usr/local/bin/soffice`
+
+Install on macOS with Homebrew:
+
+```bash
+brew install --cask libreoffice
+```
+
+Or install from the official LibreOffice download page:
+
+- https://www.libreoffice.org/download/download-libreoffice/
+- https://www.libreoffice.org/get-help/install-howto/macos/
+
+After installation, verify:
+
+```bash
+soffice --version
+```
+
+If `soffice` is installed in a non-standard location, set the explicit path in `.env`:
+
+```env
+LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
+```
+
+If LibreOffice is missing or the configured path is invalid, Raw Data Extractor marks the extraction as `failed` and returns an error message explaining that LibreOffice must be installed or `LIBREOFFICE_PATH` must be set.
+
 Frontend only needs:
 
 ```bash
