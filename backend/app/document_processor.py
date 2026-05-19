@@ -1,0 +1,103 @@
+import shutil
+from pathlib import Path
+from uuid import uuid4
+
+import fitz
+from fastapi import UploadFile
+
+from app.config import get_settings
+
+
+ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+
+class DocumentProcessingError(ValueError):
+    pass
+
+
+def validate_upload(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise DocumentProcessingError("Only PDF, PNG, JPG, and JPEG files are supported")
+    return suffix
+
+
+def save_upload_file(upload: UploadFile) -> tuple[str, Path, int]:
+    suffix = validate_upload(upload.filename or "")
+    settings = get_settings()
+    document_dir = settings.resolved_storage_dir / uuid4().hex
+    document_dir.mkdir(parents=True, exist_ok=True)
+    original_path = document_dir / f"original{suffix}"
+
+    size = 0
+    with original_path.open("wb") as destination:
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            destination.write(chunk)
+
+    return upload.filename or original_path.name, original_path, size
+
+
+def rasterize_document(source_path: Path) -> list[dict[str, int | str]]:
+    suffix = source_path.suffix.lower()
+    page_dir = source_path.parent / "pages"
+    page_dir.mkdir(parents=True, exist_ok=True)
+
+    if suffix == ".pdf":
+        return _rasterize_pdf(source_path, page_dir)
+    if suffix in IMAGE_EXTENSIONS:
+        return _rasterize_image(source_path, page_dir)
+    raise DocumentProcessingError("Unsupported document type")
+
+
+def _rasterize_pdf(source_path: Path, page_dir: Path) -> list[dict[str, int | str]]:
+    pages: list[dict[str, int | str]] = []
+    try:
+        with fitz.open(source_path) as document:
+            if document.page_count == 0:
+                raise DocumentProcessingError("PDF has no pages")
+            for index, page in enumerate(document, start=1):
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                image_path = page_dir / f"page_{index}.png"
+                pixmap.save(image_path)
+                pages.append(
+                    {
+                        "page_number": index,
+                        "image_path": str(image_path),
+                        "width": pixmap.width,
+                        "height": pixmap.height,
+                    }
+                )
+    except fitz.FileDataError as exc:
+        raise DocumentProcessingError("Failed to read PDF") from exc
+    return pages
+
+
+def _rasterize_image(source_path: Path, page_dir: Path) -> list[dict[str, int | str]]:
+    image_path = page_dir / "page_1.png"
+    try:
+        with fitz.open(source_path) as document:
+            page = document[0]
+            pixmap = page.get_pixmap(alpha=False)
+            pixmap.save(image_path)
+            width = pixmap.width
+            height = pixmap.height
+    except Exception:
+        shutil.copyfile(source_path, image_path)
+        with fitz.open(image_path) as document:
+            page = document[0]
+            width = int(page.rect.width)
+            height = int(page.rect.height)
+
+    return [
+        {
+            "page_number": 1,
+            "image_path": str(image_path),
+            "width": width,
+            "height": height,
+        }
+    ]
