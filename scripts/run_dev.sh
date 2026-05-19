@@ -32,7 +32,8 @@ echo "Starting backend:  http://${BACKEND_HOST}:${BACKEND_PORT}"
   "${ROOT_DIR}/.venv/bin/python" -m uvicorn app.main:app \
     --app-dir backend \
     --host "${BACKEND_HOST}" \
-    --port "${BACKEND_PORT}"
+    --port "${BACKEND_PORT}" \
+    --reload
 ) &
 BACKEND_PID=$!
 

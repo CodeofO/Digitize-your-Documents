@@ -476,12 +476,31 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-height: 520px;
+  flex: 1;
+  margin-bottom: 0;
+  min-height: 0;
 }
 
 .html-frame {
   border-top: 1px solid #d9e0da;
-  min-height: 420px;
+  min-height: 0;
+}
+
+.raw-workspace .side-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.raw-history {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+  margin-top: auto;
+}
+
+.raw-history .history-list {
+  max-height: 180px;
 }
 
 .option-list {

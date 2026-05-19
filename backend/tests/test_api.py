@@ -344,6 +344,21 @@ def test_raw_extraction_pdf_upload_with_images_option() -> None:
         assert "data:image/png;base64" in html_response.text
 
 
+def test_raw_extraction_pdf_upload_includes_images_by_default() -> None:
+    with get_client() as client:
+        response = client.post(
+            "/api/raw-extractions",
+            files={"file": ("sample.pdf", make_pdf_with_image_bytes(), "application/pdf")},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["status"] == "completed"
+
+        html_response = client.get(payload["html_url"])
+        assert html_response.status_code == 200
+        assert "data:image/png;base64" in html_response.text
+
+
 def test_raw_extraction_pptx_upload_with_images_option(monkeypatch) -> None:
     def fake_convert(source_path, suffix, pdf_path):
         document = fitz.open()

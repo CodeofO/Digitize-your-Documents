@@ -1,26 +1,44 @@
-# Digitize Your Document
+<div align="center">
+  <h1>Digitize Your Document</h1>
+  <p><b>문서를 업로드하고, 원본 정보 추출과 스키마 기반 정보 추출을 한 화면에서 검증하는 React + FastAPI 워크스페이스</b></p>
+  <p>
+    <code>React</code>
+    <code>Vite</code>
+    <code>TypeScript</code>
+    <code>FastAPI</code>
+    <code>SQLite</code>
+    <code>LangChain</code>
+    <code>LibreOffice</code>
+    <code>PyMuPDF</code>
+  </p>
+</div>
 
-React + FastAPI 기반의 문서 디지털화 워크스페이스입니다. 현재 구현된 기능은 원본 정보 추출과 key information extraction이며, OCR과 Intelligence Parse는 이후 확장 예정입니다.
+## 핵심 기능
 
-## 현재 기능
+| 기능 | 상태 | 설명 |
+| --- | --- | --- |
+| Raw Data Extractor | 구현 | `.docx`, `.xlsx`, `.pptx`, `.pdf`를 업로드하면 PDF preview와 HTML 정보 추출 결과를 생성합니다. |
+| Key Information Extractor | 구현 | PDF/image/DOCX/PPTX 문서를 업로드하고 사용자가 정의한 schema 기준으로 VLM structured output 값을 추출합니다. |
+| OCR | 예정 | 단순 OCR 기능으로 확장 예정입니다. |
+| Intelligence Parse | 예정 | 문서를 지능적으로 파싱하는 기능으로 확장 예정입니다. |
 
-- **Raw Data Extractor**: `.docx`, `.xlsx`, `.pptx`, `.pdf`를 업로드하면 PDF preview와 HTML 추출 결과를 생성합니다.
-- **Key Information Extractor**: PDF/image/DOCX/PPTX 문서를 업로드하고 사용자가 정의한 schema 기준으로 VLM structured output 값을 추출합니다.
-- **Home VLM 설정**: Home 화면 우측 상단 Setting 버튼에서 API key와 model name을 입력하고 Save를 누르면 프로젝트 root `.env`가 자동 생성/갱신됩니다.
+## 사용 도구
 
-## 디렉터리
+| 영역 | 도구 |
+| --- | --- |
+| Frontend | React 19, Vite 7, TypeScript, lucide-react |
+| Backend API | FastAPI, Uvicorn, Pydantic Settings |
+| Database | SQLite, SQLAlchemy |
+| VLM | LangChain, langchain-openai, structured output |
+| PDF/Image | PyMuPDF |
+| Office Preview | LibreOffice `soffice` CLI |
+| DOCX Parsing | mammoth, OOXML fallback |
+| XLSX Parsing | openpyxl |
+| PPTX Parsing | python-pptx, OOXML fallback |
+| HTML Safety | bleach sanitize, sandboxed iframe |
+| Dev/Test | uv, pytest, npm, Vite build |
 
-```text
-.
-├── backend/                   # FastAPI, SQLite, 문서 처리, VLM, raw extraction
-├── frontend/                  # Vite + React + TypeScript UI
-├── sync_raw_to_pdf.py         # LibreOffice PDF 변환 참고 스크립트
-├── DEVELOPMENT_DEFINITION.md  # 개발정의서
-├── ERROR_NOTE.md              # 중요 오류 및 검증 기록
-└── README.md
-```
-
-## 환경 구성
+## 빠른 실행
 
 Python은 conda가 아니라 `uv` 기반 `.venv`를 사용합니다.
 
@@ -29,11 +47,34 @@ uv venv --python 3.11 .venv
 uv pip install -e 'backend[dev]'
 ```
 
-`backend/pyproject.toml`이 변경되면 같은 설치 명령으로 `.venv`를 업데이트합니다.
+Frontend 의존성을 설치합니다.
 
-VLM과 LibreOffice 경로 설정은 Home 화면 우측 상단 Setting 버튼에서 저장합니다. Save를 누르면 root `.env`가 자동 생성되며, 별도 환경 파일을 복사할 필요가 없습니다.
+```bash
+cd frontend
+npm install
+cd ..
+```
 
-저장되는 주요 값:
+Backend와 frontend를 한 번에 실행합니다.
+
+```bash
+./scripts/run_dev.sh
+```
+
+기본 주소:
+
+| 서버 | 주소 | 개발 반영 |
+| --- | --- | --- |
+| Backend | `http://127.0.0.1:8000` | `uvicorn --reload` |
+| Frontend | `http://127.0.0.1:5173` | Vite HMR |
+
+`scripts/run_dev.sh`를 한 번 재시작한 뒤에는 backend Python 코드 변경과 frontend React/CSS 변경이 개발 서버에 자동 반영됩니다.
+
+## 설정
+
+Home 화면 우측 상단 `Setting` 버튼에서 API key, model name, LibreOffice path를 저장합니다. Save를 누르면 프로젝트 root의 `.env`가 자동 생성 또는 갱신됩니다.
+
+주요 값:
 
 ```env
 APP_ENV=local
@@ -47,15 +88,15 @@ VLM_TIMEOUT_SECONDS=120
 LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
 ```
 
-Frontend는 기본적으로 `http://localhost:8000` backend를 사용합니다. 다른 backend 주소가 필요할 때만 실행 시점에 지정합니다.
+로컬 데모에서 실제 VLM 호출을 피하려면 root `.env`에 아래 값을 둘 수 있습니다.
 
-```bash
-VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
+```env
+VLM_PROVIDER=mock
 ```
 
 ## LibreOffice
 
-LibreOffice는 Python 패키지가 아니라 OS 레벨 앱/CLI입니다. Raw Data Extractor는 Office 문서의 PDF preview 생성을 위해 외부 `soffice` 명령을 호출합니다.
+LibreOffice는 Python 패키지가 아니라 OS 레벨 앱/CLI입니다. Office 문서의 PDF preview 생성을 위해 backend가 외부 `soffice` 명령을 호출합니다.
 
 macOS 설치:
 
@@ -64,52 +105,22 @@ brew install --cask libreoffice
 soffice --version
 ```
 
-공식 설치 문서:
-
-- https://www.libreoffice.org/download/download-libreoffice/
-- https://www.libreoffice.org/get-help/install-howto/macos/
-
-자동 탐색이 되지 않으면 Home 또는 `.env`에서 경로를 지정합니다.
+자동 탐색이 되지 않으면 Home 설정 또는 `.env`에서 경로를 지정합니다.
 
 ```env
 LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
-```
-
-## 실행
-
-Backend와 frontend를 한 번에 실행합니다.
-
-```bash
-./scripts/run_dev.sh
-```
-
-기본 주소:
-
-- Backend: `http://127.0.0.1:8000`
-- Frontend: `http://127.0.0.1:5173`
-
-Backend만 실행:
-
-```bash
-.venv/bin/python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
-```
-
-Frontend만 실행:
-
-```bash
-cd frontend
-npm install
-VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
 ## Raw Data Extractor
 
 지원 포맷:
 
-- `.docx`
-- `.xlsx`
-- `.pptx`
-- `.pdf`
+| 포맷 | PDF preview | HTML 추출 |
+| --- | --- | --- |
+| `.docx` | LibreOffice 변환 | mammoth + OOXML fallback |
+| `.xlsx` | LibreOffice 변환 | openpyxl sheet table |
+| `.pptx` | LibreOffice 변환 | python-pptx slide text/table/image |
+| `.pdf` | 원본 복사 | PyMuPDF page text/image |
 
 처리 흐름:
 
@@ -121,60 +132,78 @@ VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev -- --host 127.0.0.1 --port 5
 
 업로드 옵션:
 
-- `include_images`: 지원 가능한 이미지를 HTML에 data URL로 포함합니다. UI 기본값은 on입니다.
-- `include_formulas`: XLSX cell formula와 DOCX/PPTX Office Math 텍스트를 포함합니다.
-
-Parser 전략:
-
-- `.docx`: `mammoth` semantic HTML, 선택적 image data URI, 선택적 OOXML math 추출, `bleach` sanitize
-- `.xlsx`: `openpyxl` read-only sheet table, 선택적 `data_only=False` formula 렌더링, 선택적 `xl/media/` 이미지 포함
-- `.pptx`: `python-pptx` slide text/table/image 추출, 선택적 OOXML math 추출
-- `.pdf`: PyMuPDF page text block 추출, 선택적 page image 추출
+| 옵션 | 기본값 | 설명 |
+| --- | --- | --- |
+| `include_images` | on | 지원 가능한 embedded raster image를 HTML에 data URL로 포함합니다. |
+| `include_formulas` | off | XLSX formula와 DOCX/PPTX Office Math 텍스트를 포함합니다. |
 
 Raw API:
 
-- `POST /api/raw-extractions`
-- `GET /api/raw-extractions?limit=20`
-- `GET /api/raw-extractions/{id}`
-- `GET /api/raw-extractions/{id}/pdf`
-- `GET /api/raw-extractions/{id}/html`
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/raw-extractions` |
+| `GET` | `/api/raw-extractions?limit=20` |
+| `GET` | `/api/raw-extractions/{id}` |
+| `GET` | `/api/raw-extractions/{id}/pdf` |
+| `GET` | `/api/raw-extractions/{id}/html` |
 
 ## Key Information Extractor
 
-Home 화면에서 진입합니다.
-
 지원 입력:
 
-- `.pdf`
-- `.png`
-- `.jpg`
-- `.jpeg`
-- `.docx`
-- `.pptx`
+| 포맷 | 처리 |
+| --- | --- |
+| `.pdf` | page image로 rasterize 후 VLM에 전달 |
+| `.png`, `.jpg`, `.jpeg` | 1페이지 문서로 저장 후 VLM에 전달 |
+| `.docx`, `.pptx` | LibreOffice로 PDF 변환 후 page image로 rasterize |
 
-DOCX/PPTX는 LibreOffice로 PDF preview를 만든 뒤 page image로 rasterize하여 기존 VLM image extraction 경로를 사용합니다.
+스키마 필드:
 
-주요 API:
+| 필드 | 설명 |
+| --- | --- |
+| `key_name` | 추출할 값의 키 이름 |
+| `description` | 문서 내 위치, 의미, 추출 기준 |
+| `output_format` | `string`, `float`, `date`, `bool` |
 
-- `GET /api/health`
-- `GET /api/system/status`
-- `GET /api/settings/vlm`
-- `PUT /api/settings/vlm`
-- `POST /api/documents`
-- `GET /api/documents?limit=20`
-- `POST /api/schemas`
-- `GET /api/schemas`
-- `PATCH /api/schemas/{schema_id}`
-- `POST /api/schemas/recommendations`
-- `POST /api/extraction-jobs`
-- `GET /api/extraction-jobs/{job_id}`
-- `PATCH /api/extraction-results/{result_id}`
-- `GET /api/extraction-results/{result_id}/export?format=json|csv`
+KIE API:
 
-로컬 데모에서 실제 VLM 호출을 피하려면 Home 설정 대신 root `.env`에 아래 값을 둘 수 있습니다.
+| Method | Path |
+| --- | --- |
+| `GET` | `/api/health` |
+| `GET` | `/api/system/status` |
+| `GET` | `/api/settings/vlm` |
+| `PUT` | `/api/settings/vlm` |
+| `POST` | `/api/documents` |
+| `GET` | `/api/documents?limit=20` |
+| `POST` | `/api/schemas` |
+| `GET` | `/api/schemas` |
+| `PATCH` | `/api/schemas/{schema_id}` |
+| `POST` | `/api/schemas/recommendations` |
+| `POST` | `/api/extraction-jobs` |
+| `GET` | `/api/extraction-jobs/{job_id}` |
+| `PATCH` | `/api/extraction-results/{result_id}` |
+| `GET` | `/api/extraction-results/{result_id}/export?format=json\|csv` |
 
-```env
-VLM_PROVIDER=mock
+## 문서와 구조
+
+| 파일 | 설명 |
+| --- | --- |
+| `DEVELOPMENT_DEFINITION.md` | 제품 기준 개발정의서 |
+| `ERROR_NOTE.md` | 중요 오류와 수정 검증 기록 |
+| `architecture_overview.html` | 기능, 데이터 구조, 처리 흐름을 한눈에 보는 HTML 아키텍처 문서 |
+| `sync_raw_to_pdf.py` | LibreOffice PDF 변환 참고 스크립트 |
+
+디렉터리:
+
+```text
+.
+├── backend/                  # FastAPI, SQLite, 문서 처리, VLM, raw extraction
+├── frontend/                 # Vite + React + TypeScript UI
+├── scripts/run_dev.sh        # backend/frontend 동시 실행
+├── DEVELOPMENT_DEFINITION.md
+├── ERROR_NOTE.md
+├── architecture_overview.html
+└── README.md
 ```
 
 ## 테스트
@@ -192,11 +221,11 @@ cd frontend
 npm run build
 ```
 
-Backend 테스트는 Office 파일의 LibreOffice 변환을 mock 처리합니다. 실제 LibreOffice PDF 변환은 로컬 smoke test로 확인합니다.
+Backend 테스트는 Office 파일의 LibreOffice 변환을 mock 처리합니다. 실제 Office to PDF 변환은 로컬 smoke test로 확인합니다.
 
 ## 운영 메모
 
 - SQLite DB 기본 파일명은 `backend/digitize_documents.db`입니다.
 - 업로드 문서와 raw extraction 결과는 `backend/storage/` 아래에 저장됩니다.
 - `.env`, `.venv`, local DB, storage output, `node_modules`, frontend build artifact는 git에서 제외됩니다.
-- OCR과 Intelligence Parse는 UI에 비활성 카드로 표시되며 아직 구현 범위가 아닙니다.
+- `.env.example` 복사는 필요하지 않습니다. Home Setting에서 `.env`를 생성합니다.

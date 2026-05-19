@@ -647,7 +647,7 @@ export default function App() {
         setEdits(nextValues);
         setEditedKeys([]);
         setReviewedFields(completed.result.reviewed_fields ?? []);
-        setReviewFilter("needs_review");
+        setReviewFilter("all");
         setStep("review");
         void loadAuditEvents("extraction_result", completed.result.id);
       }
@@ -703,7 +703,7 @@ export default function App() {
           setEdits(jobs[0].result.corrected_output?.values ?? jobs[0].result.validated_output.values);
           setReviewedFields(jobs[0].result.reviewed_fields ?? []);
           setEditedKeys([]);
-          setReviewFilter("needs_review");
+          setReviewFilter("all");
           setStep("review");
           void loadAuditEvents("extraction_result", jobs[0].result.id);
         } else {
@@ -749,7 +749,7 @@ export default function App() {
         setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
         setReviewedFields(loadedJob.result.reviewed_fields ?? []);
         setEditedKeys([]);
-        setReviewFilter("needs_review");
+        setReviewFilter("all");
         setStep("review");
         void loadAuditEvents("extraction_result", loadedJob.result.id);
       } else {
@@ -1365,11 +1365,11 @@ function RawWorkspace(props: {
           )}
         </section>
 
-        <section className="history-panel">
+        <section className="history-panel raw-history">
           <div className="history-header">
             <div className="preview-title inline-title">
               <History size={16} />
-              Recent Raw
+              Raw History
             </div>
             <button type="button" className="secondary compact" onClick={props.onToggleHistory}>
               {props.historyCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
