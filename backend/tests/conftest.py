@@ -2,8 +2,8 @@ import os
 import tempfile
 from pathlib import Path
 
-TEST_DIR = Path(tempfile.mkdtemp(prefix="kie_backend_tests_"))
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DIR / 'kie_test.db'}"
+TEST_DIR = Path(tempfile.mkdtemp(prefix="digitize_documents_backend_tests_"))
+os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DIR / 'digitize_documents_test.db'}"
 os.environ["DOCUMENT_STORAGE_DIR"] = str(TEST_DIR / "storage")
 os.environ["RAW_STORAGE_DIR"] = str(TEST_DIR / "raw_storage")
 os.environ["VLM_PROVIDER"] = "openai"

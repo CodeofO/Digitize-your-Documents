@@ -117,6 +117,19 @@ class RawExtractionRead(BaseModel):
     updated_at: datetime
 
 
+class VlmSettingsRead(BaseModel):
+    provider: str
+    model_name: str | None
+    has_api_key: bool
+    env_path: str
+
+
+class VlmSettingsUpdate(BaseModel):
+    api_key: str | None = None
+    model_name: str
+    provider: str = "openai"
+
+
 class SchemaRecommendationRequest(BaseModel):
     document_id: str
 

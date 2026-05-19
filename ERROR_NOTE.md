@@ -1,67 +1,79 @@
-# Error Note
+# 오류 기록
 
-## 2026-05-19 - Service UX expansion verification note
+## 2026-05-19 - 서비스 UX 확장 검증 기록
 
-### Scope
-- Added provider status, document intelligence, schema templates, batch upload, archive search, review progress, export presets, and audit events.
-- Added lightweight SQLite migrations in `init_db()` so existing local DB rows are preserved while new columns/tables are added.
-- AI 추천 Schema는 field-level `display_name` 없이 문서 주 언어 기반 `key_name`을 추천하도록 유지했다.
+### 범위
 
-### Issue Found During Verification
-- 검증용 frontend를 기존 `5173` 대신 `5174`에 띄우자 backend CORS allowlist가 `5173/4173`만 허용해서 browser fetch가 차단되었다.
-- Fix: `backend/app/main.py`에 localhost/127.0.0.1 임의 포트를 허용하는 `allow_origin_regex`를 추가했다.
+- Provider 상태, 문서 인텔리전스, schema template, batch upload, archive search, review progress, export preset, audit event를 추가했다.
+- 기존 로컬 SQLite row를 유지하면서 새 column/table을 추가할 수 있도록 `init_db()`에 경량 migration을 추가했다.
+- AI 추천 schema는 field-level `display_name` 없이 문서 주 언어 기반 `key_name`을 추천하도록 유지했다.
 
-### Verification
-- `npm run build` passed.
-- `.venv/bin/python -m pytest backend` passed with 10 tests.
+### 검증 중 발견한 이슈
 
-### Notes
-- Existing local SQLite data should remain usable, but production migration tooling is still intentionally out of MVP scope.
-- Dev HMR remains disabled from the earlier Vite blank-screen fix.
+- 검증용 frontend를 기존 `5173` 대신 `5174`에 띄우자 backend CORS allowlist가 `5173/4173`만 허용해 browser fetch가 차단되었다.
+- 수정: `backend/app/main.py`에 localhost/127.0.0.1 임의 포트를 허용하는 `allow_origin_regex`를 추가했다.
+
+### 검증
+
+- `npm run build` 통과
+- `.venv/bin/python -m pytest backend` 통과, 당시 10개 테스트 기준
+
+### 메모
+
+- 기존 로컬 SQLite data는 유지되어야 한다.
+- 운영 migration tooling은 현재 MVP 범위에서 제외한다.
+- Dev HMR은 이전 Vite blank screen 수정 이후 안정성을 위해 비활성 상태를 유지한다.
 
 ## 2026-05-19 - Frontend dev server blank screen
 
-### Symptom
-- `http://127.0.0.1:5173/` opened, but the app screen did not render.
-- Vite served `index.html`, but module requests such as `/src/main.tsx`, `/src/App.tsx`, and `/@vite/client` timed out.
-- Playwright screenshot timed out while waiting for the page load.
+### 증상
 
-### Impact
-- The production build could pass, but local dev verification was blocked.
-- The user-facing MVP screen was not visible from the expected frontend URL.
+- `http://127.0.0.1:5173/`는 열렸지만 app 화면이 렌더링되지 않았다.
+- Vite는 `index.html`을 제공했지만 `/src/main.tsx`, `/src/App.tsx`, `/@vite/client` 같은 module request가 timeout 되었다.
+- Playwright screenshot도 page load 대기 중 timeout 되었다.
 
-### Root Cause
-- `lucide-react` was imported from the package root barrel in `frontend/src/App.tsx`.
-- In this local environment, Vite dev mode plus React Refresh/Babel transform hung while transforming frontend modules.
-- The hang made TSX module responses stall even though the Vite server itself was running.
+### 영향
 
-### Fix
-- Changed lucide imports in `frontend/src/App.tsx` from root barrel import to direct icon module imports.
-- Added `frontend/src/lucide-icons.d.ts` so TypeScript accepts direct lucide icon module imports.
-- Disabled Vite dev HMR in `frontend/vite.config.ts` to avoid the React Refresh/Babel hang path during MVP verification.
+- Production build는 통과할 수 있었지만 local dev 검증이 막혔다.
+- 사용자가 확인해야 하는 MVP 첫 화면이 예상 frontend URL에서 보이지 않았다.
 
-### Verification
-- `npm run build` passed.
-- `curl http://127.0.0.1:5173/` returned `index.html`.
-- `curl http://127.0.0.1:5173/src/main.tsx` returned transformed module code.
-- Playwright confirmed the first screen renders at `http://127.0.0.1:5173/`.
-- Playwright E2E passed:
-  - load recent document
-  - AI recommend schema
-  - save schema
-  - run extraction
-  - review result
-  - filter review rows
-  - click page link
-- Mobile viewport render was also checked.
+### 원인
 
-### Commands Used
+- `frontend/src/App.tsx`가 `lucide-react` package root barrel에서 icon을 import하고 있었다.
+- 이 로컬 환경에서는 Vite dev mode와 React Refresh/Babel transform 조합이 frontend module transform 중 멈췄다.
+- Vite server 자체는 떠 있었지만 TSX module response가 정지되었다.
+
+### 수정
+
+- `frontend/src/App.tsx`의 lucide import를 root barrel import에서 icon별 direct module import로 변경했다.
+- TypeScript가 direct lucide icon module import를 허용하도록 `frontend/src/lucide-icons.d.ts`를 추가했다.
+- MVP 검증 중 React Refresh/Babel 정지 경로를 피하기 위해 `frontend/vite.config.ts`에서 Vite dev HMR을 비활성화했다.
+
+### 검증
+
+- `npm run build` 통과
+- `curl http://127.0.0.1:5173/`가 `index.html` 반환
+- `curl http://127.0.0.1:5173/src/main.tsx`가 변환된 module code 반환
+- Playwright로 첫 화면 렌더링 확인
+- Playwright E2E로 아래 흐름 확인:
+  - recent document load
+  - AI schema recommendation
+  - schema save
+  - extraction run
+  - result review
+  - review row filter
+  - page link click
+- Mobile viewport render도 확인했다.
+
+### 사용 명령
+
 ```bash
 cd frontend
 npm run build
 VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev -- --host 127.0.0.1 --port 5173 --force --clearScreen false
 ```
 
-### Notes
-- Dev HMR is currently off for stability.
-- If hot reload is needed later, first test with a newer compatible Vite/plugin-react/lucide stack, then re-enable `server.hmr`.
+### 메모
+
+- Dev HMR은 현재 안정성을 위해 꺼져 있다.
+- Hot reload가 필요하면 먼저 최신 Vite/plugin-react/lucide 조합으로 재검증한 뒤 `server.hmr`을 다시 켠다.

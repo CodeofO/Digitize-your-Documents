@@ -6,18 +6,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.database import get_db, init_db
-from app.config import get_settings
+from app.config import ROOT_ENV_PATH, get_settings, upsert_root_env
 from app.document_processor import DocumentProcessingError, rasterize_document, save_upload_file
 from app.extraction import result_to_dict, run_extraction_job
 from app.models import Document, DocumentPage, ExtractionJob, ExtractionResult, RawExtraction, Schema, SchemaVersion
-from app.raw_extractor import RawExtractionError, create_raw_outputs, save_raw_upload, validate_raw_upload
+from app.raw_extractor import RawExtractionError, RawExtractionOptions, create_raw_outputs, save_raw_upload, validate_raw_upload
 from app.schemas import (
     DocumentPageRead,
     DocumentRead,
@@ -30,6 +30,8 @@ from app.schemas import (
     SchemaRecommendationRequest,
     SchemaRead,
     SchemaUpdate,
+    VlmSettingsRead,
+    VlmSettingsUpdate,
 )
 from app.vlm import recommend_schema_with_vlm
 
@@ -40,7 +42,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="KIE MVP API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Digitize Your Document API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -74,8 +76,42 @@ def system_status() -> dict[str, Any]:
     }
 
 
+@app.get("/api/settings/vlm", response_model=VlmSettingsRead)
+def get_vlm_settings() -> VlmSettingsRead:
+    settings = get_settings()
+    return VlmSettingsRead(
+        provider=settings.vlm_provider.lower(),
+        model_name=settings.resolved_vlm_model_name,
+        has_api_key=bool(settings.resolved_vlm_api_key),
+        env_path=str(ROOT_ENV_PATH),
+    )
+
+
+@app.put("/api/settings/vlm", response_model=VlmSettingsRead)
+def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
+    provider = payload.provider.strip().lower() or "openai"
+    if provider not in {"openai", "mock"}:
+        raise HTTPException(status_code=400, detail="Only openai or mock provider is supported")
+
+    updates = {
+        "VLM_PROVIDER": provider,
+        "VLM_MODEL_NAME": payload.model_name.strip(),
+    }
+    api_key = (payload.api_key or "").strip()
+    if api_key:
+        updates["VLM_API_KEY"] = api_key
+
+    upsert_root_env(updates, include_defaults=True)
+    return get_vlm_settings()
+
+
 @app.post("/api/raw-extractions", response_model=RawExtractionRead)
-def upload_raw_extraction(file: UploadFile = File(...), db: Session = Depends(get_db)) -> RawExtractionRead:
+def upload_raw_extraction(
+    file: UploadFile = File(...),
+    include_images: bool = Form(default=False),
+    include_formulas: bool = Form(default=False),
+    db: Session = Depends(get_db),
+) -> RawExtractionRead:
     try:
         source_format = validate_raw_upload(file.filename or "")[1:]
     except RawExtractionError as exc:
@@ -96,7 +132,11 @@ def upload_raw_extraction(file: UploadFile = File(...), db: Session = Depends(ge
         raw.source_format = source_format
         raw.storage_path = str(original_path)
         raw.size_bytes = size_bytes
-        pdf_path, html_path, warnings = create_raw_outputs(original_path, source_format)
+        pdf_path, html_path, warnings = create_raw_outputs(
+            original_path,
+            source_format,
+            RawExtractionOptions(include_images=include_images, include_formulas=include_formulas),
+        )
         raw.pdf_path = str(pdf_path)
         raw.html_path = str(html_path)
         raw.warnings = json.dumps(warnings, ensure_ascii=False)

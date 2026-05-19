@@ -37,6 +37,22 @@ def test_system_status_mock_mode() -> None:
         get_settings.cache_clear()
 
 
+def test_root_env_upsert_creates_vlm_settings(monkeypatch, tmp_path) -> None:
+    from app import config as config_module
+
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(config_module, "ROOT_ENV_PATH", env_path)
+    config_module.upsert_root_env(
+        {"VLM_API_KEY": "test-secret", "VLM_MODEL_NAME": "test-model"},
+        include_defaults=True,
+    )
+
+    contents = env_path.read_text(encoding="utf-8")
+    assert 'APP_ENV="local"' in contents
+    assert 'VLM_API_KEY="test-secret"' in contents
+    assert 'VLM_MODEL_NAME="test-model"' in contents
+
+
 def test_schema_validation_and_creation() -> None:
     with get_client() as client:
         invalid = client.post(
@@ -254,6 +270,22 @@ def test_raw_extraction_pdf_upload() -> None:
         assert any(item["id"] == payload["id"] for item in recent)
 
 
+def test_raw_extraction_pdf_upload_with_images_option() -> None:
+    with get_client() as client:
+        response = client.post(
+            "/api/raw-extractions",
+            data={"include_images": "true"},
+            files={"file": ("sample.pdf", make_pdf_with_image_bytes(), "application/pdf")},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["status"] == "completed"
+
+        html_response = client.get(payload["html_url"])
+        assert html_response.status_code == 200
+        assert "data:image/png;base64" in html_response.text
+
+
 def test_raw_extraction_office_uploads(monkeypatch) -> None:
     def fake_convert(source_path, suffix, pdf_path):
         document = fitz.open()
@@ -284,6 +316,36 @@ def test_raw_extraction_office_uploads(monkeypatch) -> None:
             html_response = client.get(payload["html_url"])
             assert html_response.status_code == 200
             assert expected_text in html_response.text
+
+
+def test_raw_extraction_xlsx_formula_option(monkeypatch) -> None:
+    def fake_convert(source_path, suffix, pdf_path):
+        document = fitz.open()
+        page = document.new_page(width=240, height=120)
+        page.insert_text((24, 60), f"Preview for {source_path.name}")
+        document.save(pdf_path)
+        document.close()
+
+    monkeypatch.setattr("app.raw_extractor.convert_office_to_pdf", fake_convert)
+
+    with get_client() as client:
+        response = client.post(
+            "/api/raw-extractions",
+            data={"include_formulas": "true"},
+            files={
+                "file": (
+                    "book.xlsx",
+                    make_xlsx_formula_bytes(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["status"] == "completed", payload
+        html_response = client.get(payload["html_url"])
+        assert html_response.status_code == 200
+        assert "=SUM(B2:B2)" in html_response.text
 
 
 def upload_png(client):
@@ -323,6 +385,17 @@ def make_pdf_bytes() -> bytes:
     document = fitz.open()
     page = document.new_page(width=240, height=120)
     page.insert_text((24, 60), "Invoice No. INV-2026-001")
+    buffer = io.BytesIO()
+    document.save(buffer)
+    document.close()
+    return buffer.getvalue()
+
+
+def make_pdf_with_image_bytes() -> bytes:
+    document = fitz.open()
+    page = document.new_page(width=240, height=120)
+    page.insert_text((24, 28), "Document with image")
+    page.insert_image(fitz.Rect(24, 40, 80, 96), stream=ONE_BY_ONE_PNG)
     buffer = io.BytesIO()
     document.save(buffer)
     document.close()
@@ -371,6 +444,21 @@ def make_xlsx_bytes() -> bytes:
     sheet.title = "Finance"
     sheet.append(["Metric", "Value"])
     sheet.append(["Revenue", 100])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
+
+
+def make_xlsx_formula_bytes() -> bytes:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Finance"
+    sheet.append(["Metric", "Value"])
+    sheet.append(["Revenue", 100])
+    sheet.append(["Total", "=SUM(B2:B2)"])
     buffer = io.BytesIO()
     workbook.save(buffer)
     workbook.close()

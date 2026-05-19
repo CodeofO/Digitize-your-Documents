@@ -56,11 +56,16 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 ];
 
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
-type AppMode = "home" | "raw" | "kie";
+type AppMode = "home" | "raw" | "key-info";
 type Step = "upload" | "schema" | "review";
 type ReviewFilter = "all" | "warning" | "null" | "changed";
 type HistoryTab = "documents" | "schemas" | "jobs";
 type ZoomMode = "manual" | "fitWidth" | "fitPage";
+
+type RawExtractionOptions = {
+  includeImages: boolean;
+  includeFormulas: boolean;
+};
 
 type DocumentPage = {
   id: string;
@@ -165,6 +170,13 @@ type RawExtraction = {
   updated_at: string;
 };
 
+type VlmSettings = {
+  provider: string;
+  model_name: string | null;
+  has_api_key: boolean;
+  env_path: string;
+};
+
 const initialFields: SchemaField[] = [
   {
     local_id: "field_1",
@@ -174,8 +186,14 @@ const initialFields: SchemaField[] = [
   }
 ];
 
+function modeFromLocation(): AppMode {
+  const hash = window.location.hash.replace("#", "");
+  if (hash === "raw" || hash === "key-info") return hash;
+  return "home";
+}
+
 export default function App() {
-  const [mode, setMode] = useState<AppMode>("home");
+  const [mode, setMode] = useState<AppMode>(() => modeFromLocation());
   const [step, setStep] = useState<Step>("upload");
   const [document, setDocument] = useState<UploadedDocument | null>(null);
   const [schemaName, setSchemaName] = useState("document_schema");
@@ -198,6 +216,11 @@ export default function App() {
   const [recentJobs, setRecentJobs] = useState<ExtractionJob[]>([]);
   const [rawExtraction, setRawExtraction] = useState<RawExtraction | null>(null);
   const [recentRawExtractions, setRecentRawExtractions] = useState<RawExtraction[]>([]);
+  const [rawOptions, setRawOptions] = useState<RawExtractionOptions>({ includeImages: false, includeFormulas: false });
+  const [vlmSettings, setVlmSettings] = useState<VlmSettings | null>(null);
+  const [vlmApiKey, setVlmApiKey] = useState("");
+  const [vlmModelName, setVlmModelName] = useState("");
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [historyTab, setHistoryTab] = useState<HistoryTab>("documents");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -205,6 +228,20 @@ export default function App() {
   useEffect(() => {
     void refreshHistory();
     void refreshRawHistory();
+    void loadVlmSettings();
+  }, []);
+
+  useEffect(() => {
+    const onNavigation = () => {
+      setMode(modeFromLocation());
+      setError(null);
+    };
+    window.addEventListener("popstate", onNavigation);
+    window.addEventListener("hashchange", onNavigation);
+    return () => {
+      window.removeEventListener("popstate", onNavigation);
+      window.removeEventListener("hashchange", onNavigation);
+    };
   }, []);
 
   const schemaPayloadFields = useMemo(() => fields.map(stripLocalId), [fields]);
@@ -238,6 +275,23 @@ export default function App() {
 
   const result = job?.result ?? null;
   const currentValues = Object.keys(edits).length ? edits : result?.corrected_output?.values ?? result?.validated_output.values ?? {};
+
+  function navigateMode(nextMode: AppMode, replace = false) {
+    const targetUrl =
+      nextMode === "home"
+        ? `${window.location.pathname}${window.location.search}`
+        : `${window.location.pathname}${window.location.search}#${nextMode}`;
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (currentUrl !== targetUrl) {
+      if (replace) {
+        window.history.replaceState({ mode: nextMode }, "", targetUrl);
+      } else {
+        window.history.pushState({ mode: nextMode }, "", targetUrl);
+      }
+    }
+    setMode(nextMode);
+    setError(null);
+  }
 
   async function loadHistory() {
     const [documents, schemas, jobs] = await Promise.all([
@@ -273,18 +327,54 @@ export default function App() {
     }
   }
 
-  async function uploadRawFile(file: File) {
+  async function loadVlmSettings() {
+    try {
+      const settings = await api<VlmSettings>("/api/settings/vlm");
+      setVlmSettings(settings);
+      setVlmModelName(settings.model_name || "");
+    } catch {
+      // Settings are helpful on Home, but should not block document workflows.
+    }
+  }
+
+  async function saveVlmSettings() {
+    setBusy("Saving VLM settings");
+    setError(null);
+    setSettingsMessage(null);
+    try {
+      const settings = await api<VlmSettings>("/api/settings/vlm", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "openai",
+          api_key: vlmApiKey.trim() || null,
+          model_name: vlmModelName.trim()
+        })
+      });
+      setVlmSettings(settings);
+      setVlmApiKey("");
+      setSettingsMessage(".env 저장 완료");
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function uploadRawFile(file: File, options = rawOptions) {
     setBusy("Extracting raw data");
     setError(null);
     try {
       const form = new FormData();
       form.append("file", file);
+      form.append("include_images", String(options.includeImages));
+      form.append("include_formulas", String(options.includeFormulas));
       const extracted = await api<RawExtraction>("/api/raw-extractions", {
         method: "POST",
         body: form
       });
       setRawExtraction(extracted);
-      setMode("raw");
+      navigateMode("raw");
       await loadRawHistory();
       if (extracted.status === "failed") {
         setError(extracted.error_message || "Raw extraction failed.");
@@ -302,7 +392,7 @@ export default function App() {
     try {
       const loaded = await api<RawExtraction>(`/api/raw-extractions/${rawId}`);
       setRawExtraction(loaded);
-      setMode("raw");
+      navigateMode("raw");
       if (loaded.status === "failed") {
         setError(loaded.error_message || "Raw extraction failed.");
       }
@@ -698,13 +788,13 @@ export default function App() {
   }
 
   const title =
-    mode === "home" ? "Digitize Your Document" : mode === "raw" ? "Raw Data Extractor" : "KIE MVP Workspace";
+    mode === "home" ? "Digitize Your Document" : mode === "raw" ? "Raw Data Extractor" : "Key Information Extractor";
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">Digitize Your Document</p>
+          <p className="eyebrow">Document AI Workspace</p>
           <h1>{title}</h1>
         </div>
         <div className="status-strip">
@@ -713,15 +803,14 @@ export default function App() {
               type="button"
               className="secondary compact"
               onClick={() => {
-                setMode("home");
-                setError(null);
+                navigateMode("home");
               }}
             >
               <ChevronLeft size={16} />
               Home
             </button>
           )}
-          {mode === "kie" && (
+          {mode === "key-info" && (
             <>
               <StepPill label="Upload" active={step === "upload"} done={Boolean(document)} />
               <StepPill label="Schema" active={step === "schema"} done={Boolean(schema) && !schemaDirty} />
@@ -751,14 +840,14 @@ export default function App() {
             </button>
           )}
           <div className="help-trigger">
-            <button type="button" className="help-button" aria-label="Usage guide">
+            <button type="button" className="help-button" aria-label="사용법">
               <CircleHelp size={18} />
             </button>
             <div className="help-panel" role="tooltip">
-              <strong>Usage</strong>
-              <span>Select a digitization tool from Home.</span>
-              <span>Raw Data Extractor converts Office/PDF files to PDF preview plus extracted HTML.</span>
-              <span>KIE extracts schema-defined fields from document images.</span>
+              <strong>사용법</strong>
+              <span>Home에서 필요한 문서 처리 기능을 선택합니다.</span>
+              <span>Raw Data Extractor는 Office/PDF를 PDF preview와 HTML로 변환합니다.</span>
+              <span>Key Information Extractor는 사용자가 정한 schema 값만 추출합니다.</span>
             </div>
           </div>
         </div>
@@ -773,17 +862,30 @@ export default function App() {
       )}
 
       {mode === "home" ? (
-        <HomeScreen onRaw={() => setMode("raw")} onKie={() => setMode("kie")} />
+        <HomeScreen
+          vlmSettings={vlmSettings}
+          vlmApiKey={vlmApiKey}
+          vlmModelName={vlmModelName}
+          settingsMessage={settingsMessage}
+          busy={busy}
+          onVlmApiKey={setVlmApiKey}
+          onVlmModelName={setVlmModelName}
+          onSaveVlmSettings={() => void saveVlmSettings()}
+          onRaw={() => navigateMode("raw")}
+          onKie={() => navigateMode("key-info")}
+        />
       ) : mode === "raw" ? (
         <RawWorkspace
           rawExtraction={rawExtraction}
           recentRawExtractions={recentRawExtractions}
+          rawOptions={rawOptions}
           pdfUrl={rawPdfUrl}
           htmlUrl={rawHtmlUrl}
           leftPanePercent={leftPanePercent}
           busy={busy}
-          onUpload={(file) => void uploadRawFile(file)}
+          onUpload={(file, options) => void uploadRawFile(file, options)}
           onLoad={(id) => void loadRawExtraction(id)}
+          onRawOptions={setRawOptions}
           onResize={startResize}
         />
       ) : (
@@ -888,24 +990,71 @@ export default function App() {
   );
 }
 
-function HomeScreen(props: { onRaw: () => void; onKie: () => void }) {
+function HomeScreen(props: {
+  vlmSettings: VlmSettings | null;
+  vlmApiKey: string;
+  vlmModelName: string;
+  settingsMessage: string | null;
+  busy: string | null;
+  onVlmApiKey: (value: string) => void;
+  onVlmModelName: (value: string) => void;
+  onSaveVlmSettings: () => void;
+  onRaw: () => void;
+  onKie: () => void;
+}) {
   return (
     <main className="home-screen">
       <section className="home-intro">
-        <p className="eyebrow">Workspace</p>
-        <h2>Digitize Your Document</h2>
-        <p>Choose a document digitization workflow.</p>
+        <p className="eyebrow">Home</p>
+        <h2>문서 처리 방식을 선택하세요</h2>
+        <p>원본 정보 추출, key information extraction, OCR, intelligence parsing을 하나의 workspace에서 확장합니다.</p>
+      </section>
+      <section className="settings-panel">
+        <div>
+          <p className="eyebrow">VLM 설정</p>
+          <h3>API key와 model name</h3>
+        </div>
+        <div className="settings-grid">
+          <label>
+            <span>API key</span>
+            <input
+              type="password"
+              value={props.vlmApiKey}
+              placeholder={props.vlmSettings?.has_api_key ? "저장된 key 유지" : "VLM_API_KEY"}
+              disabled={Boolean(props.busy)}
+              onChange={(event) => props.onVlmApiKey(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Model name</span>
+            <input
+              value={props.vlmModelName}
+              placeholder="gpt-4.1-mini"
+              disabled={Boolean(props.busy)}
+              onChange={(event) => props.onVlmModelName(event.target.value)}
+            />
+          </label>
+          <button type="button" className="primary compact" disabled={Boolean(props.busy)} onClick={props.onSaveVlmSettings}>
+            <Save size={16} />
+            Save
+          </button>
+        </div>
+        <div className="settings-status">
+          <span>{props.vlmSettings?.has_api_key ? "API key 저장됨" : "API key 미설정"}</span>
+          <span>{props.vlmSettings?.model_name || "Model name 미설정"}</span>
+          {props.settingsMessage && <span className="success-text">{props.settingsMessage}</span>}
+        </div>
       </section>
       <section className="feature-grid">
         <button className="feature-card active-feature" onClick={props.onRaw}>
           <FileUp size={24} />
           <strong>Raw Data Extractor</strong>
-          <span>Convert DOCX, XLSX, PPTX, or PDF into a PDF preview and extracted HTML.</span>
+          <span>DOCX, XLSX, PPTX, PDF를 PDF preview와 HTML로 변환합니다.</span>
         </button>
         <button className="feature-card active-feature" onClick={props.onKie}>
           <Sparkles size={24} />
           <strong>Key Information Extractor</strong>
-          <span>Upload document images and extract values matching a user-defined schema.</span>
+          <span>사용자가 정의한 schema에 맞는 값만 문서 이미지에서 추출합니다.</span>
         </button>
         <button className="feature-card" disabled>
           <FileJson size={24} />
@@ -925,23 +1074,26 @@ function HomeScreen(props: { onRaw: () => void; onKie: () => void }) {
 function RawWorkspace(props: {
   rawExtraction: RawExtraction | null;
   recentRawExtractions: RawExtraction[];
+  rawOptions: RawExtractionOptions;
   pdfUrl: string | null;
   htmlUrl: string | null;
   leftPanePercent: number;
   busy: string | null;
-  onUpload: (file: File) => void;
+  onUpload: (file: File, options: RawExtractionOptions) => void;
   onLoad: (id: string) => void;
+  onRawOptions: (options: RawExtractionOptions) => void;
   onResize: (event: PointerEvent<HTMLButtonElement>) => void;
 }) {
   function onDrop(event: DragEvent<HTMLLabelElement>) {
     event.preventDefault();
     const file = event.dataTransfer.files[0];
-    if (file) props.onUpload(file);
+    if (file) props.onUpload(file, props.rawOptions);
   }
 
   function onFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    if (file) props.onUpload(file);
+    if (file) props.onUpload(file, props.rawOptions);
+    event.target.value = "";
   }
 
   return (
@@ -989,6 +1141,27 @@ function RawWorkspace(props: {
             <FileUp size={16} />
             Upload
             <input type="file" accept=".docx,.xlsx,.pptx,.pdf" disabled={Boolean(props.busy)} onChange={onFileChange} />
+          </label>
+        </div>
+
+        <div className="raw-options">
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={props.rawOptions.includeImages}
+              disabled={Boolean(props.busy)}
+              onChange={(event) => props.onRawOptions({ ...props.rawOptions, includeImages: event.currentTarget.checked })}
+            />
+            <span>Extract images</span>
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={props.rawOptions.includeFormulas}
+              disabled={Boolean(props.busy)}
+              onChange={(event) => props.onRawOptions({ ...props.rawOptions, includeFormulas: event.currentTarget.checked })}
+            />
+            <span>Extract formulas</span>
           </label>
         </div>
 
@@ -1226,18 +1399,18 @@ function UploadNotes({ onSampleSchema }: { onSampleSchema: () => void }) {
       <div className="pane-header">
         <div>
           <p className="eyebrow">Start</p>
-          <h2>Upload first</h2>
+          <h2>먼저 문서를 업로드하세요</h2>
         </div>
       </div>
-      <p>Schema builder opens after upload. You can also prepare a sample schema now.</p>
+      <p>업로드 후 schema builder가 열립니다. 지금 sample schema를 먼저 준비할 수도 있습니다.</p>
       <button className="secondary" onClick={onSampleSchema}>
         <ClipboardList size={16} />
-        Use sample schema
+        Sample schema
       </button>
       <div className="note-list">
-        <span>Supported: PDF, PNG, JPG, JPEG</span>
-        <span>Schema fields: key name, description, output format</span>
-        <span>Use VLM_PROVIDER=mock for demos without an API key</span>
+        <span>지원 포맷: PDF, PNG, JPG, JPEG</span>
+        <span>Schema field: key name, description, output format</span>
+        <span>API key 없이 데모가 필요하면 VLM_PROVIDER=mock을 사용할 수 있습니다.</span>
       </div>
     </div>
   );
@@ -1580,10 +1753,10 @@ function formatApiDetail(detail: unknown): string | null {
 function toFriendlyError(error: unknown): string {
   const message = error instanceof Error ? error.message : "Unexpected error";
   if (message.includes("VLM API key and model name are required")) {
-    return "VLM credentials are missing. Set VLM_API_KEY and VLM_MODEL_NAME in the backend .env, or use VLM_PROVIDER=mock for a local demo.";
+    return "VLM 설정이 없습니다. Home에서 API key와 model name을 저장하거나 로컬 데모용으로 VLM_PROVIDER=mock을 사용하세요.";
   }
   if (message.includes("Only openai or mock")) {
-    return "Unsupported VLM_PROVIDER. Use openai for real extraction or mock for local demo mode.";
+    return "지원하지 않는 VLM_PROVIDER입니다. 실제 추출은 openai, 로컬 데모는 mock을 사용하세요.";
   }
   return message;
 }

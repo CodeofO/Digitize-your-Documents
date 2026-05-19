@@ -1,7 +1,7 @@
 [project]
-name = "kie-backend"
+name = "digitize-documents-backend"
 version = "0.1.0"
-description = "KIE MVP FastAPI backend"
+description = "Digitize Your Document FastAPI backend"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

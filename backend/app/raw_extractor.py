@@ -1,10 +1,15 @@
+import base64
 import html
 import json
+import mimetypes
 import os
 import platform
 import shutil
 import subprocess
 import tempfile
+import zipfile
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +33,14 @@ PDF_EXPORT_OPTIONS = {
     "EmbedFonts": {"type": "boolean", "value": "true"},
     "SubsetFonts": {"type": "boolean", "value": "false"},
 }
+OFFICE_MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+IMAGE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
+
+
+@dataclass(frozen=True)
+class RawExtractionOptions:
+    include_images: bool = False
+    include_formulas: bool = False
 
 
 class RawExtractionError(ValueError):
@@ -60,7 +73,12 @@ def save_raw_upload(upload: UploadFile, raw_id: str) -> tuple[str, str, Path, in
     return upload.filename or original_path.name, suffix[1:], original_path, size
 
 
-def create_raw_outputs(source_path: Path, source_format: str) -> tuple[Path, Path, list[str]]:
+def create_raw_outputs(
+    source_path: Path,
+    source_format: str,
+    options: RawExtractionOptions | None = None,
+) -> tuple[Path, Path, list[str]]:
+    options = options or RawExtractionOptions()
     suffix = f".{source_format.lower()}"
     output_dir = source_path.parent
     pdf_path = output_dir / "preview.pdf"
@@ -68,7 +86,7 @@ def create_raw_outputs(source_path: Path, source_format: str) -> tuple[Path, Pat
     warnings: list[str] = []
 
     create_pdf_preview(source_path, suffix, pdf_path)
-    html_path.write_text(build_html_document(source_path, suffix), encoding="utf-8")
+    html_path.write_text(build_html_document(source_path, suffix, options), encoding="utf-8")
     if html_path.stat().st_size == 0:
         warnings.append("empty_html_output")
     return pdf_path, html_path, warnings
@@ -146,15 +164,20 @@ def libreoffice_environment() -> dict[str, str]:
     return env
 
 
-def build_html_document(source_path: Path, suffix: str) -> str:
+def build_html_document(
+    source_path: Path,
+    suffix: str,
+    options: RawExtractionOptions | None = None,
+) -> str:
+    options = options or RawExtractionOptions()
     if suffix == ".docx":
-        body = _docx_to_html(source_path)
+        body = _docx_to_html(source_path, options)
     elif suffix == ".xlsx":
-        body = _xlsx_to_html(source_path)
+        body = _xlsx_to_html(source_path, options)
     elif suffix == ".pptx":
-        body = _pptx_to_html(source_path)
+        body = _pptx_to_html(source_path, options)
     elif suffix == ".pdf":
-        body = _pdf_to_html(source_path)
+        body = _pdf_to_html(source_path, options)
     else:
         raise RawExtractionError(f"HTML extraction is not supported for {suffix}")
 
@@ -172,6 +195,11 @@ def build_html_document(source_path: Path, suffix: str) -> str:
     table {{ border-collapse: collapse; margin: 12px 0; width: 100%; }}
     td, th {{ border: 1px solid #cbd5cf; padding: 6px 8px; vertical-align: top; }}
     th {{ background: #eef3ef; }}
+    figure {{ margin: 16px 0; }}
+    figcaption {{ color: #53615a; font-size: 12px; margin-top: 4px; }}
+    img {{ border: 1px solid #d8e0da; border-radius: 6px; height: auto; max-width: 100%; }}
+    .formula {{ background: #eef3ef; border-radius: 4px; color: #0f625e; display: inline-block; font-family: monospace; padding: 2px 4px; }}
+    .formula-value {{ color: #53615a; display: block; font-size: 12px; margin-top: 3px; }}
     pre {{ white-space: pre-wrap; }}
   </style>
 </head>
@@ -182,12 +210,15 @@ def build_html_document(source_path: Path, suffix: str) -> str:
 </html>"""
 
 
-def _docx_to_html(source_path: Path) -> str:
+def _docx_to_html(source_path: Path, options: RawExtractionOptions) -> str:
     import bleach
     import mammoth
 
     with source_path.open("rb") as source:
-        result = mammoth.convert_to_html(source)
+        result = mammoth.convert_to_html(
+            source,
+            convert_image=mammoth.images.data_uri if options.include_images else _ignore_mammoth_image,
+        )
     allowed_tags = {
         "a",
         "b",
@@ -213,30 +244,56 @@ def _docx_to_html(source_path: Path) -> str:
         "u",
         "ul",
     }
+    if options.include_images:
+        allowed_tags.add("img")
     allowed_attrs = {"a": ["href"], "td": ["colspan", "rowspan"], "th": ["colspan", "rowspan"]}
-    return bleach.clean(result.value, tags=allowed_tags, attributes=allowed_attrs, strip=True)
+    if options.include_images:
+        allowed_attrs["img"] = ["alt", "src"]
+    protocols = bleach.sanitizer.ALLOWED_PROTOCOLS | {"data"}
+    content = bleach.clean(result.value, tags=allowed_tags, attributes=allowed_attrs, protocols=protocols, strip=True)
+    if options.include_formulas:
+        formulas = _extract_ooxml_formulas(source_path, ["word/document.xml"])
+        if formulas:
+            content += _formula_section("Formulas", formulas)
+    return content
 
 
-def _xlsx_to_html(source_path: Path) -> str:
+def _xlsx_to_html(source_path: Path, options: RawExtractionOptions) -> str:
     from openpyxl import load_workbook
 
     workbook = load_workbook(source_path, read_only=True, data_only=True)
+    formula_workbook = load_workbook(source_path, read_only=True, data_only=False) if options.include_formulas else None
     sections: list[str] = []
     try:
         for sheet in workbook.worksheets:
-            rows = list(sheet.iter_rows(values_only=True))
-            rows = [row for row in rows if any(cell is not None for cell in row)]
+            if formula_workbook:
+                formula_sheet = formula_workbook[sheet.title]
+                rows = _worksheet_rows_with_formulas(
+                    list(sheet.iter_rows(values_only=True)),
+                    list(formula_sheet.iter_rows(values_only=True)),
+                )
+            else:
+                rows = list(sheet.iter_rows(values_only=True))
+            rows = [row for row in rows if any(_cell_has_value(cell) for cell in row)]
             table = _rows_to_table(rows)
             sections.append(f"<section><h2>{html.escape(sheet.title)}</h2>{table}</section>")
+        if options.include_images:
+            images = _embedded_package_images_section(source_path, "Workbook images", ["xl/media/"])
+            if images:
+                sections.append(images)
     finally:
         workbook.close()
+        if formula_workbook:
+            formula_workbook.close()
     return "\n".join(sections) or "<p>No readable worksheet data found.</p>"
 
 
-def _pptx_to_html(source_path: Path) -> str:
+def _pptx_to_html(source_path: Path, options: RawExtractionOptions) -> str:
     from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
 
     presentation = Presentation(source_path)
+    formulas_by_slide = _extract_pptx_formulas_by_slide(source_path) if options.include_formulas else {}
     sections: list[str] = []
     for index, slide in enumerate(presentation.slides, start=1):
         fragments = [f"<h2>Slide {index}</h2>"]
@@ -248,11 +305,18 @@ def _pptx_to_html(source_path: Path) -> str:
             if getattr(shape, "has_table", False):
                 rows = [[cell.text for cell in row.cells] for row in shape.table.rows]
                 fragments.append(_rows_to_table(rows))
+            if options.include_images and getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE:
+                image_html = _pptx_picture_to_html(shape, f"Slide {index} image")
+                if image_html:
+                    fragments.append(image_html)
+        formulas = formulas_by_slide.get(index, [])
+        if formulas:
+            fragments.append(_formula_list("Slide formulas", formulas, "h3"))
         sections.append(f"<section>{''.join(fragments)}</section>")
     return "\n".join(sections) or "<p>No readable slide content found.</p>"
 
 
-def _pdf_to_html(source_path: Path) -> str:
+def _pdf_to_html(source_path: Path, options: RawExtractionOptions) -> str:
     sections: list[str] = []
     with fitz.open(source_path) as document:
         for page_index, page in enumerate(document, start=1):
@@ -262,6 +326,16 @@ def _pdf_to_html(source_path: Path) -> str:
                 text = str(block[4]).strip()
                 if text:
                     fragments.append(f"<p>{html.escape(text).replace(chr(10), '<br />')}</p>")
+            if options.include_images:
+                for image_index, image_info in enumerate(page.get_images(full=True), start=1):
+                    extracted = document.extract_image(image_info[0])
+                    image = _image_data_uri_html(
+                        extracted["image"],
+                        _image_content_type(extracted.get("ext")),
+                        f"Page {page_index} image {image_index}",
+                    )
+                    if image:
+                        fragments.append(image)
             sections.append(f"<section>{''.join(fragments)}</section>")
     return "\n".join(sections) or "<p>No readable PDF text found.</p>"
 
@@ -281,12 +355,181 @@ def _rows_to_table(rows: list[Any]) -> str:
     html_rows: list[str] = []
     for row_index, row in enumerate(rows):
         tag = "th" if row_index == 0 else "td"
-        cells = "".join(f"<{tag}>{html.escape(_cell_to_text(cell))}</{tag}>" for cell in row)
+        cells = "".join(f"<{tag}>{_cell_to_html(cell)}</{tag}>" for cell in row)
         html_rows.append(f"<tr>{cells}</tr>")
     return f"<table><tbody>{''.join(html_rows)}</tbody></table>"
+
+
+@dataclass(frozen=True)
+class FormulaCell:
+    formula: str
+    cached_value: Any
+
+
+def _worksheet_rows_with_formulas(data_rows: list[Any], formula_rows: list[Any]) -> list[list[Any]]:
+    merged_rows: list[list[Any]] = []
+    row_count = max(len(data_rows), len(formula_rows))
+    for row_index in range(row_count):
+        data_row = data_rows[row_index] if row_index < len(data_rows) else ()
+        formula_row = formula_rows[row_index] if row_index < len(formula_rows) else ()
+        column_count = max(len(data_row), len(formula_row))
+        merged_row: list[Any] = []
+        for column_index in range(column_count):
+            data_value = data_row[column_index] if column_index < len(data_row) else None
+            formula_value = formula_row[column_index] if column_index < len(formula_row) else None
+            if isinstance(formula_value, str) and formula_value.startswith("="):
+                merged_row.append(FormulaCell(formula=formula_value, cached_value=data_value))
+            else:
+                merged_row.append(data_value)
+        merged_rows.append(merged_row)
+    return merged_rows
+
+
+def _cell_has_value(value: Any) -> bool:
+    if isinstance(value, FormulaCell):
+        return bool(value.formula)
+    return value is not None
+
+
+def _cell_to_html(value: Any) -> str:
+    if isinstance(value, FormulaCell):
+        formula = html.escape(value.formula)
+        if value.cached_value not in (None, ""):
+            cached = html.escape(_cell_to_text(value.cached_value))
+            return f'<span class="formula">{formula}</span><span class="formula-value">cached value: {cached}</span>'
+        return f'<span class="formula">{formula}</span>'
+    return html.escape(_cell_to_text(value))
 
 
 def _cell_to_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _ignore_mammoth_image(_: Any) -> list[Any]:
+    return []
+
+
+def _pptx_picture_to_html(shape: Any, fallback_alt: str) -> str:
+    try:
+        image = shape.image
+        alt = getattr(shape, "name", None) or fallback_alt
+        return _image_data_uri_html(image.blob, image.content_type, alt)
+    except Exception:
+        return ""
+
+
+def _embedded_package_images_section(source_path: Path, title: str, prefixes: list[str]) -> str:
+    figures: list[str] = []
+    try:
+        with zipfile.ZipFile(source_path) as archive:
+            for member in archive.namelist():
+                if not any(member.startswith(prefix) for prefix in prefixes):
+                    continue
+                suffix = Path(member).suffix.lower()
+                if suffix not in IMAGE_EXTENSIONS:
+                    continue
+                content_type = mimetypes.guess_type(member)[0] or "application/octet-stream"
+                image = _image_data_uri_html(archive.read(member), content_type, Path(member).name)
+                if image:
+                    figures.append(image)
+    except zipfile.BadZipFile:
+        return ""
+    if not figures:
+        return ""
+    return f"<section><h2>{html.escape(title)}</h2>{''.join(figures)}</section>"
+
+
+def _image_data_uri_html(blob: bytes, content_type: str | None, alt: str) -> str:
+    if not blob:
+        return ""
+    content_type = content_type or "application/octet-stream"
+    if content_type not in {"image/gif", "image/jpeg", "image/png", "image/svg+xml", "image/webp"}:
+        return ""
+    encoded = base64.b64encode(blob).decode("ascii")
+    escaped_alt = html.escape(alt, quote=True)
+    return (
+        f'<figure><img src="data:{content_type};base64,{encoded}" alt="{escaped_alt}" />'
+        f"<figcaption>{escaped_alt}</figcaption></figure>"
+    )
+
+
+def _image_content_type(extension: str | None) -> str | None:
+    if not extension:
+        return None
+    extension = extension.lower().lstrip(".")
+    if extension == "jpg":
+        extension = "jpeg"
+    if extension == "svg":
+        return "image/svg+xml"
+    return f"image/{extension}"
+
+
+def _formula_section(title: str, formulas: list[str]) -> str:
+    return f"<section>{_formula_list(title, formulas, 'h2')}</section>"
+
+
+def _formula_list(title: str, formulas: list[str], heading_tag: str) -> str:
+    if not formulas:
+        return ""
+    items = "".join(f'<li><span class="formula">{html.escape(formula)}</span></li>' for formula in formulas)
+    return f"<{heading_tag}>{html.escape(title)}</{heading_tag}><ol>{items}</ol>"
+
+
+def _extract_ooxml_formulas(source_path: Path, members: list[str]) -> list[str]:
+    formulas: list[str] = []
+    try:
+        with zipfile.ZipFile(source_path) as archive:
+            names = set(archive.namelist())
+            for member in members:
+                if member not in names:
+                    continue
+                formulas.extend(_formulas_from_xml(archive.read(member)))
+    except (zipfile.BadZipFile, ET.ParseError):
+        return []
+    return _dedupe(formulas)
+
+
+def _extract_pptx_formulas_by_slide(source_path: Path) -> dict[int, list[str]]:
+    formulas_by_slide: dict[int, list[str]] = {}
+    try:
+        with zipfile.ZipFile(source_path) as archive:
+            slide_names = sorted(
+                (name for name in archive.namelist() if name.startswith("ppt/slides/slide") and name.endswith(".xml")),
+                key=_slide_sort_key,
+            )
+            for index, member in enumerate(slide_names, start=1):
+                formulas = _dedupe(_formulas_from_xml(archive.read(member)))
+                if formulas:
+                    formulas_by_slide[index] = formulas
+    except (zipfile.BadZipFile, ET.ParseError):
+        return {}
+    return formulas_by_slide
+
+
+def _formulas_from_xml(xml_bytes: bytes) -> list[str]:
+    root = ET.fromstring(xml_bytes)
+    formulas: list[str] = []
+    for element in root.iter(f"{{{OFFICE_MATH_NS}}}oMath"):
+        text = "".join(node.text or "" for node in element.iter(f"{{{OFFICE_MATH_NS}}}t")).strip()
+        if text:
+            formulas.append(text)
+    return formulas
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        normalized = " ".join(value.split())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return deduped
+
+
+def _slide_sort_key(name: str) -> tuple[int, str]:
+    stem = Path(name).stem
+    index = stem.replace("slide", "")
+    return (int(index) if index.isdigit() else 0, name)

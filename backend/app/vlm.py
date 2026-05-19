@@ -29,7 +29,7 @@ def build_structured_output_schema(fields: list[FieldDefinition]) -> dict[str, A
         required.append(field.key_name)
 
     return {
-        "title": "KIEExtraction",
+        "title": "KeyInformationExtraction",
         "description": "Structured extraction result containing only user-defined schema fields.",
         "type": "object",
         "additionalProperties": False,
@@ -141,7 +141,7 @@ def _schema_recommendation_output_schema() -> dict[str, Any]:
         "required": ["key_name", "description", "output_format"],
     }
     return {
-        "title": "KIESchemaRecommendation",
+        "title": "SchemaRecommendation",
         "type": "object",
         "additionalProperties": False,
         "properties": {

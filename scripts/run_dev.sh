@@ -45,7 +45,7 @@ echo "Starting frontend: http://${FRONTEND_HOST}:${FRONTEND_PORT}"
 FRONTEND_PID=$!
 
 echo
-echo "KIE MVP is starting."
+echo "Digitize Your Document is starting."
 echo "Frontend: http://${FRONTEND_HOST}:${FRONTEND_PORT}"
 echo "Backend:  http://${BACKEND_HOST}:${BACKEND_PORT}"
 echo "Press Ctrl+C to stop both."

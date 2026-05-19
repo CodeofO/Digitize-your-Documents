@@ -1,1 +1,1 @@
-"""KIE backend package."""
+"""Digitize Your Document backend package."""
