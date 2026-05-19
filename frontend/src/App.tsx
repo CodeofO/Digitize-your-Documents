@@ -217,18 +217,60 @@ export default function App() {
   const result = job?.result ?? null;
   const currentValues = Object.keys(edits).length ? edits : result?.corrected_output?.values ?? result?.validated_output.values ?? {};
 
+  async function loadHistory() {
+    const [documents, schemas, jobs] = await Promise.all([
+      api<UploadedDocument[]>("/api/documents?limit=12"),
+      api<SavedSchema[]>("/api/schemas"),
+      api<ExtractionJob[]>("/api/extraction-jobs?limit=12")
+    ]);
+    setRecentDocuments(documents);
+    setRecentSchemas(schemas.slice(0, 12));
+    setRecentJobs(jobs);
+    return { documents, schemas, jobs };
+  }
+
   async function refreshHistory() {
     try {
-      const [documents, schemas, jobs] = await Promise.all([
-        api<UploadedDocument[]>("/api/documents?limit=12"),
-        api<SavedSchema[]>("/api/schemas"),
-        api<ExtractionJob[]>("/api/extraction-jobs?limit=12")
-      ]);
-      setRecentDocuments(documents);
-      setRecentSchemas(schemas.slice(0, 12));
-      setRecentJobs(jobs);
+      await loadHistory();
     } catch {
       // History should not block the primary workflow.
+    }
+  }
+
+  async function refreshWorkspace() {
+    setBusy("Refreshing workspace");
+    setError(null);
+    try {
+      await loadHistory();
+
+      if (document) {
+        const refreshedDocument = await api<UploadedDocument>(`/api/documents/${document.document_id}`);
+        setDocument(refreshedDocument);
+        setActivePage((current) => Math.min(Math.max(0, current), Math.max(0, refreshedDocument.page_count - 1)));
+      }
+
+      if (schema && !schemaDirty) {
+        const refreshedSchema = await api<SavedSchema>(`/api/schemas/${schema.id}`);
+        applySchema(refreshedSchema);
+      }
+
+      if (job) {
+        const refreshedJob = await api<ExtractionJob>(`/api/extraction-jobs/${job.job_id}`);
+        setJob(refreshedJob);
+        if (refreshedJob.result && editedKeys.length === 0) {
+          setEdits(refreshedJob.result.corrected_output?.values ?? refreshedJob.result.validated_output.values);
+        }
+        if (refreshedJob.result && step !== "review") {
+          setStep("review");
+        }
+        if (refreshedJob.status === "failed") {
+          setError(refreshedJob.error_message || "Extraction failed.");
+        }
+      }
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -366,6 +408,8 @@ export default function App() {
         body: JSON.stringify({ corrected_output: correctedOutput })
       });
       setJob((current) => (current ? { ...current, result: updated } : current));
+      setEdits(updated.corrected_output?.values ?? updated.validated_output.values);
+      setEditedKeys([]);
       await refreshHistory();
     } catch (err) {
       setError(toFriendlyError(err));
@@ -569,8 +613,14 @@ export default function App() {
           <StepPill label="Upload" active={step === "upload"} done={Boolean(document)} />
           <StepPill label="Schema" active={step === "schema"} done={Boolean(schema) && !schemaDirty} />
           <StepPill label="Review" active={step === "review"} done={Boolean(result)} />
-          <button type="button" className="secondary compact" onClick={() => void refreshHistory()} title="Refresh history">
-            <RefreshCw size={16} />
+          <button
+            type="button"
+            className="secondary compact"
+            disabled={Boolean(busy)}
+            onClick={() => void refreshWorkspace()}
+            title="Refresh workspace and recent history"
+          >
+            <RefreshCw size={16} className={busy === "Refreshing workspace" ? "spin" : ""} />
             Refresh
           </button>
           <div className="help-trigger">
