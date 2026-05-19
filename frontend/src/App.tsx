@@ -1882,6 +1882,15 @@ function SchemaBuilder(props: {
               {props.schemaDirty ? "Draft changes" : `Saved v${props.savedSchema.current_version}`}
             </span>
           )}
+          <button
+            type="button"
+            className="primary compact"
+            disabled={!props.document}
+            onClick={() => void props.onRecommendSchema()}
+          >
+            <Sparkles size={14} />
+            AI recommend schema
+          </button>
           <button type="button" className="secondary compact" onClick={() => setToolsOpen(true)}>
             <Settings size={14} />
             Tools
@@ -1981,19 +1990,8 @@ function SchemaBuilder(props: {
             )}
 
             <div className="tool-section">
-              <h3>Schema actions</h3>
+              <h3>Schema import/export</h3>
               <div className="action-row">
-                <button
-                  className="primary"
-                  disabled={!props.document}
-                  onClick={() => {
-                    setToolsOpen(false);
-                    void props.onRecommendSchema();
-                  }}
-                >
-                  <Sparkles size={16} />
-                  AI recommend schema
-                </button>
                 <button
                   className="secondary"
                   onClick={() => {
