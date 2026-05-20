@@ -1977,7 +1977,15 @@ function BatchPanel(props: {
               <div className="batch-card" key={batch.id}>
                 <div className="batch-top">
                   <strong>{batch.status}</strong>
-                  <span>{Math.round(batch.progress * 100)}%</span>
+                  <div className="batch-actions">
+                    <span>{Math.round(batch.progress * 100)}%</span>
+                    <a className="secondary compact link-button" href={batchExportHref(batch.id, "csv")} target="_blank">
+                      CSV
+                    </a>
+                    <a className="secondary compact link-button" href={batchExportHref(batch.id, "json")} target="_blank">
+                      JSON
+                    </a>
+                  </div>
                 </div>
                 <progress max={1} value={batch.progress} />
                 <div className="batch-meta-row">
@@ -2515,6 +2523,11 @@ function exportHref(resultId: string, format: "json" | "csv", presetId: string) 
   const params = new URLSearchParams({ format });
   if (presetId) params.set("preset_id", presetId);
   return `${API_BASE}/api/extraction-results/${resultId}/export?${params.toString()}`;
+}
+
+function batchExportHref(batchId: string, format: "json" | "csv") {
+  const params = new URLSearchParams({ format });
+  return `${API_BASE}/api/batches/${batchId}/export?${params.toString()}`;
 }
 
 function parseEditedValue(value: string, format: OutputFormat): unknown {

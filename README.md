@@ -85,6 +85,7 @@ VLM_BASE_URL=
 VLM_TEMPERATURE=0
 VLM_MAX_RETRIES=2
 VLM_TIMEOUT_SECONDS=120
+BATCH_MAX_WORKERS=4
 LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
 ```
 
@@ -168,7 +169,9 @@ Raw API:
 Batch extraction:
 
 - 저장된 schema 하나를 선택하고 여러 파일 또는 폴더를 업로드해 같은 기준으로 KIE 추출을 실행합니다.
+- Batch 내부 파일들은 `BATCH_MAX_WORKERS` 개수까지 병렬로 VLM extraction을 실행합니다.
 - Batch 결과 목록에서 각 파일의 `Open review`를 누르면 일반 KIE review 화면으로 이동합니다.
+- Batch 결과 목록에서 `CSV` 또는 `JSON`을 눌러 batch 전체 결과를 즉시 다운로드할 수 있습니다.
 - Running/queued batch는 `Stop`으로 중단 요청할 수 있습니다. 이미 VLM 호출 중인 파일은 현재 호출이 끝난 뒤 취소 상태로 정리됩니다.
 
 KIE API:
@@ -192,6 +195,7 @@ KIE API:
 | `POST` | `/api/batches` |
 | `GET` | `/api/batches?limit=20` |
 | `POST` | `/api/batches/{batch_id}/cancel` |
+| `GET` | `/api/batches/{batch_id}/export?format=csv\|json` |
 
 ## 문서와 구조
 

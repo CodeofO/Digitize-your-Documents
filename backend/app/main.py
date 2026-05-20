@@ -17,7 +17,7 @@ from app.audit import log_audit_event
 from app.config import DEFAULT_LIBREOFFICE_PATH, ROOT_ENV_PATH, get_settings, upsert_root_env
 from app.database import get_db, init_db
 from app.document_processor import DocumentProcessingError, rasterize_document, save_upload_file
-from app.extraction import result_to_dict, run_extraction_job
+from app.extraction import result_to_dict, run_batch_jobs, run_extraction_job
 from app.models import (
     AuditEvent,
     Batch,
@@ -660,6 +660,7 @@ def create_batch(
     batch = Batch(schema_id=schema.id, schema_version=version, status="running", total_count=len(files))
     db.add(batch)
     db.flush()
+    job_ids: list[str] = []
     for file in files:
         document = _create_document_from_upload(file, db)
         job = ExtractionJob(
@@ -687,7 +688,7 @@ def create_batch(
             message="Batch extraction job created",
             metadata={"batch_id": batch.id, "document_id": document.id, "schema_id": schema.id},
         )
-        background_tasks.add_task(run_extraction_job, job.id)
+        job_ids.append(job.id)
 
     log_audit_event(
         db,
@@ -699,6 +700,7 @@ def create_batch(
     )
     db.commit()
     db.refresh(batch)
+    background_tasks.add_task(run_batch_jobs, job_ids)
     return _batch_read(batch)
 
 
@@ -754,6 +756,73 @@ def cancel_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
     db.commit()
     db.refresh(batch)
     return _batch_read(batch)
+
+
+@app.get("/api/batches/{batch_id}/export")
+def export_batch(
+    batch_id: str,
+    format: str = Query(default="csv", pattern="^(json|csv)$"),
+    db: Session = Depends(get_db),
+) -> Response:
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    schema_version = (
+        db.query(SchemaVersion)
+        .filter(SchemaVersion.schema_id == batch.schema_id, SchemaVersion.version == batch.schema_version)
+        .one_or_none()
+    )
+    if not schema_version:
+        raise HTTPException(status_code=404, detail="Schema version not found")
+
+    schema_data = json.loads(schema_version.schema_json)
+    field_names = [field["key_name"] for field in schema_data.get("fields", [])]
+    rows = [_batch_export_row(item, field_names) for item in batch.items]
+    payload = {
+        "batch_id": batch.id,
+        "schema_id": batch.schema_id,
+        "schema_version": batch.schema_version,
+        "status": _batch_read(batch).status,
+        "total_count": batch.total_count,
+        "rows": rows,
+    }
+    log_audit_event(
+        db,
+        entity_type="batch",
+        entity_id=batch.id,
+        action="exported",
+        message=f"Exported batch {format.upper()}",
+        metadata={"format": format},
+    )
+    db.commit()
+
+    if format == "json":
+        return JSONResponse(
+            payload,
+            headers={"Content-Disposition": f'attachment; filename="{batch.id}.json"'},
+        )
+
+    output = io.StringIO()
+    fieldnames = [
+        "filename",
+        "document_id",
+        "job_id",
+        "status",
+        "error_message",
+        *field_names,
+        "warnings",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{batch.id}.csv"'},
+    )
 
 
 @app.get("/api/archive/search", response_model=list[ArchiveSearchResult])
@@ -964,6 +1033,45 @@ def _batch_item_read(item: BatchItem) -> BatchItemRead:
         error_message=item.job.error_message if item.job else None,
         created_at=item.created_at,
     )
+
+
+def _batch_export_row(item: BatchItem, field_names: list[str]) -> dict[str, Any]:
+    job = item.job
+    row: dict[str, Any] = {
+        "filename": item.filename,
+        "document_id": item.document_id,
+        "job_id": item.job_id,
+        "status": job.status if job else "unknown",
+        "error_message": job.error_message if job else None,
+        "warnings": [],
+    }
+    for field_name in field_names:
+        row[field_name] = None
+    if not job or not job.result:
+        return row
+
+    output = json.loads(job.result.corrected_output) if job.result.corrected_output else json.loads(job.result.validated_output)
+    values = output.get("values", {})
+    warnings: list[str] = []
+    for field_name in field_names:
+        value = values.get(field_name)
+        if isinstance(value, dict):
+            row[field_name] = value.get("value")
+            warnings.extend(str(warning) for warning in value.get("warnings", []))
+        else:
+            row[field_name] = value
+    row["warnings"] = warnings
+    return row
+
+
+def _csv_cell(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ";".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return value
 
 
 def _export_preset_read(preset: ExportPreset) -> ExportPresetRead:

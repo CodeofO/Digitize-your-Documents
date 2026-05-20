@@ -297,7 +297,7 @@ def test_extraction_mock_mode_returns_evidence_and_normalized_values() -> None:
 
 
 def test_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:
-    monkeypatch.setattr("app.main.run_extraction_job", lambda job_id: None)
+    monkeypatch.setattr("app.main.run_batch_jobs", lambda job_ids: None)
 
     with get_client() as client:
         schema = create_schema(client)
@@ -321,6 +321,41 @@ def test_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:
         assert payload["canceled_count"] == 2
         assert payload["progress"] == 1
         assert {item["status"] for item in payload["items"]} == {"canceled"}
+
+
+def test_batch_export_csv_and_json_mock_mode() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client)
+            response = client.post(
+                "/api/batches",
+                data={"schema_id": schema["id"]},
+                files=[
+                    ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+
+            csv_response = client.get(f"/api/batches/{batch['id']}/export?format=csv")
+            assert csv_response.status_code == 200, csv_response.text
+            csv_text = csv_response.text
+            assert "filename,document_id,job_id,status,error_message,invoice_number,total_amount,warnings" in csv_text.splitlines()[0]
+            assert "first.png" in csv_text
+            assert "Sample invoice_number" in csv_text
+
+            json_response = client.get(f"/api/batches/{batch['id']}/export?format=json")
+            assert json_response.status_code == 200, json_response.text
+            payload = json_response.json()
+            assert payload["batch_id"] == batch["id"]
+            assert len(payload["rows"]) == 2
+            assert payload["rows"][0]["invoice_number"] == "Sample invoice_number"
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
 
 
 def test_raw_dependency_imports() -> None:

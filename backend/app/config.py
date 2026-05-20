@@ -18,6 +18,7 @@ DEFAULT_ENV_VALUES = {
     "VLM_TEMPERATURE": "0",
     "VLM_MAX_RETRIES": "2",
     "VLM_TIMEOUT_SECONDS": "120",
+    "BATCH_MAX_WORKERS": "4",
     "LIBREOFFICE_PATH": DEFAULT_LIBREOFFICE_PATH,
 }
 
@@ -36,6 +37,7 @@ class Settings(BaseSettings):
     vlm_temperature: float = 0
     vlm_max_retries: int = 2
     vlm_timeout_seconds: int = 120
+    batch_max_workers: int = 4
 
     openai_api_key: str | None = None
     openai_model_name: str | None = None
@@ -49,7 +51,7 @@ class Settings(BaseSettings):
     @property
     def resolved_database_url(self) -> str:
         if self.database_url:
-            return self.database_url
+            return _normalize_sqlite_url(self.database_url)
         return f"sqlite:///{BACKEND_DIR / 'digitize_documents.db'}"
 
     @property
@@ -121,3 +123,13 @@ def _format_env_value(value: str) -> str:
         return ""
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def _normalize_sqlite_url(url: str) -> str:
+    if url == "sqlite:///:memory:" or not url.startswith("sqlite:///") or url.startswith("sqlite:////"):
+        return url
+    raw_path = url.removeprefix("sqlite:///")
+    path = Path(raw_path)
+    if path.is_absolute():
+        return url
+    return f"sqlite:///{PROJECT_ROOT / path}"

@@ -11,6 +11,9 @@ backend/*.db
 backend/*.sqlite
 backend/*.sqlite3
 backend/storage/
+backend/backend/*.db
+backend/backend/*.sqlite
+backend/backend/*.sqlite3
 backend/backend/storage/
 
 frontend/node_modules/

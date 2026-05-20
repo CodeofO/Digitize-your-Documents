@@ -1,10 +1,12 @@
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
+from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Document, ExtractionJob, ExtractionResult, SchemaVersion
 from app.schemas import FieldDefinition
@@ -18,6 +20,16 @@ def run_extraction_job(job_id: str) -> None:
         _run_extraction_job(db, job_id)
     finally:
         db.close()
+
+
+def run_batch_jobs(job_ids: list[str]) -> None:
+    if not job_ids:
+        return
+    max_workers = max(1, min(get_settings().batch_max_workers, len(job_ids)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(run_extraction_job, job_id) for job_id in job_ids]
+        for future in as_completed(futures):
+            future.result()
 
 
 def _run_extraction_job(db: Session, job_id: str) -> None:
