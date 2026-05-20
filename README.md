@@ -13,6 +13,15 @@
   </p>
 </div>
 
+## 2026-05-20 변경 사항
+
+- KIE 업로드 화면에서 단일 문서 업로드와 배치 업로드를 함께 실행할 수 있도록 변경했습니다.
+- 배치 업로드 후 좌측 문서 영역에 batch file sidebar를 추가했습니다. 50장 이상의 이미지/문서도 thumbnail과 상태를 보며 항목별로 이동할 수 있고, 선택한 항목의 결과는 우측 review 영역에 바로 표시됩니다.
+- 배치 처리 진행률은 메인 화면에서 자동 갱신되며, CSV/JSON export는 기존처럼 batch 단위로 다운로드할 수 있습니다.
+- 실제 VLM structured output 흐름을 핵심만 담은 `vlm_runtime_overview.html`과 README용 캡처 이미지를 추가했습니다.
+
+![KIE VLM 작동 원리](assets/vlm_runtime_overview.png)
+
 ## 핵심 기능
 
 | 기능 | 상태 | 설명 |
@@ -165,13 +174,22 @@ Raw API:
 | `key_name` | 추출할 값의 키 이름 |
 | `description` | 문서 내 위치, 의미, 추출 기준 |
 | `output_format` | `string`, `float`, `date`, `bool` |
+| `region_id` | 선택 항목. schema-level region을 참조하는 ID |
+
+`regions`는 schema 최상위에 저장됩니다. 각 region은 `id`, `name`, `page`, `x`, `y`, `width`, `height`로 구성하며 `x/y/width/height`는 0~1 사이 상대 좌표입니다. 여러 field가 같은 `region_id`를 참조할 수 있고, `region_id`가 없는 field는 전체 문서에서 추출합니다. Batch extraction은 저장된 schema version을 그대로 사용하므로 region template도 함께 재사용됩니다.
+
+Region field는 VLM 입력 시 두 이미지를 함께 사용합니다. 하나는 region 외부를 흐리게 만든 원본 page context이고, 다른 하나는 실제 판독용 crop입니다. 따라서 description에 “우측 하단” 같은 위치 표현이 있어도 원본 page 위치 맥락과 crop 집중도를 함께 제공합니다.
+
+KIE 추출은 group 단위로 나뉩니다. `region_id`가 없는 field들은 full-page group 1회로 추출하고, `region_id`가 있는 field들은 사용 중인 region별로 묶어 각각 추출합니다. 따라서 호출 수는 `full-page field가 있으면 1회 + 사용 중인 region 수`입니다.
+
+KIE 결과 확인 후 다른 문서를 다시 로드하려면 좌측 Document toolbar의 `Replace`를 사용합니다. 현재 schema는 유지하고 문서/결과만 교체됩니다. `Clear`는 현재 문서와 결과를 비우고 업로드 화면으로 돌아갑니다.
 
 Batch extraction:
 
-- 저장된 schema 하나를 선택하고 여러 파일 또는 폴더를 업로드해 같은 기준으로 KIE 추출을 실행합니다.
+- KIE 메인 업로드 화면에서 저장된 schema 하나를 선택하고 여러 파일 또는 폴더를 업로드해 같은 기준으로 KIE 추출을 실행합니다.
+- Batch 실행 후 좌측 문서 영역의 batch file sidebar에서 각 파일을 이동할 수 있습니다. 선택한 파일의 문서 preview와 추출 결과가 같은 화면에서 갱신됩니다.
 - Batch 내부 파일들은 `BATCH_MAX_WORKERS` 개수까지 병렬로 VLM extraction을 실행합니다.
-- Batch 결과 목록에서 각 파일의 `Open review`를 누르면 일반 KIE review 화면으로 이동합니다.
-- Batch 결과 목록에서 `CSV` 또는 `JSON`을 눌러 batch 전체 결과를 즉시 다운로드할 수 있습니다.
+- Batch sidebar 또는 batch 결과 목록에서 `CSV` 또는 `JSON`을 눌러 batch 전체 결과를 즉시 다운로드할 수 있습니다.
 - Running/queued batch는 `Stop`으로 중단 요청할 수 있습니다. 이미 VLM 호출 중인 파일은 현재 호출이 끝난 뒤 취소 상태로 정리됩니다.
 
 KIE API:
@@ -204,6 +222,8 @@ KIE API:
 | `DEVELOPMENT_DEFINITION.md` | 제품 기준 개발정의서 |
 | `ERROR_NOTE.md` | 중요 오류와 수정 검증 기록 |
 | `architecture_overview.html` | 기능, 데이터 구조, 처리 흐름을 한눈에 보는 HTML 아키텍처 문서 |
+| `vlm_runtime_overview.html` | KIE에서 실제 VLM structured output이 작동하는 흐름을 요약한 HTML 문서 |
+| `assets/vlm_runtime_overview.png` | README에 포함되는 VLM 작동 원리 캡처 이미지 |
 | `sync_raw_to_pdf.py` | LibreOffice PDF 변환 참고 스크립트 |
 
 디렉터리:
@@ -216,6 +236,9 @@ KIE API:
 ├── DEVELOPMENT_DEFINITION.md
 ├── ERROR_NOTE.md
 ├── architecture_overview.html
+├── vlm_runtime_overview.html
+├── assets/
+│   └── vlm_runtime_overview.png
 └── README.md
 ```
 
@@ -235,6 +258,20 @@ npm run build
 ```
 
 Backend 테스트는 Office 파일의 LibreOffice 변환을 mock 처리합니다. 실제 Office to PDF 변환은 로컬 smoke test로 확인합니다.
+
+## 아키텍처 변경 이력
+
+상세 시각화 문서는 `architecture_overview.html`, `kie_extraction_visualization.html`, `vlm_runtime_overview.html`을 확인합니다.
+
+| Version | 구조 | 내용 |
+| --- | --- | --- |
+| v0.1 | KIE MVP | 전체 page image와 schema fields를 한 번에 VLM structured output으로 추출했습니다. |
+| v0.2 | Field-owned region | 각 field가 optional `region` 좌표를 직접 소유하고, region field에 crop image를 추가했습니다. |
+| v0.3 | Schema-level region | `schema.regions`를 최상위에 두고 여러 field가 같은 `region_id`를 참조하도록 바꿨습니다. |
+| v0.4 | Masked context | region crop과 함께 region 외부를 흐리게 만든 원본 page context를 VLM 입력에 추가했습니다. |
+| v0.5 | Grouped extraction | `region_id` 없는 field는 full-page group 1회, region field는 사용 중인 region별 1회로 분리 호출하고 결과를 merge합니다. |
+
+현재 KIE 호출 수는 `full-page field가 있으면 1회 + 사용 중인 region 수`입니다.
 
 ## 운영 메모
 

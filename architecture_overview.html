@@ -482,6 +482,7 @@
         <a href="#api">5. API Surface</a>
         <a href="#storage">6. 파일/환경 구조</a>
         <a href="#contracts">7. 핵심 계약</a>
+        <a href="#changelog">8. Architecture Change Log</a>
       </aside>
 
       <main class="grid">
@@ -530,8 +531,9 @@
                 <li>Vite + React + TypeScript</li>
                 <li>Home: 기능 선택, Setting modal</li>
                 <li>Raw workspace: PDF iframe + HTML iframe</li>
-                <li>KIE workspace: document viewer + schema/review panel</li>
-                <li>Recent, Archive, Batch, Audit UI</li>
+                <li>KIE workspace: single upload, batch upload, document viewer, schema/review panel</li>
+                <li>Batch file sidebar: thumbnail navigation + result review sync</li>
+                <li>Recent, Archive, Batch results, Audit UI</li>
               </ul>
             </article>
             <article class="layer backend">
@@ -599,11 +601,11 @@
             </div>
             <div class="node">
               <strong>3. Schema</strong>
-              <p>사용자가 key_name, description, output_format 지정</p>
+              <p>schema-level regions를 만들고 field별로 region_id 선택</p>
             </div>
             <div class="node">
               <strong>4. VLM</strong>
-              <p>LangChain with_structured_output으로 schema 기반 추출</p>
+              <p>full-page group과 region group별로 LangChain structured output 추출 후 merge</p>
             </div>
             <div class="node">
               <strong>5. Validate/Export</strong>
@@ -774,6 +776,8 @@ LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice</div>
                 <li>key_name: 사용자가 보는 결과 key. 한글 가능</li>
                 <li>description: 해당 값을 문서 어디서/어떻게 찾을지 알려주는 field-level instruction</li>
                 <li>output_format: string, float, date, bool 중 하나</li>
+                <li>region_id: 선택 항목. schema-level region을 참조하며 여러 field가 같은 region 사용 가능</li>
+                <li>regions: id, name, page, x, y, width, height 상대 좌표 template</li>
               </ul>
             </article>
             <article class="card">
@@ -788,9 +792,65 @@ LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice</div>
           </div>
           <div class="legend" style="margin-top: 12px;">
             <span>Raw HTML: 원본 Office/PDF 파서 기반</span>
-            <span>KIE VLM 입력: page image data URL</span>
+            <span>KIE VLM 입력: full-page group + region group</span>
             <span>Secret: backend .env only</span>
             <span>Local-first MVP: SQLite + filesystem</span>
+          </div>
+        </section>
+
+        <section id="changelog" class="panel pad section">
+          <h2>8. Architecture Change Log</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Version</th>
+                <th>구조</th>
+                <th>내용</th>
+                <th>변경 이유</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>v0.1</strong><br />KIE MVP</td>
+                <td>schema fields only</td>
+                <td>사용자가 `key_name`, `description`, `output_format`을 정의하고 전체 page image를 VLM에 전달했습니다.</td>
+                <td>가장 단순한 schema 기반 structured output MVP를 빠르게 검증하기 위한 구조입니다.</td>
+              </tr>
+              <tr>
+                <td><strong>v0.2</strong><br />Field-owned region</td>
+                <td>field.region</td>
+                <td>각 field가 optional `region` 좌표를 직접 소유했습니다. region field는 crop image를 추가 입력으로 받았습니다.</td>
+                <td>한글 손글씨와 고정 양식에서 전체 문서 추론 노이즈를 줄이기 위한 첫 ROI 구조입니다.</td>
+              </tr>
+              <tr>
+                <td><strong>v0.3</strong><br />Schema-level region</td>
+                <td>schema.regions + field.region_id</td>
+                <td>region을 schema 최상위 template으로 이동하고 여러 field가 같은 `region_id`를 참조하도록 변경했습니다.</td>
+                <td>Region 1개에 여러 field를 할당하는 실제 양식 처리 방식과 batch 재사용성을 맞추기 위한 구조입니다.</td>
+              </tr>
+              <tr>
+                <td><strong>v0.4</strong><br />Masked context</td>
+                <td>masked page + crop</td>
+                <td>region field 입력에 crop뿐 아니라 region 외부를 흐리게 처리한 원본 page context를 함께 추가했습니다.</td>
+                <td>`우측 하단` 같은 description 위치 표현을 원본 page 맥락에서 유지하면서 crop 판독 집중도를 높이기 위해서입니다.</td>
+              </tr>
+              <tr>
+                <td><strong>v0.5</strong><br />Grouped extraction</td>
+                <td>full-page group + region groups</td>
+                <td>`region_id` 없는 field는 full-page group 1회로 추출하고, region field는 사용 중인 region별로 별도 VLM 호출 후 결과를 merge합니다.</td>
+                <td>full-page field와 region field가 한 호출 안에서 서로 오염되는 문제를 줄이고, region별 structured output schema를 더 작고 명확하게 만들기 위해서입니다.</td>
+              </tr>
+              <tr>
+                <td><strong>v0.6</strong><br />Batch-first review</td>
+                <td>KIE main batch upload + batch file sidebar</td>
+                <td>KIE 메인 업로드 화면에 batch upload를 추가하고, batch 실행 후 좌측 sidebar에서 thumbnail/status를 보며 item을 이동하도록 변경했습니다.</td>
+                <td>50장 이상의 이미지/문서도 별도 modal을 오가지 않고 선택 문서와 우측 결과를 즉시 검토하기 위한 UX 구조입니다.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="callout" style="margin-top: 12px;">
+            <strong>현재 기준</strong>
+            호출 수는 `full-page field가 있으면 1회 + 사용 중인 region 수`입니다. 정의만 되어 있고 어떤 field도 참조하지 않는 region은 호출하지 않습니다.
           </div>
         </section>
       </main>

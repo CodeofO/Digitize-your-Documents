@@ -280,6 +280,7 @@ def create_schema(payload: SchemaCreate, db: Session = Depends(get_db)) -> Schem
     db.add(schema)
     db.flush()
     schema_json = payload.model_dump()
+    _validate_schema_region_references(schema_json)
     db.add(
         SchemaVersion(
             schema_id=schema.id,
@@ -373,8 +374,10 @@ def update_schema(schema_id: str, payload: SchemaUpdate, db: Session = Depends(g
             payload.template_category if "template_category" in payload.model_fields_set else schema.template_category
         ),
         "pinned": payload.pinned if payload.pinned is not None else schema.pinned,
+        "regions": [region.model_dump() for region in payload.regions] if payload.regions is not None else current.get("regions", []),
         "fields": [field.model_dump() for field in payload.fields] if payload.fields is not None else current["fields"],
     }
+    _validate_schema_region_references(next_schema_data)
 
     schema.name = next_schema_data["name"]
     schema.display_name = next_schema_data["display_name"]
@@ -938,6 +941,7 @@ def _schema_read(schema: Schema) -> SchemaRead:
         is_template=schema.is_template,
         template_category=schema.template_category,
         pinned=schema.pinned,
+        regions=schema_data.get("regions", []),
         fields=schema_data["fields"],
         created_at=schema.created_at,
         updated_at=schema.updated_at,
@@ -949,6 +953,22 @@ def _schema_data(schema: Schema) -> dict[str, Any]:
     if version is None:
         raise HTTPException(status_code=500, detail="Schema version is missing")
     return json.loads(version.schema_json)
+
+
+def _validate_schema_region_references(schema_data: dict[str, Any]) -> None:
+    region_ids = {region.get("id") for region in schema_data.get("regions", []) if isinstance(region, dict)}
+    missing_region_ids = sorted(
+        {
+            field.get("region_id")
+            for field in schema_data.get("fields", [])
+            if isinstance(field, dict) and field.get("region_id") and field.get("region_id") not in region_ids
+        }
+    )
+    if missing_region_ids:
+        raise HTTPException(
+            status_code=422,
+            detail=f"schema field region_id values are missing from regions: {', '.join(missing_region_ids)}",
+        )
 
 
 def _schema_recommendation_read(payload: dict[str, Any]) -> SchemaRecommendationRead:

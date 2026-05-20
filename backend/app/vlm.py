@@ -41,7 +41,11 @@ def build_structured_output_schema(fields: list[FieldDefinition]) -> dict[str, A
     }
 
 
-def extract_with_vlm(fields: list[FieldDefinition], image_paths: list[str]) -> dict[str, Any]:
+def extract_with_vlm(
+    fields: list[FieldDefinition],
+    image_paths: list[str] | None = None,
+    image_inputs: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     settings = get_settings()
     provider = settings.vlm_provider.lower()
     if provider == "mock":
@@ -54,7 +58,7 @@ def extract_with_vlm(fields: list[FieldDefinition], image_paths: list[str]) -> d
     if provider != "openai":
         raise RuntimeError("Only openai or mock VLM_PROVIDER is supported in this MVP")
 
-    content = _build_multimodal_content(_build_user_prompt(fields), image_paths)
+    content = _build_multimodal_content(_build_user_prompt(fields), image_inputs or _image_inputs_from_paths(image_paths or []))
     return _invoke_structured_llm(SYSTEM_PROMPT, content, build_structured_output_schema(fields))
 
 
@@ -76,7 +80,7 @@ def recommend_schema_with_vlm(image_paths: list[str]) -> dict[str, Any]:
         "Prefer visible business-critical fields over generic metadata. "
         "Choose key_name values in the document's primary language."
     )
-    content = _build_multimodal_content(prompt, image_paths)
+    content = _build_multimodal_content(prompt, _image_inputs_from_paths(image_paths))
     return _invoke_structured_llm(SCHEMA_RECOMMENDATION_PROMPT, content, _schema_recommendation_output_schema())
 
 
@@ -165,23 +169,51 @@ def _schema_recommendation_output_schema() -> dict[str, Any]:
 
 
 def _build_user_prompt(fields: list[FieldDefinition]) -> str:
+    has_regions = any(field.region_id or field.region is not None for field in fields)
     lines = ["Extract these fields from the document images:"]
     for field in fields:
-        lines.append(f"- {field.key_name} ({field.output_format}): {field.description}")
+        if field.region_id:
+            lines.append(
+                f"- {field.key_name} ({field.output_format}): {field.description}. "
+                f"Use the masked full page context and cropped extraction region for region_id '{field.region_id}'. "
+                "Location words in the description refer to the original page position shown by the masked context. "
+                "Read the value from the crop, and do not use unrelated region crops for this field."
+            )
+        elif field.region:
+            region = field.region
+            lines.append(
+                f"- {field.key_name} ({field.output_format}): {field.description}. "
+                f"Use the masked full page context and extraction region crop for this field on page {region.page}; "
+                "location words in the description refer to the original page position."
+            )
+        else:
+            lines.append(f"- {field.key_name} ({field.output_format}): {field.description}. Use the full document pages.")
+    if has_regions:
+        lines.append(
+            "Images are labeled. For region fields, first use the masked full page image to understand where the region sits "
+            "in the original page, then use the matching crop to read the value. Region images should only affect their matching fields."
+        )
     lines.append("Return null for fields that are not visible.")
     return "\n".join(lines)
 
 
-def _build_multimodal_content(prompt: str, image_paths: list[str]) -> list[dict[str, Any]]:
+def _build_multimodal_content(prompt: str, image_inputs: list[dict[str, str]]) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    for image_path in image_paths:
+    for image_input in image_inputs:
+        label = image_input.get("label")
+        if label:
+            content.append({"type": "text", "text": label})
         content.append(
             {
                 "type": "image_url",
-                "image_url": {"url": _image_to_data_url(Path(image_path))},
+                "image_url": {"url": _image_to_data_url(Path(image_input["path"]))},
             }
         )
     return content
+
+
+def _image_inputs_from_paths(image_paths: list[str]) -> list[dict[str, str]]:
+    return [{"path": image_path, "label": f"Full document page {index + 1}"} for index, image_path in enumerate(image_paths)]
 
 
 def _image_to_data_url(path: Path) -> str:
@@ -203,8 +235,8 @@ def _mock_extraction(fields: list[FieldDefinition]) -> dict[str, Any]:
             value = f"Sample {field.key_name}"
         values[field.key_name] = {
             "value": value,
-            "page": 1,
-            "evidence": f"Mock evidence for {field.key_name}",
+            "page": field.region.page if field.region else 1,
+            "evidence": f"Mock evidence for {field.key_name}" + (" from extraction region" if field.region_id or field.region else ""),
             "confidence": 0.86,
         }
     return values

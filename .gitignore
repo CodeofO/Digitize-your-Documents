@@ -8,12 +8,18 @@ __pycache__/
 
 backend/kie.db
 backend/*.db
+backend/*.db-journal
 backend/*.sqlite
+backend/*.sqlite-journal
 backend/*.sqlite3
+backend/*.sqlite3-journal
 backend/storage/
 backend/backend/*.db
+backend/backend/*.db-journal
 backend/backend/*.sqlite
+backend/backend/*.sqlite-journal
 backend/backend/*.sqlite3
+backend/backend/*.sqlite3-journal
 backend/backend/storage/
 
 frontend/node_modules/

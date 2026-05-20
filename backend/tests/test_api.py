@@ -111,6 +111,46 @@ def test_schema_validation_and_creation() -> None:
         assert valid["name"] == "invoice_basic"
         assert valid["fields"][0]["key_name"] == "invoice_number"
 
+        region_schema = client.post(
+            "/api/schemas",
+            json={
+                "name": "region_schema",
+                "regions": [
+                    {"id": "region_1", "name": "Region 1", "page": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.1}
+                ],
+                "fields": [
+                    {
+                        "key_name": "handwritten_name",
+                        "description": "손글씨 이름 영역",
+                        "output_format": "string",
+                        "region_id": "region_1",
+                    },
+                ],
+            },
+        )
+        assert region_schema.status_code == 200, region_schema.text
+        assert region_schema.json()["regions"][0]["x"] == 0.1
+        assert region_schema.json()["fields"][0]["region_id"] == "region_1"
+
+        invalid_region = client.post(
+            "/api/schemas",
+            json={
+                "name": "invalid_region_schema",
+                "regions": [
+                    {"id": "region_1", "name": "Region 1", "page": 1, "x": 0.8, "y": 0.2, "width": 0.3, "height": 0.1}
+                ],
+                "fields": [
+                    {
+                        "key_name": "handwritten_name",
+                        "description": "손글씨 이름 영역",
+                        "output_format": "string",
+                        "region_id": "region_1",
+                    },
+                ],
+            },
+        )
+        assert invalid_region.status_code == 422
+
         korean_with_space = client.post(
             "/api/schemas",
             json={
@@ -294,6 +334,85 @@ def test_extraction_mock_mode_returns_evidence_and_normalized_values() -> None:
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
+
+
+def test_extraction_uses_schema_regions_for_cropped_inputs(monkeypatch) -> None:
+    captured_calls: list[dict[str, object]] = []
+
+    def fake_extract(fields, image_paths=None, image_inputs=None):
+        captured_calls.append({"fields": fields, "image_paths": image_paths, "image_inputs": image_inputs})
+        field_names = {field.key_name for field in fields}
+        values = {}
+        if "handwritten_name" in field_names:
+            values["handwritten_name"] = {"value": "홍길동", "page": 1, "evidence": "region crop", "confidence": 0.91}
+        if "handwritten_phone" in field_names:
+            values["handwritten_phone"] = {"value": "010-0000-0000", "page": 1, "evidence": "region crop", "confidence": 0.9}
+        if "document_date" in field_names:
+            values["document_date"] = {"value": "2026.05.20", "page": 1, "evidence": "full page", "confidence": 0.9}
+        return {
+            **values,
+        }
+
+    monkeypatch.setattr("app.extraction.extract_with_vlm", fake_extract)
+
+    with get_client() as client:
+        document = client.post(
+            "/api/documents",
+            files={"file": ("sample.pdf", make_pdf_bytes(), "application/pdf")},
+        ).json()
+        schema = client.post(
+            "/api/schemas",
+            json={
+                "name": "mixed_region_schema",
+                "regions": [
+                    {"id": "region_1", "name": "Handwriting block", "page": 1, "x": 0.1, "y": 0.1, "width": 0.5, "height": 0.4}
+                ],
+                "fields": [
+                    {
+                        "key_name": "handwritten_name",
+                        "description": "손글씨 이름 영역",
+                        "output_format": "string",
+                        "region_id": "region_1",
+                    },
+                    {
+                        "key_name": "handwritten_phone",
+                        "description": "손글씨 연락처 영역",
+                        "output_format": "string",
+                        "region_id": "region_1",
+                    },
+                    {
+                        "key_name": "document_date",
+                        "description": "문서 전체에서 날짜",
+                        "output_format": "date",
+                    },
+                ],
+            },
+        ).json()
+        job_response = client.post(
+            "/api/extraction-jobs",
+            json={"document_id": document["document_id"], "schema_id": schema["id"]},
+        )
+        assert job_response.status_code == 200, job_response.text
+        job = client.get(f"/api/extraction-jobs/{job_response.json()['job_id']}").json()
+
+    assert job["status"] == "completed"
+    assert len(captured_calls) == 2
+
+    full_page_call = next(call for call in captured_calls if [field.key_name for field in call["fields"]] == ["document_date"])
+    full_page_inputs = full_page_call["image_inputs"]
+    assert isinstance(full_page_inputs, list)
+    assert any("Full document page 1" in item["label"] for item in full_page_inputs)
+
+    region_call = next(call for call in captured_calls if {field.key_name for field in call["fields"]} == {"handwritten_name", "handwritten_phone"})
+    region_inputs = region_call["image_inputs"]
+    assert isinstance(region_inputs, list)
+    assert any("Masked full page context" in item["label"] and "Handwriting block" in item["label"] for item in region_inputs)
+    assert any("Cropped extraction region" in item["label"] and "Handwriting block" in item["label"] for item in region_inputs)
+    assert any("handwritten_name, handwritten_phone" in item["label"] for item in region_inputs)
+    assert len(region_inputs) == 2
+    region_fields = region_call["fields"]
+    assert region_fields[0].region_id == "region_1"
+    assert region_fields[1].region_id == "region_1"
 
 
 def test_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:

@@ -12,10 +12,28 @@ OutputFormat = Literal[
 ]
 
 
+class FieldRegion(BaseModel):
+    page: int = Field(ge=1)
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> "FieldRegion":
+        if self.x + self.width > 1:
+            raise ValueError("region x + width must be less than or equal to 1")
+        if self.y + self.height > 1:
+            raise ValueError("region y + height must be less than or equal to 1")
+        return self
+
+
 class FieldDefinition(BaseModel):
     key_name: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=1, max_length=1000)
     output_format: OutputFormat
+    region_id: str | None = Field(default=None, max_length=80)
+    region: FieldRegion | None = None
 
     @field_validator("key_name")
     @classmethod
@@ -30,6 +48,24 @@ class FieldDefinition(BaseModel):
     def validate_description(cls, value: str) -> str:
         return value.strip()
 
+    @field_validator("region_id")
+    @classmethod
+    def validate_region_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class SchemaRegion(FieldRegion):
+    id: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("id", "name")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        return value.strip()
+
 
 class SchemaCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
@@ -38,6 +74,7 @@ class SchemaCreate(BaseModel):
     is_template: bool = False
     template_category: str | None = Field(default=None, max_length=120)
     pinned: bool = False
+    regions: list[SchemaRegion] = Field(default_factory=list)
     fields: list[FieldDefinition] = Field(min_length=1)
 
     @field_validator("name")
@@ -50,6 +87,18 @@ class SchemaCreate(BaseModel):
         keys = [field.key_name for field in self.fields]
         if len(keys) != len(set(keys)):
             raise ValueError("schema field key_name values must be unique")
+        region_ids = [region.id for region in self.regions]
+        if len(region_ids) != len(set(region_ids)):
+            raise ValueError("schema region ids must be unique")
+        missing_region_ids = sorted(
+            {
+                field.region_id
+                for field in self.fields
+                if field.region_id and field.region_id not in set(region_ids)
+            }
+        )
+        if missing_region_ids:
+            raise ValueError(f"schema field region_id values are missing from regions: {', '.join(missing_region_ids)}")
         return self
 
 
@@ -60,6 +109,7 @@ class SchemaUpdate(BaseModel):
     is_template: bool | None = None
     template_category: str | None = Field(default=None, max_length=120)
     pinned: bool | None = None
+    regions: list[SchemaRegion] | None = None
     fields: list[FieldDefinition] | None = Field(default=None, min_length=1)
 
     @field_validator("name")
@@ -74,6 +124,19 @@ class SchemaUpdate(BaseModel):
         keys = [field.key_name for field in self.fields]
         if len(keys) != len(set(keys)):
             raise ValueError("schema field key_name values must be unique")
+        if self.regions is not None:
+            region_ids = [region.id for region in self.regions]
+            if len(region_ids) != len(set(region_ids)):
+                raise ValueError("schema region ids must be unique")
+            missing_region_ids = sorted(
+                {
+                    field.region_id
+                    for field in self.fields
+                    if field.region_id and field.region_id not in set(region_ids)
+                }
+            )
+            if missing_region_ids:
+                raise ValueError(f"schema field region_id values are missing from regions: {', '.join(missing_region_ids)}")
         return self
 
 
@@ -86,6 +149,7 @@ class SchemaRead(BaseModel):
     is_template: bool
     template_category: str | None
     pinned: bool
+    regions: list[SchemaRegion]
     fields: list[FieldDefinition]
     created_at: datetime
     updated_at: datetime

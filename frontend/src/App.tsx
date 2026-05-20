@@ -27,10 +27,11 @@ import UploadCloud from "lucide-react/dist/esm/icons/upload-cloud.js";
 import X from "lucide-react/dist/esm/icons/x.js";
 import ZoomIn from "lucide-react/dist/esm/icons/zoom-in.js";
 import ZoomOut from "lucide-react/dist/esm/icons/zoom-out.js";
-import { ChangeEvent, DragEvent, PointerEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const WORKSPACE_STATE_KEY = "digitize_workspace_state_v1";
 const OUTPUT_FORMATS = ["string", "float", "date", "bool"] as const;
 const KIE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const KIE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
@@ -74,6 +75,19 @@ type RawExtractionOptions = {
   includeFormulas: boolean;
 };
 
+type FieldRegion = {
+  page: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type SchemaRegion = FieldRegion & {
+  id: string;
+  name: string;
+};
+
 type DocumentPage = {
   id: string;
   page: number;
@@ -101,6 +115,8 @@ type FieldDefinition = {
   key_name: string;
   description: string;
   output_format: OutputFormat;
+  region_id?: string | null;
+  region?: FieldRegion | null;
 };
 
 type SchemaField = FieldDefinition & {
@@ -116,6 +132,7 @@ type SavedSchema = {
   is_template: boolean;
   template_category: string | null;
   pinned: boolean;
+  regions: SchemaRegion[];
   fields: FieldDefinition[];
   created_at: string;
   updated_at: string;
@@ -259,6 +276,18 @@ type ArchiveSearchResult = {
   created_at: string;
 };
 
+type PersistedWorkspaceState = {
+  mode: AppMode;
+  step: Step;
+  document_id: string | null;
+  schema_id: string | null;
+  job_id: string | null;
+  batch_id: string | null;
+  batch_item_id: string | null;
+  raw_id: string | null;
+  active_page: number;
+};
+
 type AuditEvent = {
   id: string;
   entity_type: string;
@@ -284,6 +313,50 @@ function modeFromLocation(): AppMode {
   return "home";
 }
 
+function replaceModeHash(nextMode: AppMode) {
+  const hash = nextMode === "home" ? "" : `#${nextMode}`;
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+}
+
+function savePersistedWorkspaceState(state: PersistedWorkspaceState) {
+  try {
+    window.localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(state));
+  } catch {
+    // localStorage can be unavailable in private or restricted browser contexts.
+  }
+}
+
+function readPersistedWorkspaceState(): PersistedWorkspaceState | null {
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedWorkspaceState>;
+    const mode = parsed.mode === "raw" || parsed.mode === "key-info" || parsed.mode === "home" ? parsed.mode : "home";
+    const step = parsed.step === "upload" || parsed.step === "schema" || parsed.step === "review" ? parsed.step : "upload";
+    return {
+      mode,
+      step,
+      document_id: typeof parsed.document_id === "string" ? parsed.document_id : null,
+      schema_id: typeof parsed.schema_id === "string" ? parsed.schema_id : null,
+      job_id: typeof parsed.job_id === "string" ? parsed.job_id : null,
+      batch_id: typeof parsed.batch_id === "string" ? parsed.batch_id : null,
+      batch_item_id: typeof parsed.batch_item_id === "string" ? parsed.batch_item_id : null,
+      raw_id: typeof parsed.raw_id === "string" ? parsed.raw_id : null,
+      active_page: typeof parsed.active_page === "number" ? parsed.active_page : 0
+    };
+  } catch {
+    return null;
+  }
+}
+
+function clearPersistedWorkspaceState() {
+  try {
+    window.localStorage.removeItem(WORKSPACE_STATE_KEY);
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
+
 export default function App() {
   const [mode, setMode] = useState<AppMode>(() => modeFromLocation());
   const [step, setStep] = useState<Step>("upload");
@@ -291,6 +364,7 @@ export default function App() {
   const [schemaName, setSchemaName] = useState("document_schema");
   const [schemaDescription, setSchemaDescription] = useState("");
   const [fields, setFields] = useState<SchemaField[]>(initialFields);
+  const [regions, setRegions] = useState<SchemaRegion[]>([]);
   const [schema, setSchema] = useState<SavedSchema | null>(null);
   const [schemaDirty, setSchemaDirty] = useState(false);
   const [schemaJsonInput, setSchemaJsonInput] = useState("");
@@ -333,12 +407,41 @@ export default function App() {
   const [batchSchemaId, setBatchSchemaId] = useState("");
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [batchMessage, setBatchMessage] = useState<string | null>(null);
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
+  const [activeBatchItemId, setActiveBatchItemId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [workspaceRestored, setWorkspaceRestored] = useState(false);
 
   useEffect(() => {
-    void refreshAll();
+    void bootstrapWorkspace();
   }, []);
+
+  useEffect(() => {
+    if (!workspaceRestored) return;
+    savePersistedWorkspaceState({
+      mode,
+      step,
+      document_id: document?.document_id ?? null,
+      schema_id: schema?.id ?? null,
+      job_id: job?.job_id ?? null,
+      batch_id: activeBatchId,
+      batch_item_id: activeBatchItemId,
+      raw_id: rawExtraction?.id ?? null,
+      active_page: activePage
+    });
+  }, [
+    workspaceRestored,
+    mode,
+    step,
+    document?.document_id,
+    schema?.id,
+    job?.job_id,
+    activeBatchId,
+    activeBatchItemId,
+    rawExtraction?.id,
+    activePage
+  ]);
 
   useEffect(() => {
     const onPopState = () => setMode(modeFromLocation());
@@ -359,6 +462,7 @@ export default function App() {
   }, [schema?.id]);
 
   const schemaPayloadFields = useMemo(() => fields.map(stripLocalId), [fields]);
+  const schemaPayloadRegions = useMemo(() => regions.map(normalizeSchemaRegion).filter(Boolean) as SchemaRegion[], [regions]);
   const schemaPreview = useMemo(
     () =>
       JSON.stringify(
@@ -366,12 +470,13 @@ export default function App() {
           name: schemaName,
           display_name: schemaName,
           description: schemaDescription || null,
+          regions: schemaPayloadRegions,
           fields: schemaPayloadFields
         },
         null,
         2
       ),
-    [schemaName, schemaDescription, schemaPayloadFields]
+    [schemaName, schemaDescription, schemaPayloadFields, schemaPayloadRegions]
   );
 
   const schemaDownloadUrl = useMemo(
@@ -396,6 +501,14 @@ export default function App() {
     recentSchemas.forEach((item) => options.set(item.id, item));
     return Array.from(options.values());
   }, [schema, recentSchemas]);
+  const activeBatch = useMemo(
+    () => (activeBatchId ? batches.find((batch) => batch.id === activeBatchId) ?? null : null),
+    [batches, activeBatchId]
+  );
+  const activeBatchItem = useMemo(() => {
+    if (!activeBatch) return null;
+    return activeBatch.items.find((item) => item.id === activeBatchItemId) ?? activeBatch.items[0] ?? null;
+  }, [activeBatch, activeBatchItemId]);
   const hasActiveBatch = useMemo(
     () =>
       batches.some(
@@ -408,17 +521,118 @@ export default function App() {
   const hasPreparedSchema = Boolean(document) || Boolean(schema) || schemaDirty || hasMeaningfulSchema(fields);
 
   useEffect(() => {
-    if (!batchOpen || !hasActiveBatch) return;
+    if (!hasActiveBatch) return;
     const intervalId = window.setInterval(() => {
       void refreshBatches();
+      void refreshActiveBatchItemJob();
     }, 1500);
     return () => window.clearInterval(intervalId);
-  }, [batchOpen, hasActiveBatch]);
+  }, [hasActiveBatch, activeBatchId, activeBatchItemId, job?.job_id, job?.result_id]);
 
-  async function refreshAll() {
+  async function bootstrapWorkspace() {
+    await refreshAll(false);
+    await restoreWorkspaceState();
+    setWorkspaceRestored(true);
+  }
+
+  async function refreshAll(reloadCurrent = true) {
     await Promise.all([refreshHistory(), refreshRawHistory(), refreshSystemStatus(), loadVlmSettings(), refreshBatches(), searchArchive()]);
-    if (rawExtraction) {
-      void loadRawExtraction(rawExtraction.id);
+    if (reloadCurrent) {
+      await refreshCurrentWorkspace();
+    }
+  }
+
+  async function refreshCurrentWorkspace() {
+    try {
+      if (mode === "raw" && rawExtraction?.id) {
+        await loadRawExtraction(rawExtraction.id);
+        return;
+      }
+      if (mode === "key-info" && activeBatchId && activeBatchItem) {
+        await refreshBatches();
+        await refreshActiveBatchItemJob();
+        return;
+      }
+      if (job?.job_id) {
+        await loadJob(job.job_id);
+        return;
+      }
+      if (document?.document_id) {
+        const loadedDocument = await api<UploadedDocument>(`/api/documents/${document.document_id}`);
+        setDocument(loadedDocument);
+        setActivePage((page) => Math.min(Math.max(0, page), Math.max(0, loadedDocument.page_count - 1)));
+      }
+      if (schema?.id) {
+        const loadedSchema = await api<SavedSchema>(`/api/schemas/${schema.id}`);
+        applySchema(loadedSchema);
+      }
+    } catch (err) {
+      setError(toFriendlyError(err));
+    }
+  }
+
+  async function restoreWorkspaceState() {
+    const saved = readPersistedWorkspaceState();
+    if (!saved) return;
+    const savedMode = saved.mode === "raw" || saved.mode === "key-info" || saved.mode === "home" ? saved.mode : modeFromLocation();
+    replaceModeHash(savedMode);
+    setMode(savedMode);
+    try {
+      if (savedMode === "raw" && saved.raw_id) {
+        const loadedRaw = await api<RawExtraction>(`/api/raw-extractions/${saved.raw_id}`);
+        setRawExtraction(loadedRaw);
+        return;
+      }
+
+      if (savedMode === "key-info" && saved.batch_id) {
+        const loadedBatch = await api<Batch>(`/api/batches/${saved.batch_id}`);
+        setBatches((current) => [loadedBatch, ...current.filter((batch) => batch.id !== loadedBatch.id)].slice(0, 12));
+        const selectedItem =
+          loadedBatch.items.find((item) => item.id === saved.batch_item_id) ?? loadedBatch.items[0] ?? null;
+        setActiveBatchId(loadedBatch.id);
+        setActiveBatchItemId(selectedItem?.id ?? null);
+        if (selectedItem) {
+          await loadJob(selectedItem.job_id, { preserveBatch: true, forceReviewStep: true, silent: true });
+          setStep("review");
+        }
+        return;
+      }
+
+      if (saved.job_id) {
+        const loadedJob = await api<ExtractionJob>(`/api/extraction-jobs/${saved.job_id}`);
+        const [loadedDocument, loadedSchema] = await Promise.all([
+          api<UploadedDocument>(`/api/documents/${loadedJob.document_id}`),
+          api<SavedSchema>(`/api/schemas/${loadedJob.schema_id}`)
+        ]);
+        applyDocument(loadedDocument);
+        applySchema(loadedSchema);
+        setJob(loadedJob);
+        if (loadedJob.result) {
+          setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
+          setReviewedFields(loadedJob.result.reviewed_fields ?? []);
+          setEditedKeys([]);
+          setReviewFilter("all");
+          void loadAuditEvents("extraction_result", loadedJob.result.id);
+        }
+        setStep(saved.step ?? (loadedJob.result ? "review" : "schema"));
+        setActivePage(Math.min(Math.max(0, saved.active_page ?? 0), Math.max(0, loadedDocument.page_count - 1)));
+        return;
+      }
+
+      if (saved.document_id) {
+        const loadedDocument = await api<UploadedDocument>(`/api/documents/${saved.document_id}`);
+        applyDocument(loadedDocument);
+        setActivePage(Math.min(Math.max(0, saved.active_page ?? 0), Math.max(0, loadedDocument.page_count - 1)));
+      }
+      if (saved.schema_id) {
+        const loadedSchema = await api<SavedSchema>(`/api/schemas/${saved.schema_id}`);
+        applySchema(loadedSchema);
+      }
+      if (saved.document_id || saved.schema_id) {
+        setStep(saved.step === "review" ? "schema" : saved.step);
+      }
+    } catch {
+      clearPersistedWorkspaceState();
     }
   }
 
@@ -485,7 +699,17 @@ export default function App() {
 
   async function refreshBatches() {
     try {
-      setBatches(await api<Batch[]>("/api/batches?limit=8"));
+      const items = await api<Batch[]>("/api/batches?limit=12");
+      if (activeBatchId && !items.some((batch) => batch.id === activeBatchId)) {
+        try {
+          const active = await api<Batch>(`/api/batches/${activeBatchId}`);
+          setBatches([active, ...items].slice(0, 12));
+          return;
+        } catch {
+          // If the active batch no longer exists, fall back to recent batches.
+        }
+      }
+      setBatches(items);
     } catch {
       setBatches([]);
     }
@@ -578,6 +802,8 @@ export default function App() {
         method: "POST",
         body: form
       });
+      setActiveBatchId(null);
+      setActiveBatchItemId(null);
       applyDocument(uploaded);
       setStep("schema");
       await refreshHistory();
@@ -621,13 +847,14 @@ export default function App() {
     setSchemaName(recommendation.name || "ai_recommended_schema");
     setSchemaDescription(recommendation.description ?? "");
     setFields(toSchemaFields(recommendation.fields));
+    setRegions([]);
     setSchemaDirty(true);
     setPendingRecommendation(null);
     setStep("schema");
   }
 
   async function saveSchema() {
-    const validationError = validateFields(schemaPayloadFields);
+    const validationError = validateFields(schemaPayloadFields, schemaPayloadRegions);
     if (validationError) {
       setError(validationError);
       return null;
@@ -639,6 +866,7 @@ export default function App() {
         name: schemaName,
         display_name: schemaName,
         description: schemaDescription || null,
+        regions: schemaPayloadRegions,
         fields: schemaPayloadFields
       });
       const saved = await api<SavedSchema>(schema ? `/api/schemas/${schema.id}` : "/api/schemas", {
@@ -678,6 +906,8 @@ export default function App() {
           schema_version: activeSchema.current_version
         })
       });
+      setActiveBatchId(null);
+      setActiveBatchItemId(null);
       setJob(created);
       const completed = await pollJob(created.job_id);
       setJob(completed);
@@ -730,6 +960,8 @@ export default function App() {
     setBusy("Loading document");
     setError(null);
     try {
+      setActiveBatchId(null);
+      setActiveBatchItemId(null);
       const loaded = await api<UploadedDocument>(`/api/documents/${documentId}`);
       applyDocument(loaded);
       void loadAuditEvents("document", loaded.document_id);
@@ -762,6 +994,8 @@ export default function App() {
     setBusy("Loading schema");
     setError(null);
     try {
+      setActiveBatchId(null);
+      setActiveBatchItemId(null);
       const loaded = await api<SavedSchema>(`/api/schemas/${schemaId}`);
       applySchema(loaded);
       setStep("schema");
@@ -772,10 +1006,17 @@ export default function App() {
     }
   }
 
-  async function loadJob(jobId: string) {
-    setBusy("Loading extraction job");
+  async function loadJob(
+    jobId: string,
+    options: { preserveBatch?: boolean; forceReviewStep?: boolean; silent?: boolean } = {}
+  ) {
+    if (!options.silent) setBusy("추출 결과 로드 중");
     setError(null);
     try {
+      if (!options.preserveBatch) {
+        setActiveBatchId(null);
+        setActiveBatchItemId(null);
+      }
       const loadedJob = await api<ExtractionJob>(`/api/extraction-jobs/${jobId}`);
       const [loadedDocument, loadedSchema] = await Promise.all([
         api<UploadedDocument>(`/api/documents/${loadedJob.document_id}`),
@@ -792,12 +1033,45 @@ export default function App() {
         setStep("review");
         void loadAuditEvents("extraction_result", loadedJob.result.id);
       } else {
-        setStep("schema");
+        setStep(options.forceReviewStep ? "review" : "schema");
       }
     } catch (err) {
       setError(toFriendlyError(err));
     } finally {
-      setBusy(null);
+      if (!options.silent) setBusy(null);
+    }
+  }
+
+  async function openBatchItem(batchId: string, itemId: string, batchOverride?: Batch) {
+    const sourceBatch = batchOverride ?? batches.find((batch) => batch.id === batchId) ?? (await api<Batch>(`/api/batches/${batchId}`));
+    const item = sourceBatch.items.find((candidate) => candidate.id === itemId) ?? sourceBatch.items[0];
+    if (!item) return;
+    setBatches((current) => [sourceBatch, ...current.filter((batch) => batch.id !== sourceBatch.id)].slice(0, 12));
+    setActiveBatchId(sourceBatch.id);
+    setActiveBatchItemId(item.id);
+    setStep("review");
+    await loadJob(item.job_id, { preserveBatch: true, forceReviewStep: true });
+  }
+
+  async function refreshActiveBatchItemJob() {
+    if (!activeBatchItem) return;
+    try {
+      const loadedJob = await api<ExtractionJob>(`/api/extraction-jobs/${activeBatchItem.job_id}`);
+      if (loadedJob.job_id !== job?.job_id) {
+        await loadJob(loadedJob.job_id, { preserveBatch: true, forceReviewStep: true, silent: true });
+        return;
+      }
+      setJob(loadedJob);
+      if (loadedJob.result && (loadedJob.result_id !== job?.result_id || !result)) {
+        setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
+        setReviewedFields(loadedJob.result.reviewed_fields ?? []);
+        setEditedKeys([]);
+        setReviewFilter("all");
+        setStep("review");
+        void loadAuditEvents("extraction_result", loadedJob.result.id);
+      }
+    } catch {
+      // Polling should not interrupt the visible batch review workflow.
     }
   }
 
@@ -812,11 +1086,28 @@ export default function App() {
     setAuditEvents([]);
   }
 
+  function clearDocumentForNewUpload() {
+    setDocument(null);
+    setActivePage(0);
+    setRotation(0);
+    setJob(null);
+    setActiveBatchId(null);
+    setActiveBatchItemId(null);
+    setEdits({});
+    setEditedKeys([]);
+    setReviewedFields([]);
+    setAuditEvents([]);
+    setReviewFilter("all");
+    setStep("upload");
+  }
+
   function applySchema(nextSchema: SavedSchema) {
+    const normalized = normalizeSchemaFieldsAndRegions(nextSchema.fields, nextSchema.regions ?? []);
     setSchema(nextSchema);
     setSchemaName(nextSchema.name);
     setSchemaDescription(nextSchema.description ?? "");
-    setFields(toSchemaFields(nextSchema.fields));
+    setRegions(normalized.regions);
+    setFields(toSchemaFields(normalized.fields));
     setSchemaDirty(false);
   }
 
@@ -824,6 +1115,7 @@ export default function App() {
     setSchema(null);
     setSchemaName("sample_document_schema");
     setSchemaDescription("Starter schema for common business documents.");
+    setRegions([]);
     setFields(toSchemaFields(SAMPLE_SCHEMA_FIELDS));
     setSchemaDirty(true);
     setStep("schema");
@@ -839,9 +1131,15 @@ export default function App() {
       const fieldsFromJson = parsed.fields.map((field) => ({
         key_name: String(field.key_name ?? "").trim(),
         description: String(field.description ?? "").trim(),
-        output_format: field.output_format as OutputFormat
+        output_format: field.output_format as OutputFormat,
+        region_id: typeof field.region_id === "string" ? field.region_id.trim() || null : null,
+        region: normalizeRegion(field.region)
       }));
-      const validationError = validateFields(fieldsFromJson);
+      const regionsFromJson = Array.isArray((parsed as { regions?: unknown }).regions)
+        ? ((parsed as { regions?: unknown[] }).regions ?? []).map(normalizeSchemaRegion).filter(Boolean) as SchemaRegion[]
+        : [];
+      const normalized = normalizeSchemaFieldsAndRegions(fieldsFromJson, regionsFromJson);
+      const validationError = validateFields(normalized.fields, normalized.regions);
       if (validationError) {
         setError(validationError);
         return;
@@ -849,7 +1147,8 @@ export default function App() {
       setSchema(null);
       setSchemaName(parsed.name);
       setSchemaDescription(parsed.description ?? "");
-      setFields(toSchemaFields(fieldsFromJson));
+      setRegions(normalized.regions);
+      setFields(toSchemaFields(normalized.fields));
       setSchemaDirty(true);
       setError(null);
     } catch {
@@ -860,6 +1159,24 @@ export default function App() {
   function updateField(index: number, patch: Partial<FieldDefinition>) {
     setSchemaDirty(true);
     setFields((current) => current.map((field, fieldIndex) => (fieldIndex === index ? { ...field, ...patch } : field)));
+  }
+
+  function saveRegion(region: SchemaRegion) {
+    const normalized = normalizeSchemaRegion(region);
+    if (!normalized) return;
+    setSchemaDirty(true);
+    setRegions((current) => {
+      const exists = current.some((item) => item.id === normalized.id);
+      return exists ? current.map((item) => (item.id === normalized.id ? normalized : item)) : [...current, normalized];
+    });
+  }
+
+  function removeRegion(regionId: string) {
+    setSchemaDirty(true);
+    setRegions((current) => current.filter((region) => region.id !== regionId));
+    setFields((current) =>
+      current.map((field) => (field.region_id === regionId ? { ...field, region_id: null } : field))
+    );
   }
 
   function addField() {
@@ -952,7 +1269,7 @@ export default function App() {
       setBatchMessage("배치 처리할 파일이나 폴더를 선택하세요.");
       return;
     }
-    setBusy("Creating batch extraction");
+    setBusy("배치 추출 준비 중");
     setError(null);
     setBatchMessage(null);
     try {
@@ -961,9 +1278,16 @@ export default function App() {
       form.append("schema_version", String(selectedSchema.current_version));
       batchFiles.forEach((file) => form.append("files", file));
       const batch = await api<Batch>("/api/batches", { method: "POST", body: form });
-      setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 8));
+      setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 12));
+      setActiveBatchId(batch.id);
+      setActiveBatchItemId(batch.items[0]?.id ?? null);
       setBatchFiles([]);
-      setBatchMessage(`${batch.total_count}개 파일의 배치 추출을 시작했습니다. 아래 결과 목록에서 진행 상태를 확인하세요.`);
+      setBatchMessage(`${batch.total_count}개 파일의 배치 추출을 시작했습니다. 좌측 파일 목록에서 항목을 선택해 결과를 확인하세요.`);
+      if (batch.items[0]) {
+        await openBatchItem(batch.id, batch.items[0].id, batch);
+      } else {
+        setStep("review");
+      }
       await refreshBatches();
     } catch (err) {
       setError(toFriendlyError(err));
@@ -1032,17 +1356,6 @@ export default function App() {
   function goToPage(page: number | null) {
     if (!document || !page) return;
     setActivePage(Math.min(document.page_count - 1, Math.max(0, page - 1)));
-  }
-
-  function onDrop(event: DragEvent<HTMLLabelElement>) {
-    event.preventDefault();
-    const file = event.dataTransfer.files[0];
-    if (file) void uploadFile(file);
-  }
-
-  function onFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (file) void uploadFile(file);
   }
 
   function startResize(event: PointerEvent<HTMLButtonElement>) {
@@ -1154,25 +1467,51 @@ export default function App() {
         >
         <section className="document-pane">
           {!document ? (
-            <label className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
-                <UploadCloud size={32} />
-                <strong>Upload a document</strong>
-                <span>PDF, PNG, JPG, JPEG, DOCX, or PPTX</span>
-                <input type="file" accept={KIE_FILE_ACCEPT} onChange={onFileChange} />
-              </label>
-          ) : (
-            <DocumentViewer
-              document={document}
-              activePage={activePage}
-              activeImageUrl={activeImageUrl}
-              zoom={zoom}
-              zoomMode={zoomMode}
-              rotation={rotation}
-              onPage={setActivePage}
-              onZoom={setZoom}
-              onZoomMode={setZoomMode}
-              onRotation={setRotation}
+            <KieUploadPanel
+              schemas={batchSchemaOptions}
+              selectedSchemaId={batchSchemaId}
+              selectedFiles={batchFiles}
+              message={batchMessage}
+              currentSchemaDirty={schemaDirty}
+              canSaveCurrentSchema={hasMeaningfulSchema(fields)}
+              onSingleUpload={(file) => void uploadFile(file)}
+              onSchema={setBatchSchemaId}
+              onSelectFiles={selectBatchFiles}
+              onClearFiles={() => {
+                setBatchFiles([]);
+                setBatchMessage(null);
+              }}
+              onRunBatch={() => void runBatchUpload()}
+              onSaveCurrentSchema={() => void saveCurrentSchemaForBatch()}
             />
+          ) : (
+            <div className={activeBatch ? "document-workbench batch-active" : "document-workbench"}>
+              {activeBatch && (
+                <BatchFileRail
+                  batch={activeBatch}
+                  activeItemId={activeBatchItem?.id ?? null}
+                  onOpenItem={(itemId) => void openBatchItem(activeBatch.id, itemId)}
+                  onCancelBatch={(batchId) => void cancelBatch(batchId)}
+                  onRefresh={() => void refreshBatches()}
+                />
+              )}
+              <div className="document-viewer-panel">
+                <DocumentViewer
+                  document={document}
+                  activePage={activePage}
+                  activeImageUrl={activeImageUrl}
+                  zoom={zoom}
+                  zoomMode={zoomMode}
+                  rotation={rotation}
+                  onPage={setActivePage}
+                  onZoom={setZoom}
+                  onZoomMode={setZoomMode}
+                  onRotation={setRotation}
+                  onReplaceFile={(file) => void uploadFile(file)}
+                  onClear={clearDocumentForNewUpload}
+                />
+              </div>
+            </div>
           )}
         </section>
 
@@ -1194,12 +1533,14 @@ export default function App() {
               schemaName={schemaName}
               schemaDescription={schemaDescription}
               fields={fields}
+              regions={regions}
               schemaPreview={schemaPreview}
               schemaDownloadUrl={schemaDownloadUrl}
               schemaJsonInput={schemaJsonInput}
               savedSchema={schema}
               schemaDirty={schemaDirty}
               document={document}
+              activePage={activePage}
               systemStatus={systemStatus}
               templates={templates}
               onSchemaName={(value) => {
@@ -1213,6 +1554,8 @@ export default function App() {
               onSchemaJsonInput={setSchemaJsonInput}
               onImportSchemaJson={importSchemaJson}
               onUpdateField={updateField}
+              onSaveRegion={saveRegion}
+              onRemoveRegion={removeRegion}
               onAddField={addField}
               onRemoveField={removeField}
               onSaveSchema={saveSchema}
@@ -1226,6 +1569,32 @@ export default function App() {
               }}
               onSaveTemplate={() => void markSchemaAsTemplate()}
               canExtract={Boolean(document)}
+            />
+          ) : result ? (
+            <ReviewPanel
+              fields={fields}
+              result={result}
+              values={currentValues}
+              editedKeys={editedKeys}
+              reviewedFields={reviewedFields}
+              filter={reviewFilter}
+              exportPresets={exportPresets}
+              selectedPresetId={selectedPresetId}
+              auditEvents={auditEvents}
+              onFilter={setReviewFilter}
+              onEdit={updateEdit}
+              onToggleReviewed={toggleReviewed}
+              onSaveCorrections={saveCorrections}
+              onGoToPage={goToPage}
+              onPreset={setSelectedPresetId}
+              onSavePreset={() => void saveDefaultExportPreset()}
+            />
+          ) : activeBatch && activeBatchItem ? (
+            <BatchItemStatusPanel
+              batch={activeBatch}
+              item={activeBatchItem}
+              onRefresh={() => void refreshBatches()}
+              onCancelBatch={(batchId) => void cancelBatch(batchId)}
             />
           ) : (
             <ReviewPanel
@@ -1302,7 +1671,7 @@ export default function App() {
         </UtilityModal>
       )}
       {batchOpen && (
-        <UtilityModal title="Batch extraction" eyebrow="Run multiple files" onClose={() => setBatchOpen(false)}>
+        <UtilityModal title="Batch upload & results" eyebrow="Multiple files" onClose={() => setBatchOpen(false)}>
           <BatchPanel
             batches={batches}
             schemas={batchSchemaOptions}
@@ -1321,9 +1690,9 @@ export default function App() {
             onSaveCurrentSchema={() => void saveCurrentSchemaForBatch()}
             onCancelBatch={(batchId) => void cancelBatch(batchId)}
             onRefresh={() => void refreshBatches()}
-            onOpenJob={(jobId) => {
+            onOpenItem={(batchId, itemId) => {
               setBatchOpen(false);
-              void loadJob(jobId);
+              void openBatchItem(batchId, itemId);
             }}
           />
         </UtilityModal>
@@ -1368,7 +1737,7 @@ function KieUtilityDock(props: { onArchive: () => void; onHistory: () => void; o
       </button>
       <button type="button" className="secondary" onClick={props.onBatch}>
         <FileSpreadsheet size={16} />
-        Batch extract
+        Batch results
       </button>
     </section>
   );
@@ -1570,6 +1939,240 @@ function RawWorkspace(props: {
   );
 }
 
+function KieUploadPanel(props: {
+  schemas: SavedSchema[];
+  selectedSchemaId: string;
+  selectedFiles: File[];
+  message: string | null;
+  currentSchemaDirty: boolean;
+  canSaveCurrentSchema: boolean;
+  onSingleUpload: (file: File) => void;
+  onSchema: (schemaId: string) => void;
+  onSelectFiles: (files: FileList | null) => void;
+  onClearFiles: () => void;
+  onRunBatch: () => void;
+  onSaveCurrentSchema: () => void;
+}) {
+  function onSingleDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    const file = event.dataTransfer.files[0];
+    if (file) props.onSingleUpload(file);
+  }
+
+  function onSingleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (file) props.onSingleUpload(file);
+    event.currentTarget.value = "";
+  }
+
+  function onBatchFileChange(event: ChangeEvent<HTMLInputElement>) {
+    props.onSelectFiles(event.target.files);
+    event.currentTarget.value = "";
+  }
+
+  return (
+    <div className="kie-upload-panel">
+      <div className="pane-header">
+        <div>
+          <p className="eyebrow">KIE Upload</p>
+          <h2>문서 또는 배치 업로드</h2>
+        </div>
+      </div>
+
+      <div className="kie-upload-grid">
+        <label className="upload-zone single-upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onSingleDrop}>
+          <UploadCloud size={32} />
+          <strong>Single document</strong>
+          <span>PDF, PNG, JPG, JPEG, DOCX, PPTX</span>
+          <input type="file" accept={KIE_FILE_ACCEPT} onChange={onSingleFileChange} />
+        </label>
+
+        <section className="batch-main-upload">
+          <div className="batch-intro">
+            <strong>Batch upload</strong>
+            <p>저장된 schema 하나를 선택하고 여러 이미지/문서를 같은 기준으로 추출합니다.</p>
+          </div>
+
+          <label className="field-stack">
+            <span>Schema</span>
+            <select value={props.selectedSchemaId} onChange={(event) => props.onSchema(event.target.value)}>
+              <option value="">Select saved schema</option>
+              {props.schemas.map((schema) => (
+                <option key={schema.id} value={schema.id}>
+                  {schema.display_name || schema.name} · v{schema.current_version} · {schema.fields.length} fields
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {props.currentSchemaDirty && (
+            <div className="notice-card">
+              현재 schema 변경사항이 저장되지 않았습니다. 최신 schema로 배치 처리하려면 먼저 저장하세요.
+            </div>
+          )}
+
+          <div className="action-row">
+            <button className="secondary" disabled={!props.canSaveCurrentSchema} onClick={props.onSaveCurrentSchema}>
+              <Save size={16} />
+              Save current schema
+            </button>
+          </div>
+
+          <div className="file-picker-grid">
+            <label className="batch-upload">
+              <FileUp size={16} />
+              <span>Select files</span>
+              <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onBatchFileChange} />
+            </label>
+            <label className="batch-upload">
+              <UploadCloud size={16} />
+              <span>Select folder</span>
+              <input
+                type="file"
+                accept={KIE_FILE_ACCEPT}
+                multiple
+                onChange={onBatchFileChange}
+                {...{ webkitdirectory: "", directory: "" }}
+              />
+            </label>
+          </div>
+
+          {props.selectedFiles.length > 0 && (
+            <div className="selected-files">
+              <div className="batch-top">
+                <strong>{props.selectedFiles.length} selected</strong>
+                <button type="button" className="ghost compact" onClick={props.onClearFiles}>
+                  Clear
+                </button>
+              </div>
+              <div className="mini-list">
+                {props.selectedFiles.slice(0, 10).map((file, index) => (
+                  <span key={`${fileDisplayName(file)}_${file.size}_${index}`}>{fileDisplayName(file)}</span>
+                ))}
+                {props.selectedFiles.length > 10 && <span className="muted">+ {props.selectedFiles.length - 10} more</span>}
+              </div>
+            </div>
+          )}
+
+          {props.message && <div className="success-card">{props.message}</div>}
+
+          <button className="primary run-batch-button" disabled={!props.selectedSchemaId || !props.selectedFiles.length} onClick={props.onRunBatch}>
+            <Play size={16} />
+            Run batch
+          </button>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function BatchFileRail(props: {
+  batch: Batch;
+  activeItemId: string | null;
+  onOpenItem: (itemId: string) => void;
+  onCancelBatch: (batchId: string) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <aside className="batch-file-rail" aria-label="Batch files">
+      <div className="batch-rail-header">
+        <div>
+          <p className="eyebrow">Batch</p>
+          <strong>{props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count} / {props.batch.total_count}</strong>
+        </div>
+        <button type="button" className="icon-only secondary compact" title="Refresh batch" onClick={props.onRefresh}>
+          <RefreshCw size={14} />
+        </button>
+      </div>
+      <progress max={1} value={props.batch.progress} />
+      <div className="batch-rail-actions">
+        <a className="secondary compact link-button" href={batchExportHref(props.batch.id, "csv")} target="_blank">
+          CSV
+        </a>
+        <a className="secondary compact link-button" href={batchExportHref(props.batch.id, "json")} target="_blank">
+          JSON
+        </a>
+        {batchCanCancel(props.batch) && (
+          <button type="button" className="secondary compact danger-outline" onClick={() => props.onCancelBatch(props.batch.id)}>
+            Stop
+          </button>
+        )}
+      </div>
+      <div className="batch-file-list">
+        {props.batch.items.map((item, index) => (
+          <button
+            type="button"
+            key={item.id}
+            className={`batch-file-item ${item.id === props.activeItemId ? "active" : ""} ${item.status}`}
+            onClick={() => props.onOpenItem(item.id)}
+          >
+            <span className="batch-file-thumb">
+              <img src={`${API_BASE}/api/documents/${item.document_id}/pages/1/image`} alt="" />
+              <em>{index + 1}</em>
+            </span>
+            <span className="batch-file-main">
+              <strong>{item.filename}</strong>
+              <em>{item.status}</em>
+            </span>
+          </button>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function BatchItemStatusPanel(props: {
+  batch: Batch;
+  item: BatchItem;
+  onRefresh: () => void;
+  onCancelBatch: (batchId: string) => void;
+}) {
+  const finishedCount = props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count;
+  return (
+    <div className="review-panel batch-wait-panel">
+      <div className="pane-header">
+        <div>
+          <p className="eyebrow">Batch Review</p>
+          <h2>{props.item.filename}</h2>
+        </div>
+        <span className={`status-badge ${props.item.status}`}>{props.item.status}</span>
+      </div>
+
+      <div className="progress-card">
+        <strong>{finishedCount} / {props.batch.total_count} files processed</strong>
+        <progress max={1} value={props.batch.progress} />
+      </div>
+
+      <div className={`raw-status ${props.item.status === "failed" ? "failed" : "completed"}`}>
+        <strong>{props.item.status}</strong>
+        <span>Batch status: {props.batch.status}</span>
+        {props.item.error_message && <span>{props.item.error_message}</span>}
+      </div>
+
+      <div className="action-row">
+        <button type="button" className="secondary" onClick={props.onRefresh}>
+          <RefreshCw size={16} />
+          Refresh
+        </button>
+        <a className="secondary link-button" href={batchExportHref(props.batch.id, "csv")} target="_blank">
+          <FileSpreadsheet size={16} />
+          Batch CSV
+        </a>
+        <a className="secondary link-button" href={batchExportHref(props.batch.id, "json")} target="_blank">
+          <FileJson size={16} />
+          Batch JSON
+        </a>
+        {batchCanCancel(props.batch) && (
+          <button type="button" className="secondary danger-outline" onClick={() => props.onCancelBatch(props.batch.id)}>
+            <X size={16} />
+            Stop batch
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SettingsDialog(props: {
   vlmSettings: VlmSettings | null;
   vlmApiKey: string;
@@ -1650,6 +2253,8 @@ function DocumentViewer(props: {
   onZoom: (zoom: number) => void;
   onZoomMode: (mode: ZoomMode) => void;
   onRotation: (rotation: number) => void;
+  onReplaceFile: (file: File) => void;
+  onClear: () => void;
 }) {
   const imageClass = `document-image ${props.zoomMode}`;
   const imageStyle = {
@@ -1710,6 +2315,23 @@ function DocumentViewer(props: {
           </button>
           <button title="Rotate" onClick={() => props.onRotation((props.rotation + 90) % 360)}>
             <RotateCw size={18} />
+          </button>
+          <label className="toolbar-upload" title="Replace document">
+            <FileUp size={18} />
+            <span>Replace</span>
+            <input
+              type="file"
+              accept={KIE_FILE_ACCEPT}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) props.onReplaceFile(file);
+                event.currentTarget.value = "";
+              }}
+            />
+          </label>
+          <button title="Clear document" onClick={props.onClear}>
+            <X size={18} />
+            Clear
           </button>
         </div>
       </div>
@@ -1876,13 +2498,13 @@ function BatchPanel(props: {
   onSaveCurrentSchema: () => void;
   onCancelBatch: (batchId: string) => void;
   onRefresh: () => void;
-  onOpenJob: (jobId: string) => void;
+  onOpenItem: (batchId: string, itemId: string) => void;
 }) {
   return (
     <section className="service-panel batch-panel">
       <div className="batch-create-panel">
         <div className="batch-intro">
-          <strong>Create batch extraction</strong>
+          <strong>Batch upload</strong>
           <p>저장된 schema 하나를 선택한 뒤 여러 문서나 폴더를 업로드해 같은 기준으로 KIE 추출을 실행합니다.</p>
         </div>
 
@@ -1956,7 +2578,7 @@ function BatchPanel(props: {
 
         <button className="primary run-batch-button" disabled={!props.selectedSchemaId || !props.selectedFiles.length} onClick={props.onRunBatch}>
           <Play size={16} />
-          Run batch extraction
+          Run batch
         </button>
       </div>
 
@@ -2000,7 +2622,7 @@ function BatchPanel(props: {
                   )}
                 </div>
                 {batch.items.map((item) => (
-                  <button key={item.id} onClick={() => props.onOpenJob(item.job_id)}>
+                  <button key={item.id} onClick={() => props.onOpenItem(batch.id, item.id)}>
                     <strong>{item.filename}</strong>
                     <span>{item.status} · Open review</span>
                   </button>
@@ -2043,12 +2665,14 @@ function SchemaBuilder(props: {
   schemaName: string;
   schemaDescription: string;
   fields: SchemaField[];
+  regions: SchemaRegion[];
   schemaPreview: string;
   schemaDownloadUrl: string;
   schemaJsonInput: string;
   savedSchema: SavedSchema | null;
   schemaDirty: boolean;
   document: UploadedDocument | null;
+  activePage: number;
   systemStatus: SystemStatus | null;
   templates: SavedSchema[];
   onSchemaName: (value: string) => void;
@@ -2056,6 +2680,8 @@ function SchemaBuilder(props: {
   onSchemaJsonInput: (value: string) => void;
   onImportSchemaJson: () => void;
   onUpdateField: (index: number, patch: Partial<FieldDefinition>) => void;
+  onSaveRegion: (region: SchemaRegion) => void;
+  onRemoveRegion: (regionId: string) => void;
   onAddField: () => void;
   onRemoveField: (index: number) => void;
   onSaveSchema: () => Promise<SavedSchema | null>;
@@ -2067,6 +2693,7 @@ function SchemaBuilder(props: {
   canExtract: boolean;
 }) {
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [regionsOpen, setRegionsOpen] = useState(false);
 
   return (
     <div className="schema-builder">
@@ -2106,6 +2733,15 @@ function SchemaBuilder(props: {
           <span>Schema description</span>
           <textarea value={props.schemaDescription} onChange={(event) => props.onSchemaDescription(event.target.value)} />
         </label>
+        <div className="region-manager-bar">
+          <div>
+            <strong>Extraction regions</strong>
+            <span>{props.regions.length ? `${props.regions.length} saved` : "No shared regions"}</span>
+          </div>
+          <button type="button" className="secondary compact" disabled={!props.document} onClick={() => setRegionsOpen(true)}>
+            Manage regions
+          </button>
+        </div>
 
         <div className="field-list">
           {props.fields.map((field, index) => (
@@ -2136,10 +2772,36 @@ function SchemaBuilder(props: {
                     ))}
                   </select>
                 </label>
+                <label>
+                  <span>region</span>
+                  <select
+                    value={field.region_id ?? ""}
+                    onChange={(event) => props.onUpdateField(index, { region_id: event.target.value || null, region: null })}
+                  >
+                    <option value="">Full document</option>
+                    {props.regions.map((region) => (
+                      <option key={region.id} value={region.id}>
+                        {region.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <button className="ghost danger icon-only" title="Remove field" onClick={() => props.onRemoveField(index)}>
                   <Trash2 size={16} />
                 </button>
               </div>
+              {field.region_id && (
+                <div className="field-region-row">
+                  <span>{props.regions.find((region) => region.id === field.region_id)?.name ?? field.region_id}</span>
+                  <button
+                    type="button"
+                    className="ghost compact danger"
+                    onClick={() => props.onUpdateField(index, { region_id: null, region: null })}
+                  >
+                    Use full document
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -2255,6 +2917,251 @@ function SchemaBuilder(props: {
           </section>
         </div>
       )}
+      {props.document && regionsOpen && (
+        <RegionManagerModal
+          document={props.document}
+          regions={props.regions}
+          activePage={props.activePage}
+          onSaveRegion={props.onSaveRegion}
+          onRemoveRegion={props.onRemoveRegion}
+          onClose={() => setRegionsOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function RegionManagerModal(props: {
+  document: UploadedDocument;
+  regions: SchemaRegion[];
+  activePage: number;
+  onSaveRegion: (region: SchemaRegion) => void;
+  onRemoveRegion: (regionId: string) => void;
+  onClose: () => void;
+}) {
+  const [editingRegion, setEditingRegion] = useState<SchemaRegion | null>(null);
+
+  function createRegion() {
+    const id = createRegionId(props.regions);
+    setEditingRegion({
+      id,
+      name: `Region ${props.regions.length + 1}`,
+      page: props.activePage + 1,
+      x: 0.1,
+      y: 0.1,
+      width: 0.25,
+      height: 0.12
+    });
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel region-manager-modal" role="dialog" aria-modal="true" aria-label="Extraction regions">
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">Extraction regions</p>
+            <h2>Shared region templates</h2>
+          </div>
+          <button type="button" className="icon-only secondary" aria-label="Close regions" onClick={props.onClose}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="region-manager-actions">
+          <p>하나의 region을 여러 field에 할당할 수 있습니다. field row의 region select에서 원하는 region을 선택하세요.</p>
+          <button type="button" className="primary compact" onClick={createRegion}>
+            <Plus size={16} />
+            Add region
+          </button>
+        </div>
+
+        <div className="region-list">
+          {props.regions.length ? (
+            props.regions.map((region) => (
+              <div className="region-list-row" key={region.id}>
+                <div>
+                  <strong>{region.name}</strong>
+                  <span>
+                    P{region.page} · x {formatRegionNumber(region.x)} · y {formatRegionNumber(region.y)} · w{" "}
+                    {formatRegionNumber(region.width)} · h {formatRegionNumber(region.height)}
+                  </span>
+                </div>
+                <div className="region-row-actions">
+                  <button type="button" className="secondary compact" onClick={() => setEditingRegion(region)}>
+                    Edit
+                  </button>
+                  <button type="button" className="ghost compact danger" onClick={() => props.onRemoveRegion(region.id)}>
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="empty-state">아직 저장된 region이 없습니다.</div>
+          )}
+        </div>
+
+        {editingRegion && (
+          <RegionPickerModal
+            document={props.document}
+            region={editingRegion}
+            onSave={(region) => {
+              props.onSaveRegion(region);
+              setEditingRegion(null);
+            }}
+            onClose={() => setEditingRegion(null)}
+          />
+        )}
+      </section>
+    </div>
+  );
+}
+
+function RegionPickerModal(props: {
+  document: UploadedDocument;
+  region: SchemaRegion;
+  onSave: (region: SchemaRegion) => void;
+  onClose: () => void;
+}) {
+  const initialPageIndex = Math.min(
+    props.document.page_count - 1,
+    Math.max(0, props.region.page - 1)
+  );
+  const [pageIndex, setPageIndex] = useState(initialPageIndex);
+  const [regionName, setRegionName] = useState(props.region.name);
+  const [draftRegion, setDraftRegion] = useState<FieldRegion | null>(props.region);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const page = props.document.pages[pageIndex];
+  const imageUrl = `${API_BASE}${page.image_url}`;
+  const normalizedRegion =
+    draftRegion && draftRegion.page === page.page
+      ? draftRegion
+      : draftRegion
+        ? { ...draftRegion, page: page.page }
+        : null;
+
+  function pointFromEvent(event: PointerEvent<HTMLElement>) {
+    const rect = imageRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return {
+      x: clamp01((event.clientX - rect.left) / rect.width),
+      y: clamp01((event.clientY - rect.top) / rect.height)
+    };
+  }
+
+  function updateDraft(start: { x: number; y: number }, current: { x: number; y: number }) {
+    const x = Math.min(start.x, current.x);
+    const y = Math.min(start.y, current.y);
+    const width = Math.abs(current.x - start.x);
+    const height = Math.abs(current.y - start.y);
+    setDraftRegion({
+      page: page.page,
+      x,
+      y,
+      width: Math.max(0.01, width),
+      height: Math.max(0.01, height)
+    });
+  }
+
+  function onPointerDown(event: PointerEvent<HTMLDivElement>) {
+    const point = pointFromEvent(event);
+    if (!point) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragStart(point);
+    updateDraft(point, point);
+  }
+
+  function onPointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (!dragStart) return;
+    const point = pointFromEvent(event);
+    if (point) updateDraft(dragStart, point);
+  }
+
+  function onPointerUp() {
+    setDragStart(null);
+  }
+
+  function saveRegion() {
+    const region = normalizedRegion;
+    if (!region) return;
+    props.onSave({
+      ...roundRegion(region),
+      id: props.region.id,
+      name: regionName.trim() || props.region.name
+    });
+  }
+
+  return (
+    <div className="nested-modal-backdrop" role="presentation">
+      <section className="modal-panel region-picker-modal" role="dialog" aria-modal="true" aria-label="Extraction region">
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">Extraction region</p>
+            <h2>{regionName || props.region.name}</h2>
+          </div>
+          <button type="button" className="icon-only secondary" aria-label="Close region picker" onClick={props.onClose}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="region-toolbar">
+          <label>
+            <span>Name</span>
+            <input value={regionName} onChange={(event) => setRegionName(event.target.value)} />
+          </label>
+          <label>
+            <span>Page</span>
+            <select
+              value={pageIndex}
+              onChange={(event) => {
+                const nextIndex = Number(event.target.value);
+                setPageIndex(nextIndex);
+                setDraftRegion((current) => (current ? { ...current, page: props.document.pages[nextIndex].page } : current));
+              }}
+            >
+              {props.document.pages.map((item, index) => (
+                <option key={item.id} value={index}>
+                  Page {item.page}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="region-values">
+            <span>x {formatRegionNumber(normalizedRegion?.x)}</span>
+            <span>y {formatRegionNumber(normalizedRegion?.y)}</span>
+            <span>w {formatRegionNumber(normalizedRegion?.width)}</span>
+            <span>h {formatRegionNumber(normalizedRegion?.height)}</span>
+          </div>
+        </div>
+
+        <div className="region-image-wrap">
+          <div className="region-canvas" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
+            <img ref={imageRef} className="region-target-image" src={imageUrl} alt={`Page ${page.page}`} draggable={false} />
+            {normalizedRegion && (
+              <div
+                className="region-box"
+                style={{
+                  left: `${normalizedRegion.x * 100}%`,
+                  top: `${normalizedRegion.y * 100}%`,
+                  width: `${normalizedRegion.width * 100}%`,
+                  height: `${normalizedRegion.height * 100}%`
+                }}
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="action-row">
+          <button className="secondary" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button className="primary" disabled={!normalizedRegion} onClick={saveRegion}>
+            <Save size={16} />
+            Save region
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -2505,13 +3412,19 @@ async function pollJob(jobId: string): Promise<ExtractionJob> {
   throw new Error("Extraction did not finish in time.");
 }
 
-function validateFields(fields: FieldDefinition[]) {
+function validateFields(fields: FieldDefinition[], regions: SchemaRegion[] = []) {
   if (!fields.length) return "Add at least one schema field.";
   const keys = fields.map((field) => field.key_name.trim());
+  const regionIds = new Set(regions.map((region) => region.id));
   if (keys.some((key) => !key)) return "Every field needs a key name.";
   if (fields.some((field) => !field.description.trim())) return "Every field needs a description.";
   if (fields.some((field) => !OUTPUT_FORMATS.includes(field.output_format))) return "Every field needs a supported output format.";
+  if (fields.some((field) => field.region !== undefined && field.region !== null && !normalizeRegion(field.region))) {
+    return "Extraction regions must use page plus x, y, width, height values between 0 and 1.";
+  }
+  if (fields.some((field) => field.region_id && !regionIds.has(field.region_id))) return "Every field region must reference a saved extraction region.";
   if (new Set(keys).size !== keys.length) return "Field key names must be unique.";
+  if (new Set(regions.map((region) => region.id)).size !== regions.length) return "Extraction region ids must be unique.";
   return null;
 }
 
@@ -2550,23 +3463,113 @@ function stringifyValue(value: unknown): string {
 }
 
 function stripLocalId(field: SchemaField): FieldDefinition {
-  return {
+  const payload: FieldDefinition = {
     key_name: field.key_name,
     description: field.description,
     output_format: field.output_format
   };
+  if (field.region_id) payload.region_id = field.region_id;
+  return payload;
 }
 
 function toSchemaFields(items: FieldDefinition[]): SchemaField[] {
   return items.map((field, index) => ({
     ...field,
+    region_id: field.region_id ?? null,
+    region: null,
     local_id: `${createLocalId()}_${index}`
   }));
+}
+
+function normalizeSchemaFieldsAndRegions(
+  fields: FieldDefinition[],
+  schemaRegions: SchemaRegion[]
+): { fields: FieldDefinition[]; regions: SchemaRegion[] } {
+  const regions = schemaRegions.map(normalizeSchemaRegion).filter(Boolean) as SchemaRegion[];
+  const regionIds = new Set(regions.map((region) => region.id));
+  const nextFields: FieldDefinition[] = [];
+
+  fields.forEach((field) => {
+    let regionId = field.region_id && regionIds.has(field.region_id) ? field.region_id : null;
+    const legacyRegion = normalizeRegion(field.region);
+    if (!regionId && legacyRegion) {
+      const generatedId = createRegionId(regions);
+      regions.push({
+        ...legacyRegion,
+        id: generatedId,
+        name: `Region ${regions.length + 1}`
+      });
+      regionIds.add(generatedId);
+      regionId = generatedId;
+    }
+    nextFields.push({
+      key_name: field.key_name,
+      description: field.description,
+      output_format: field.output_format,
+      region_id: regionId
+    });
+  });
+
+  return { fields: nextFields, regions };
+}
+
+function normalizeSchemaRegion(value: unknown): SchemaRegion | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Partial<SchemaRegion>;
+  const region = normalizeRegion(record);
+  const id = typeof record.id === "string" ? record.id.trim() : "";
+  const name = typeof record.name === "string" ? record.name.trim() : "";
+  if (!region || !id || !name) return null;
+  return { ...region, id, name };
+}
+
+function normalizeRegion(value: unknown): FieldRegion | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Partial<FieldRegion>;
+  const page = Number(record.page);
+  const x = Number(record.x);
+  const y = Number(record.y);
+  const width = Number(record.width);
+  const height = Number(record.height);
+  if (![page, x, y, width, height].every(Number.isFinite)) return null;
+  if (page < 1 || x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > 1 || y + height > 1) return null;
+  return roundRegion({ page: Math.floor(page), x, y, width, height });
+}
+
+function roundRegion(region: FieldRegion): FieldRegion {
+  const x = Math.min(0.99, clamp01(region.x));
+  const y = Math.min(0.99, clamp01(region.y));
+  return {
+    page: Math.max(1, Math.floor(region.page)),
+    x: roundCoordinate(x),
+    y: roundCoordinate(y),
+    width: roundCoordinate(Math.min(1 - x, Math.max(0.01, region.width))),
+    height: roundCoordinate(Math.min(1 - y, Math.max(0.01, region.height)))
+  };
+}
+
+function roundCoordinate(value: number): number {
+  return Number(value.toFixed(4));
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function formatRegionNumber(value: number | null | undefined): string {
+  return value === null || value === undefined ? "-" : value.toFixed(3);
 }
 
 function createLocalId(): string {
   if ("randomUUID" in crypto) return crypto.randomUUID();
   return `field_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function createRegionId(regions: SchemaRegion[]): string {
+  const used = new Set(regions.map((region) => region.id));
+  let index = regions.length + 1;
+  while (used.has(`region_${index}`)) index += 1;
+  return `region_${index}`;
 }
 
 function formatApiDetail(detail: unknown): string | null {

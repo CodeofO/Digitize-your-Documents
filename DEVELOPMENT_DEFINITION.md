@@ -102,9 +102,10 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 2. PDF/image/DOCX/PPTX 문서를 업로드한다.
 3. 좌측 문서 viewer에서 페이지를 확인한다.
 4. 우측 schema builder에서 `key_name`, `description`, `output_format`을 정의한다.
-5. schema 저장 후 extraction을 실행한다.
-6. 결과 table에서 value, normalized value, status, page, confidence, warning을 검토한다.
-7. 사용자는 결과를 수정하고 JSON/CSV로 export한다.
+5. 필요 필드만 선택적으로 extraction region을 지정한다.
+6. schema 저장 후 extraction을 실행한다.
+7. 결과 table에서 value, normalized value, status, page, confidence, warning을 검토한다.
+8. 사용자는 결과를 수정하고 JSON/CSV로 export한다.
 
 ### 3.2 Schema
 
@@ -112,9 +113,25 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 
 ```json
 {
-  "key_name": "account_date",
-  "description": "좌측 하단의 계정일자",
-  "output_format": "date"
+  "regions": [
+    {
+      "id": "region_1",
+      "name": "하단 손글씨 영역",
+      "page": 1,
+      "x": 0.12,
+      "y": 0.78,
+      "width": 0.2,
+      "height": 0.06
+    }
+  ],
+  "fields": [
+    {
+      "key_name": "account_date",
+      "description": "좌측 하단의 계정일자",
+      "output_format": "date",
+      "region_id": "region_1"
+    }
+  ]
 }
 ```
 
@@ -125,11 +142,20 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 - `date`
 - `bool`
 
+`regions`는 schema 최상위에서 관리한다. 각 region은 `id`, `name`, `page`, `x`, `y`, `width`, `height`를 갖고 좌표는 원본 page image 기준 0~1 상대 좌표로 저장한다. field는 선택적으로 `region_id`를 참조한다. 여러 field가 같은 region을 참조할 수 있고, `region_id`가 없는 field는 전체 문서에서 추출한다.
+
 ### 3.3 VLM
 
 - LangChain `with_structured_output`을 사용한다.
 - 동적 JSON schema는 사용자 schema field를 기준으로 생성한다.
 - 문서 page image는 base64 data URL로 전달한다.
+- `region_id`가 있는 field는 해당 region crop을 함께 전달한다.
+- region field에는 원본 page에서 region 외부를 흐리게 만든 masked context image도 함께 전달한다.
+- 하나의 region은 여러 field의 primary source가 될 수 있다.
+- `region_id`가 없는 field는 기존처럼 full page image를 사용한다.
+- VLM 호출은 group 단위로 수행한다. `region_id`가 없는 field들은 full-page group 1회로 추출하고, `region_id`가 있는 field들은 사용 중인 region별 group으로 나눠 추출한다.
+- 호출 수는 `full-page field가 있으면 1회 + 사용 중인 region 수`이다.
+- 각 group 호출의 structured output schema는 해당 group field만 포함한다.
 - VLM 응답이 stringified JSON이면 실패 처리한다.
 - 저장되는 결과는 사용자 schema에 명시된 key만 허용한다.
 
@@ -238,11 +264,14 @@ Frontend:
 - Home 화면의 기능 카드 진입
 - Home VLM settings popup 열기/저장/닫기
 - 브라우저 Back으로 app Home 복귀
-- Recent/Search archive/Batch extraction utility modal 열기/닫기
-- Batch extraction modal에서 schema 선택, 복수 파일/폴더 업로드, worker 제한 병렬 처리, running batch progress polling, batch 중단, batch CSV/JSON export, 최근 batch 결과 열기
+- Recent/Search archive/Batch results utility modal 열기/닫기
+- KIE 메인 업로드 화면에서 단일 문서 업로드와 batch 업로드를 함께 제공
+- Batch upload에서 schema 선택, 복수 파일/폴더 업로드, worker 제한 병렬 처리, running batch progress polling, batch 중단, batch CSV/JSON export
+- Batch 실행 후 좌측 batch file sidebar에서 1페이지 thumbnail과 상태를 보며 파일 이동, 우측 review 영역에서 선택 파일 결과 즉시 확인
 - Raw Data Extractor upload/preview layout
 - 이미지/수식 추출 옵션 toggle
-- Key Information Extractor 진입 및 기존 schema/review flow 유지
+- Key Information Extractor 진입 및 schema/review flow 유지
+- KIE schema-level extraction region 지정/저장 및 field별 region 할당
 - 모바일 폭에서 layout overlap 없음
 
 Integration:
@@ -256,7 +285,7 @@ Integration:
 - 사용자 인증/권한
 - PostgreSQL 운영 DB
 - 분산 queue
-- bbox highlight
+- review 화면 bbox highlight overlay
 - 분산 queue 기반 대량 batch processing
 - OCR 실제 구현
 - Intelligence Parse 실제 구현
