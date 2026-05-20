@@ -32,6 +32,8 @@ import type { ReactNode } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const OUTPUT_FORMATS = ["string", "float", "date", "bool"] as const;
+const KIE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
+const KIE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
 const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
   {
     key_name: "document_number",
@@ -327,6 +329,9 @@ export default function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [batchSchemaId, setBatchSchemaId] = useState("");
+  const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [batchMessage, setBatchMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -384,6 +389,12 @@ export default function App() {
   const result = job?.result ?? null;
   const currentValues = Object.keys(edits).length ? edits : result?.corrected_output?.values ?? result?.validated_output.values ?? {};
   const templates = recentSchemas.filter((item) => item.is_template || item.pinned);
+  const batchSchemaOptions = useMemo(() => {
+    const options = new Map<string, SavedSchema>();
+    if (schema) options.set(schema.id, schema);
+    recentSchemas.forEach((item) => options.set(item.id, item));
+    return Array.from(options.values());
+  }, [schema, recentSchemas]);
   const hasPreparedSchema = Boolean(document) || Boolean(schema) || schemaDirty || hasMeaningfulSchema(fields);
 
   async function refreshAll() {
@@ -891,19 +902,49 @@ export default function App() {
     }
   }
 
-  async function uploadBatch(files: FileList | null) {
-    if (!files?.length) return;
-    const activeSchema = !schema || schemaDirty ? await saveSchema() : schema;
-    if (!activeSchema) return;
-    setBusy("Creating batch");
+  function openBatchExtraction() {
+    setBatchSchemaId(schema?.id ?? recentSchemas[0]?.id ?? "");
+    setBatchMessage(null);
+    setBatchOpen(true);
+  }
+
+  function selectBatchFiles(files: FileList | null) {
+    const selected = files ? Array.from(files) : [];
+    const supported = selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""));
+    const ignoredCount = selected.length - supported.length;
+    setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
+    setBatchFiles(supported);
+  }
+
+  async function saveCurrentSchemaForBatch() {
+    const saved = await saveSchema();
+    if (!saved) return;
+    setBatchSchemaId(saved.id);
+    setBatchMessage("현재 schema를 저장하고 배치 처리 schema로 선택했습니다.");
+  }
+
+  async function runBatchUpload() {
+    const selectedSchema = batchSchemaOptions.find((item) => item.id === batchSchemaId);
+    if (!selectedSchema) {
+      setBatchMessage("배치 처리에 사용할 저장된 schema를 선택하세요.");
+      return;
+    }
+    if (!batchFiles.length) {
+      setBatchMessage("배치 처리할 파일이나 폴더를 선택하세요.");
+      return;
+    }
+    setBusy("Creating batch extraction");
     setError(null);
+    setBatchMessage(null);
     try {
       const form = new FormData();
-      form.append("schema_id", activeSchema.id);
-      form.append("schema_version", String(activeSchema.current_version));
-      Array.from(files).forEach((file) => form.append("files", file));
+      form.append("schema_id", selectedSchema.id);
+      form.append("schema_version", String(selectedSchema.current_version));
+      batchFiles.forEach((file) => form.append("files", file));
       const batch = await api<Batch>("/api/batches", { method: "POST", body: form });
       setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 8));
+      setBatchFiles([]);
+      setBatchMessage(`${batch.total_count}개 파일의 배치 추출을 시작했습니다. 아래 결과 목록에서 진행 상태를 확인하세요.`);
       await refreshBatches();
     } catch (err) {
       setError(toFriendlyError(err));
@@ -1082,7 +1123,7 @@ export default function App() {
                 <UploadCloud size={32} />
                 <strong>Upload a document</strong>
                 <span>PDF, PNG, JPG, JPEG, DOCX, or PPTX</span>
-                <input type="file" accept=".pdf,.png,.jpg,.jpeg,.docx,.pptx" onChange={onFileChange} />
+                <input type="file" accept={KIE_FILE_ACCEPT} onChange={onFileChange} />
               </label>
           ) : (
             <DocumentViewer
@@ -1149,7 +1190,6 @@ export default function App() {
                 setSchemaDirty(true);
               }}
               onSaveTemplate={() => void markSchemaAsTemplate()}
-              onBatchUpload={(files) => void uploadBatch(files)}
               canExtract={Boolean(document)}
             />
           ) : (
@@ -1175,13 +1215,13 @@ export default function App() {
           <KieUtilityDock
             onArchive={() => setArchiveOpen(true)}
             onHistory={() => setHistoryOpen(true)}
-            onBatch={() => setBatchOpen(true)}
+            onBatch={openBatchExtraction}
           />
         </aside>
         </main>
       )}
       {archiveOpen && (
-        <UtilityModal title="Archive" eyebrow="Search" onClose={() => setArchiveOpen(false)}>
+        <UtilityModal title="Search archive" eyebrow="Saved results" onClose={() => setArchiveOpen(false)}>
           <ArchivePanel
             query={archiveQuery}
             status={archiveStatus}
@@ -1202,7 +1242,7 @@ export default function App() {
         </UtilityModal>
       )}
       {historyOpen && (
-        <UtilityModal title="Recent" eyebrow="History" onClose={() => setHistoryOpen(false)}>
+        <UtilityModal title="Recent items" eyebrow="History" onClose={() => setHistoryOpen(false)}>
           <HistoryPanel
             activeTab={historyTab}
             documents={recentDocuments}
@@ -1227,9 +1267,23 @@ export default function App() {
         </UtilityModal>
       )}
       {batchOpen && (
-        <UtilityModal title="Batch" eyebrow="Advanced" onClose={() => setBatchOpen(false)}>
+        <UtilityModal title="Batch extraction" eyebrow="Run multiple files" onClose={() => setBatchOpen(false)}>
           <BatchPanel
             batches={batches}
+            schemas={batchSchemaOptions}
+            selectedSchemaId={batchSchemaId}
+            selectedFiles={batchFiles}
+            message={batchMessage}
+            currentSchemaDirty={schemaDirty}
+            canSaveCurrentSchema={hasMeaningfulSchema(fields)}
+            onSchema={setBatchSchemaId}
+            onSelectFiles={selectBatchFiles}
+            onClearFiles={() => {
+              setBatchFiles([]);
+              setBatchMessage(null);
+            }}
+            onRunBatch={() => void runBatchUpload()}
+            onSaveCurrentSchema={() => void saveCurrentSchemaForBatch()}
             onRefresh={() => void refreshBatches()}
             onOpenJob={(jobId) => {
               setBatchOpen(false);
@@ -1270,15 +1324,15 @@ function KieUtilityDock(props: { onArchive: () => void; onHistory: () => void; o
     <section className="utility-dock" aria-label="KIE utility actions">
       <button type="button" className="secondary" onClick={props.onHistory}>
         <History size={16} />
-        Recent
+        Recent items
       </button>
       <button type="button" className="secondary" onClick={props.onArchive}>
         <FileJson size={16} />
-        Archive
+        Search archive
       </button>
       <button type="button" className="secondary" onClick={props.onBatch}>
         <FileSpreadsheet size={16} />
-        Batch
+        Batch extract
       </button>
     </section>
   );
@@ -1771,46 +1825,139 @@ function ArchivePanel(props: {
   );
 }
 
-function BatchPanel(props: { batches: Batch[]; onRefresh: () => void; onOpenJob: (jobId: string) => void }) {
+function BatchPanel(props: {
+  batches: Batch[];
+  schemas: SavedSchema[];
+  selectedSchemaId: string;
+  selectedFiles: File[];
+  message: string | null;
+  currentSchemaDirty: boolean;
+  canSaveCurrentSchema: boolean;
+  onSchema: (schemaId: string) => void;
+  onSelectFiles: (files: FileList | null) => void;
+  onClearFiles: () => void;
+  onRunBatch: () => void;
+  onSaveCurrentSchema: () => void;
+  onRefresh: () => void;
+  onOpenJob: (jobId: string) => void;
+}) {
   return (
-    <section className="service-panel">
-      <div className="history-header">
-        <div className="preview-title inline-title">
-          <FileSpreadsheet size={16} />
-          Batch
+    <section className="service-panel batch-panel">
+      <div className="batch-create-panel">
+        <div className="batch-intro">
+          <strong>Create batch extraction</strong>
+          <p>저장된 schema 하나를 선택한 뒤 여러 문서나 폴더를 업로드해 같은 기준으로 KIE 추출을 실행합니다.</p>
         </div>
-        <button className="secondary compact" onClick={props.onRefresh}>
-          <RefreshCw size={14} />
-          Refresh
+
+        <label className="field-stack">
+          <span>Schema</span>
+          <select value={props.selectedSchemaId} onChange={(event) => props.onSchema(event.target.value)}>
+            <option value="">Select saved schema</option>
+            {props.schemas.map((schema) => (
+              <option key={schema.id} value={schema.id}>
+                {schema.display_name || schema.name} · v{schema.current_version} · {schema.fields.length} fields
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {props.currentSchemaDirty && (
+          <div className="notice-card">
+            현재 화면의 schema에 저장되지 않은 변경사항이 있습니다. 배치 처리에 최신 schema를 쓰려면 먼저 저장하세요.
+          </div>
+        )}
+
+        <div className="action-row">
+          <button className="secondary" disabled={!props.canSaveCurrentSchema} onClick={props.onSaveCurrentSchema}>
+            <Save size={16} />
+            Save current schema
+          </button>
+        </div>
+
+        <div className="file-picker-grid">
+          <label className="batch-upload">
+            <FileUp size={16} />
+            <span>Select files</span>
+            <input
+              type="file"
+              accept={KIE_FILE_ACCEPT}
+              multiple
+              onChange={(event) => props.onSelectFiles(event.target.files)}
+            />
+          </label>
+          <label className="batch-upload">
+            <UploadCloud size={16} />
+            <span>Select folder</span>
+            <input
+              type="file"
+              accept={KIE_FILE_ACCEPT}
+              multiple
+              onChange={(event) => props.onSelectFiles(event.target.files)}
+              {...{ webkitdirectory: "", directory: "" }}
+            />
+          </label>
+        </div>
+
+        {props.selectedFiles.length > 0 && (
+          <div className="selected-files">
+            <div className="batch-top">
+              <strong>{props.selectedFiles.length} selected</strong>
+              <button type="button" className="ghost compact" onClick={props.onClearFiles}>
+                Clear
+              </button>
+            </div>
+            <div className="mini-list">
+              {props.selectedFiles.slice(0, 8).map((file, index) => (
+                <span key={`${fileDisplayName(file)}_${file.size}_${index}`}>{fileDisplayName(file)}</span>
+              ))}
+              {props.selectedFiles.length > 8 && <span className="muted">+ {props.selectedFiles.length - 8} more</span>}
+            </div>
+          </div>
+        )}
+
+        {props.message && <div className="success-card">{props.message}</div>}
+
+        <button className="primary run-batch-button" disabled={!props.selectedSchemaId || !props.selectedFiles.length} onClick={props.onRunBatch}>
+          <Play size={16} />
+          Run batch extraction
         </button>
       </div>
-      <p className="panel-description">
-        Batch는 하나의 저장된 schema로 여러 문서를 순차 업로드하고 각 문서별 extraction job을 만드는 고급 기능입니다.
-        항목을 열면 해당 job의 원본 문서와 추출 결과를 함께 불러옵니다.
-      </p>
-      <div className="mini-list">
-        {props.batches.length ? (
-          props.batches.map((batch) => (
-            <div className="batch-card" key={batch.id}>
-              <div className="batch-top">
-                <strong>{batch.status}</strong>
-                <span>{Math.round(batch.progress * 100)}%</span>
+
+      <div className="batch-results-panel">
+        <div className="history-header">
+          <div className="preview-title inline-title">
+            <FileSpreadsheet size={16} />
+            Recent batch results
+          </div>
+          <button className="secondary compact" onClick={props.onRefresh}>
+            <RefreshCw size={14} />
+            Refresh
+          </button>
+        </div>
+        <div className="mini-list">
+          {props.batches.length ? (
+            props.batches.map((batch) => (
+              <div className="batch-card" key={batch.id}>
+                <div className="batch-top">
+                  <strong>{batch.status}</strong>
+                  <span>{Math.round(batch.progress * 100)}%</span>
+                </div>
+                <progress max={1} value={batch.progress} />
+                <span className="muted">
+                  {batch.completed_count} done · {batch.failed_count} failed · {batch.total_count} total
+                </span>
+                {batch.items.map((item) => (
+                  <button key={item.id} onClick={() => props.onOpenJob(item.job_id)}>
+                    <strong>{item.filename}</strong>
+                    <span>{item.status} · Open review</span>
+                  </button>
+                ))}
               </div>
-              <progress max={1} value={batch.progress} />
-              <span className="muted">
-                {batch.completed_count} done · {batch.failed_count} failed · {batch.total_count} total
-              </span>
-              {batch.items.map((item) => (
-                <button key={item.id} onClick={() => props.onOpenJob(item.job_id)}>
-                  <strong>{item.filename}</strong>
-                  <span>{item.status}</span>
-                </button>
-              ))}
-            </div>
-          ))
-        ) : (
-          <span className="muted">No batches yet.</span>
-        )}
+            ))
+          ) : (
+            <span className="muted">No batch results yet.</span>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -1864,7 +2011,6 @@ function SchemaBuilder(props: {
   onSampleSchema: () => void;
   onLoadTemplate: (schema: SavedSchema) => void;
   onSaveTemplate: () => void;
-  onBatchUpload: (files: FileList | null) => void;
   canExtract: boolean;
 }) {
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -1893,7 +2039,7 @@ function SchemaBuilder(props: {
           </button>
           <button type="button" className="secondary compact" onClick={() => setToolsOpen(true)}>
             <Settings size={14} />
-            Tools
+            More options
           </button>
         </div>
       </div>
@@ -1966,8 +2112,8 @@ function SchemaBuilder(props: {
           <section className="modal-panel schema-tools-modal" role="dialog" aria-modal="true" aria-label="Schema tools">
             <div className="modal-header">
               <div>
-                <p className="eyebrow">Schema tools</p>
-                <h2>Optional tools</h2>
+                <p className="eyebrow">Schema options</p>
+                <h2>Template and JSON</h2>
               </div>
               <button type="button" className="icon-only secondary" aria-label="Close schema tools" onClick={() => setToolsOpen(false)}>
                 <X size={16} />
@@ -2000,11 +2146,11 @@ function SchemaBuilder(props: {
                   }}
                 >
                   <ClipboardList size={16} />
-                  Sample
+                  Use sample schema
                 </button>
                 <a className="secondary link-button" href={props.schemaDownloadUrl} download={`${props.schemaName || "schema"}.json`}>
                   <FileDown size={16} />
-                  Export JSON
+                  Download schema JSON
                 </a>
               </div>
             </div>
@@ -2013,7 +2159,7 @@ function SchemaBuilder(props: {
               <div className="template-header">
                 <strong>Template library</strong>
                 <button className="secondary compact" onClick={props.onSaveTemplate}>
-                  Pin current
+                  Save as template
                 </button>
               </div>
               <div className="template-list">
@@ -2028,19 +2174,6 @@ function SchemaBuilder(props: {
                   <span className="muted">Save a schema as a template to reuse it here.</span>
                 )}
               </div>
-            </div>
-
-            <div className="tool-section">
-              <h3>Batch upload</h3>
-              <p className="panel-description">
-                Batch는 현재 schema를 여러 문서에 같은 기준으로 적용해 extraction job을 만드는 고급 기능입니다.
-                핵심 KIE 흐름을 가리지 않도록 popup 안에만 둡니다.
-              </p>
-              <label className="batch-upload">
-                <FileSpreadsheet size={16} />
-                <span>Batch upload with this schema</span>
-                <input type="file" accept=".pdf,.png,.jpg,.jpeg,.docx,.pptx" multiple onChange={(event) => props.onBatchUpload(event.target.files)} />
-              </label>
             </div>
 
             <details className="import-box">
@@ -2414,6 +2547,10 @@ function formatDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleDateString();
+}
+
+function fileDisplayName(file: File) {
+  return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
 }
 
 function formatConfidence(value: number | null | undefined) {

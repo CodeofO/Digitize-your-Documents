@@ -165,6 +165,11 @@ Raw API:
 | `description` | 문서 내 위치, 의미, 추출 기준 |
 | `output_format` | `string`, `float`, `date`, `bool` |
 
+Batch extraction:
+
+- 저장된 schema 하나를 선택하고 여러 파일 또는 폴더를 업로드해 같은 기준으로 KIE 추출을 실행합니다.
+- Batch 결과 목록에서 각 파일의 `Open review`를 누르면 일반 KIE review 화면으로 이동합니다.
+
 KIE API:
 
 | Method | Path |
@@ -183,6 +188,8 @@ KIE API:
 | `GET` | `/api/extraction-jobs/{job_id}` |
 | `PATCH` | `/api/extraction-results/{result_id}` |
 | `GET` | `/api/extraction-results/{result_id}/export?format=json\|csv` |
+| `POST` | `/api/batches` |
+| `GET` | `/api/batches?limit=20` |
 
 ## 문서와 구조
 

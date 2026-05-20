@@ -743,6 +743,77 @@ textarea {
   padding: 8px;
 }
 
+.batch-panel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 0;
+}
+
+.batch-create-panel,
+.batch-results-panel,
+.selected-files {
+  border: 1px solid #d9e0da;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.batch-create-panel {
+  background: #f7faf8;
+}
+
+.batch-results-panel {
+  padding: 0;
+}
+
+.batch-intro {
+  display: grid;
+  gap: 4px;
+}
+
+.batch-intro p {
+  color: #53615a;
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.file-picker-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.selected-files .mini-list {
+  max-height: 150px;
+  overflow: auto;
+  padding: 0;
+}
+
+.selected-files .mini-list span {
+  background: #ffffff;
+  border: 1px solid #e0e6e1;
+  border-radius: 6px;
+  color: #34413c;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  padding: 7px 8px;
+}
+
+.success-card {
+  background: #e5f4ef;
+  border: 1px solid #a7d4cc;
+  border-radius: 8px;
+  color: #0f625e;
+  font-size: 13px;
+  padding: 10px;
+}
+
+.run-batch-button {
+  justify-content: center;
+}
+
 .panel-description {
   color: #53615a;
   font-size: 13px;
@@ -1247,6 +1318,10 @@ pre {
   }
 
   .utility-dock {
+    grid-template-columns: 1fr;
+  }
+
+  .file-picker-grid {
     grid-template-columns: 1fr;
   }
 

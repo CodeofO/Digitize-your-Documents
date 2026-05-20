@@ -238,7 +238,8 @@ Frontend:
 - Home 화면의 기능 카드 진입
 - Home VLM settings popup 열기/저장/닫기
 - 브라우저 Back으로 app Home 복귀
-- Recent panel 접기/펼치기
+- Recent/Search archive/Batch extraction utility modal 열기/닫기
+- Batch extraction modal에서 schema 선택, 복수 파일/폴더 업로드, 최근 batch 결과 열기
 - Raw Data Extractor upload/preview layout
 - 이미지/수식 추출 옵션 toggle
 - Key Information Extractor 진입 및 기존 schema/review flow 유지
@@ -256,6 +257,6 @@ Integration:
 - PostgreSQL 운영 DB
 - 분산 queue
 - bbox highlight
-- 대량 batch processing
+- 분산 queue 기반 대량 batch processing
 - OCR 실제 구현
 - Intelligence Parse 실제 구현
