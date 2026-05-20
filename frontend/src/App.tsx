@@ -27,11 +27,12 @@ import UploadCloud from "lucide-react/dist/esm/icons/upload-cloud.js";
 import X from "lucide-react/dist/esm/icons/x.js";
 import ZoomIn from "lucide-react/dist/esm/icons/zoom-in.js";
 import ZoomOut from "lucide-react/dist/esm/icons/zoom-out.js";
-import { ChangeEvent, DragEvent, PointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, PointerEvent, memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const WORKSPACE_STATE_KEY = "digitize_workspace_state_v1";
+const LEFT_PANE_PERCENT_KEY = "digitize_left_pane_percent_v1";
 const OUTPUT_FORMATS = ["string", "float", "date", "bool"] as const;
 const KIE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const KIE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
@@ -94,6 +95,17 @@ type DocumentPage = {
   image_url: string;
   width: number;
   height: number;
+};
+
+type RegionEditorPage = {
+  id: string;
+  page: number;
+  image_url: string;
+};
+
+type RegionEditorTarget = {
+  page_count: number;
+  pages: RegionEditorPage[];
 };
 
 type UploadedDocument = {
@@ -298,6 +310,27 @@ type AuditEvent = {
   created_at: string;
 };
 
+type WebkitFileSystemEntry = {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  fullPath?: string;
+};
+
+type WebkitFileSystemFileEntry = WebkitFileSystemEntry & {
+  file: (success: (file: File) => void, error?: (error: DOMException) => void) => void;
+};
+
+type WebkitFileSystemDirectoryEntry = WebkitFileSystemEntry & {
+  createReader: () => {
+    readEntries: (success: (entries: WebkitFileSystemEntry[]) => void, error?: (error: DOMException) => void) => void;
+  };
+};
+
+type DataTransferItemWithEntry = DataTransferItem & {
+  webkitGetAsEntry?: () => WebkitFileSystemEntry | null;
+};
+
 const initialFields: SchemaField[] = [
   {
     local_id: "field_1",
@@ -357,6 +390,93 @@ function clearPersistedWorkspaceState() {
   }
 }
 
+function readPersistedLeftPanePercent() {
+  try {
+    const raw = window.localStorage.getItem(LEFT_PANE_PERCENT_KEY);
+    if (!raw) return 50;
+    const parsed = Number.parseFloat(raw);
+    if (Number.isNaN(parsed)) return 50;
+    return Math.min(78, Math.max(35, parsed));
+  } catch {
+    return 50;
+  }
+}
+
+function savePersistedLeftPanePercent(percent: number) {
+  try {
+    window.localStorage.setItem(LEFT_PANE_PERCENT_KEY, String(percent));
+  } catch {
+    // Ignore unavailable storage.
+  }
+}
+
+function useObjectUrls(files: File[]) {
+  const [urls, setUrls] = useState<string[]>([]);
+
+  useEffect(() => {
+    const nextUrls = files.map((file) => URL.createObjectURL(file));
+    setUrls(nextUrls);
+    return () => {
+      nextUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [files]);
+
+  return urls;
+}
+
+async function filesFromDataTransfer(dataTransfer: DataTransfer) {
+  const items = Array.from(dataTransfer.items ?? []);
+  if (!items.length) return Array.from(dataTransfer.files ?? []);
+
+  const files: File[] = [];
+  for (const item of items) {
+    if (item.kind !== "file") continue;
+    const entry = (item as DataTransferItemWithEntry).webkitGetAsEntry?.();
+    if (entry) {
+      files.push(...(await filesFromEntry(entry)));
+    } else {
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+  }
+  return files.length ? files : Array.from(dataTransfer.files ?? []);
+}
+
+async function filesFromEntry(entry: WebkitFileSystemEntry, parentPath = ""): Promise<File[]> {
+  if (entry.isFile) {
+    const file = await new Promise<File>((resolve, reject) => {
+      (entry as WebkitFileSystemFileEntry).file(resolve, reject);
+    });
+    const relativePath = `${parentPath}${file.name}`;
+    try {
+      Object.defineProperty(file, "webkitRelativePath", {
+        configurable: true,
+        value: relativePath
+      });
+    } catch {
+      // Some browsers keep File metadata read-only. The file is still usable.
+    }
+    return [file];
+  }
+
+  if (!entry.isDirectory) return [];
+
+  const directory = entry as WebkitFileSystemDirectoryEntry;
+  const reader = directory.createReader();
+  const entries: WebkitFileSystemEntry[] = [];
+  while (true) {
+    const batch = await new Promise<WebkitFileSystemEntry[]>((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+    if (!batch.length) break;
+    entries.push(...batch);
+  }
+
+  const nextPath = `${parentPath}${entry.name}/`;
+  const nested = await Promise.all(entries.map((item) => filesFromEntry(item, nextPath)));
+  return nested.flat();
+}
+
 export default function App() {
   const [mode, setMode] = useState<AppMode>(() => modeFromLocation());
   const [step, setStep] = useState<Step>("upload");
@@ -376,7 +496,8 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [zoomMode, setZoomMode] = useState<ZoomMode>("fitWidth");
   const [rotation, setRotation] = useState(0);
-  const [leftPanePercent, setLeftPanePercent] = useState(50);
+  const [regionsVisible, setRegionsVisible] = useState(false);
+  const [leftPanePercent, setLeftPanePercent] = useState(() => readPersistedLeftPanePercent());
   const [recentDocuments, setRecentDocuments] = useState<UploadedDocument[]>([]);
   const [recentSchemas, setRecentSchemas] = useState<SavedSchema[]>([]);
   const [recentJobs, setRecentJobs] = useState<ExtractionJob[]>([]);
@@ -406,12 +527,17 @@ export default function App() {
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchSchemaId, setBatchSchemaId] = useState("");
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [draftBatchIndex, setDraftBatchIndex] = useState(0);
   const [batchMessage, setBatchMessage] = useState<string | null>(null);
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const [activeBatchItemId, setActiveBatchItemId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
+  const documentCacheRef = useRef<Map<string, UploadedDocument>>(new Map());
+  const schemaCacheRef = useRef<Map<string, SavedSchema>>(new Map());
+  const jobCacheRef = useRef<Map<string, ExtractionJob>>(new Map());
+  const loadJobRequestRef = useRef(0);
 
   useEffect(() => {
     void bootstrapWorkspace();
@@ -450,16 +576,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (mode !== "home") {
-      setLeftPanePercent(50);
-    }
-  }, [mode]);
-
-  useEffect(() => {
     if (schema?.id) {
       void loadExportPresets(schema.id);
     }
   }, [schema?.id]);
+
+  useEffect(() => {
+    if (!batchFiles.length) {
+      setDraftBatchIndex(0);
+      return;
+    }
+    setDraftBatchIndex((index) => Math.min(index, batchFiles.length - 1));
+  }, [batchFiles.length]);
 
   const schemaPayloadFields = useMemo(() => fields.map(stripLocalId), [fields]);
   const schemaPayloadRegions = useMemo(() => regions.map(normalizeSchemaRegion).filter(Boolean) as SchemaRegion[], [regions]);
@@ -486,11 +614,30 @@ export default function App() {
 
   const activeImageUrl = useMemo(() => {
     if (!document?.pages.length) return null;
-    return `${API_BASE}${document.pages[activePage].image_url}`;
+    return documentPageImageSrc(document.pages[activePage]);
   }, [document, activePage]);
 
   const rawPdfUrl = useMemo(() => (rawExtraction?.pdf_url ? `${API_BASE}${rawExtraction.pdf_url}` : null), [rawExtraction]);
   const rawHtmlUrl = useMemo(() => (rawExtraction?.html_url ? `${API_BASE}${rawExtraction.html_url}` : null), [rawExtraction]);
+  const batchFileUrls = useObjectUrls(batchFiles);
+  const selectedDraftFile = batchFiles[draftBatchIndex] ?? batchFiles[0] ?? null;
+  const selectedDraftUrl = batchFileUrls[draftBatchIndex] ?? batchFileUrls[0] ?? null;
+  const draftRegionTarget = useMemo<RegionEditorTarget | null>(() => {
+    if (!selectedDraftFile || !selectedDraftUrl || !isImageFile(selectedDraftFile)) return null;
+    return {
+      page_count: 1,
+      pages: [{ id: `draft_${draftBatchIndex}`, page: 1, image_url: selectedDraftUrl }]
+    };
+  }, [draftBatchIndex, selectedDraftFile, selectedDraftUrl]);
+  const documentRegionTarget = useMemo<RegionEditorTarget | null>(() => {
+    if (!document) return null;
+    return {
+      page_count: document.page_count,
+      pages: document.pages.map((page) => ({ id: page.id, page: page.page, image_url: page.image_url }))
+    };
+  }, [document]);
+  const activeRegionTarget = documentRegionTarget ?? draftRegionTarget;
+  const activeRegionPage = document ? activePage : 0;
 
   const result = job?.result ?? null;
   const currentValues = Object.keys(edits).length ? edits : result?.corrected_output?.values ?? result?.validated_output.values ?? {};
@@ -518,7 +665,8 @@ export default function App() {
       ),
     [batches]
   );
-  const hasPreparedSchema = Boolean(document) || Boolean(schema) || schemaDirty || hasMeaningfulSchema(fields);
+  const hasPreparedSchema =
+    Boolean(document) || Boolean(schema) || batchFiles.length > 0 || schemaDirty || hasMeaningfulSchema(fields);
 
   useEffect(() => {
     if (!hasActiveBatch) return;
@@ -996,7 +1144,7 @@ export default function App() {
     try {
       setActiveBatchId(null);
       setActiveBatchItemId(null);
-      const loaded = await api<SavedSchema>(`/api/schemas/${schemaId}`);
+      const loaded = await getCachedSchema(schemaId, { force: true });
       applySchema(loaded);
       setStep("schema");
     } catch (err) {
@@ -1006,10 +1154,27 @@ export default function App() {
     }
   }
 
+  async function getCachedDocument(documentId: string) {
+    const cached = documentCacheRef.current.get(documentId);
+    if (cached) return cached;
+    const loaded = await api<UploadedDocument>(`/api/documents/${documentId}`);
+    documentCacheRef.current.set(documentId, loaded);
+    return loaded;
+  }
+
+  async function getCachedSchema(schemaId: string, options: { force?: boolean } = {}) {
+    const cached = schemaCacheRef.current.get(schemaId);
+    if (cached && !options.force) return cached;
+    const loaded = await api<SavedSchema>(`/api/schemas/${schemaId}`);
+    schemaCacheRef.current.set(schemaId, loaded);
+    return loaded;
+  }
+
   async function loadJob(
     jobId: string,
     options: { preserveBatch?: boolean; forceReviewStep?: boolean; silent?: boolean } = {}
   ) {
+    const requestId = ++loadJobRequestRef.current;
     if (!options.silent) setBusy("추출 결과 로드 중");
     setError(null);
     try {
@@ -1018,12 +1183,16 @@ export default function App() {
         setActiveBatchItemId(null);
       }
       const loadedJob = await api<ExtractionJob>(`/api/extraction-jobs/${jobId}`);
+      jobCacheRef.current.set(jobId, loadedJob);
       const [loadedDocument, loadedSchema] = await Promise.all([
-        api<UploadedDocument>(`/api/documents/${loadedJob.document_id}`),
-        api<SavedSchema>(`/api/schemas/${loadedJob.schema_id}`)
+        getCachedDocument(loadedJob.document_id),
+        getCachedSchema(loadedJob.schema_id)
       ]);
-      applyDocument(loadedDocument);
-      applySchema(loadedSchema);
+      if (requestId !== loadJobRequestRef.current) return;
+      applyDocument(loadedDocument, { clearExtractionState: false });
+      if (!schema || schema.id !== loadedSchema.id || schema.current_version !== loadedSchema.current_version) {
+        applySchema(loadedSchema);
+      }
       setJob(loadedJob);
       if (loadedJob.result) {
         setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
@@ -1046,17 +1215,19 @@ export default function App() {
     const sourceBatch = batchOverride ?? batches.find((batch) => batch.id === batchId) ?? (await api<Batch>(`/api/batches/${batchId}`));
     const item = sourceBatch.items.find((candidate) => candidate.id === itemId) ?? sourceBatch.items[0];
     if (!item) return;
+    if (sourceBatch.id === activeBatchId && item.id === activeBatchItemId && job?.job_id === item.job_id) return;
     setBatches((current) => [sourceBatch, ...current.filter((batch) => batch.id !== sourceBatch.id)].slice(0, 12));
     setActiveBatchId(sourceBatch.id);
     setActiveBatchItemId(item.id);
     setStep("review");
-    await loadJob(item.job_id, { preserveBatch: true, forceReviewStep: true });
+    await loadJob(item.job_id, { preserveBatch: true, forceReviewStep: true, silent: true });
   }
 
   async function refreshActiveBatchItemJob() {
     if (!activeBatchItem) return;
     try {
       const loadedJob = await api<ExtractionJob>(`/api/extraction-jobs/${activeBatchItem.job_id}`);
+      jobCacheRef.current.set(loadedJob.job_id, loadedJob);
       if (loadedJob.job_id !== job?.job_id) {
         await loadJob(loadedJob.job_id, { preserveBatch: true, forceReviewStep: true, silent: true });
         return;
@@ -1075,10 +1246,15 @@ export default function App() {
     }
   }
 
-  function applyDocument(nextDocument: UploadedDocument) {
-    setDocument(nextDocument);
-    setActivePage(0);
-    setRotation(0);
+  function applyDocument(nextDocument: UploadedDocument, options: { clearExtractionState?: boolean } = {}) {
+    const isSameDocument = document?.document_id === nextDocument.document_id;
+    documentCacheRef.current.set(nextDocument.document_id, nextDocument);
+    setDocument((current) => (current?.document_id === nextDocument.document_id ? current : nextDocument));
+    if (!isSameDocument) {
+      setActivePage(0);
+      setRotation(0);
+    }
+    if (options.clearExtractionState === false) return;
     setJob(null);
     setEdits({});
     setEditedKeys([]);
@@ -1103,10 +1279,12 @@ export default function App() {
 
   function applySchema(nextSchema: SavedSchema) {
     const normalized = normalizeSchemaFieldsAndRegions(nextSchema.fields, nextSchema.regions ?? []);
+    schemaCacheRef.current.set(nextSchema.id, nextSchema);
     setSchema(nextSchema);
     setSchemaName(nextSchema.name);
     setSchemaDescription(nextSchema.description ?? "");
     setRegions(normalized.regions);
+    if (normalized.regions.length) setRegionsVisible(true);
     setFields(toSchemaFields(normalized.fields));
     setSchemaDirty(false);
   }
@@ -1148,6 +1326,7 @@ export default function App() {
       setSchemaName(parsed.name);
       setSchemaDescription(parsed.description ?? "");
       setRegions(normalized.regions);
+      if (normalized.regions.length) setRegionsVisible(true);
       setFields(toSchemaFields(normalized.fields));
       setSchemaDirty(true);
       setError(null);
@@ -1165,6 +1344,7 @@ export default function App() {
     const normalized = normalizeSchemaRegion(region);
     if (!normalized) return;
     setSchemaDirty(true);
+    setRegionsVisible(true);
     setRegions((current) => {
       const exists = current.some((item) => item.id === normalized.id);
       return exists ? current.map((item) => (item.id === normalized.id ? normalized : item)) : [...current, normalized];
@@ -1250,6 +1430,45 @@ export default function App() {
     const ignoredCount = selected.length - supported.length;
     setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
     setBatchFiles(supported);
+  }
+
+  async function selectBatchSchema(schemaId: string) {
+    setBatchSchemaId(schemaId);
+    if (!schemaId) return;
+    const localSchema = batchSchemaOptions.find((item) => item.id === schemaId);
+    if (localSchema) {
+      applySchema(localSchema);
+      setStep("schema");
+    }
+    try {
+      const loaded = await api<SavedSchema>(`/api/schemas/${schemaId}`);
+      applySchema(loaded);
+      setStep("schema");
+    } catch (err) {
+      setError(toFriendlyError(err));
+    }
+  }
+
+  function selectKieUploadFiles(files: FileList | File[] | null) {
+    const selected = files ? Array.from(files) : [];
+    const supported = selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""));
+    const ignoredCount = selected.length - supported.length;
+    if (!supported.length) {
+      setBatchFiles([]);
+      setDraftBatchIndex(0);
+      setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
+      return;
+    }
+    if (supported.length === 1) {
+      setBatchFiles([]);
+      setDraftBatchIndex(0);
+      setBatchMessage(null);
+      void uploadFile(supported[0]);
+      return;
+    }
+    setBatchFiles(supported);
+    setDraftBatchIndex(0);
+    setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
   }
 
   async function saveCurrentSchemaForBatch() {
@@ -1368,7 +1587,9 @@ export default function App() {
 
     const update = (clientX: number) => {
       const percent = ((clientX - rect.left) / rect.width) * 100;
-      setLeftPanePercent(Math.min(78, Math.max(35, percent)));
+      const nextPercent = Math.min(78, Math.max(35, percent));
+      setLeftPanePercent(nextPercent);
+      savePersistedLeftPanePercent(nextPercent);
     };
 
     update(event.clientX);
@@ -1471,14 +1692,23 @@ export default function App() {
               schemas={batchSchemaOptions}
               selectedSchemaId={batchSchemaId}
               selectedFiles={batchFiles}
+              selectedFileUrls={batchFileUrls}
+              selectedFileIndex={draftBatchIndex}
+              regions={regions}
+              showRegions={regionsVisible}
+              regionTarget={draftRegionTarget}
               message={batchMessage}
               currentSchemaDirty={schemaDirty}
               canSaveCurrentSchema={hasMeaningfulSchema(fields)}
-              onSingleUpload={(file) => void uploadFile(file)}
-              onSchema={setBatchSchemaId}
-              onSelectFiles={selectBatchFiles}
+              onSchema={(schemaId) => void selectBatchSchema(schemaId)}
+              onSelectFile={setDraftBatchIndex}
+              onSelectFiles={selectKieUploadFiles}
+              onShowRegions={setRegionsVisible}
+              onSaveRegion={saveRegion}
+              onRemoveRegion={removeRegion}
               onClearFiles={() => {
                 setBatchFiles([]);
+                setDraftBatchIndex(0);
                 setBatchMessage(null);
               }}
               onRunBatch={() => void runBatchUpload()}
@@ -1500,10 +1730,13 @@ export default function App() {
                   document={document}
                   activePage={activePage}
                   activeImageUrl={activeImageUrl}
+                  regions={regions}
+                  showRegions={regionsVisible}
                   zoom={zoom}
                   zoomMode={zoomMode}
                   rotation={rotation}
                   onPage={setActivePage}
+                  onShowRegions={setRegionsVisible}
                   onZoom={setZoom}
                   onZoomMode={setZoomMode}
                   onRotation={setRotation}
@@ -1540,7 +1773,8 @@ export default function App() {
               savedSchema={schema}
               schemaDirty={schemaDirty}
               document={document}
-              activePage={activePage}
+              regionTarget={activeRegionTarget}
+              activePage={activeRegionPage}
               systemStatus={systemStatus}
               templates={templates}
               onSchemaName={(value) => {
@@ -1684,6 +1918,7 @@ export default function App() {
             onSelectFiles={selectBatchFiles}
             onClearFiles={() => {
               setBatchFiles([]);
+              setDraftBatchIndex(0);
               setBatchMessage(null);
             }}
             onRunBatch={() => void runBatchUpload()}
@@ -1943,31 +2178,199 @@ function KieUploadPanel(props: {
   schemas: SavedSchema[];
   selectedSchemaId: string;
   selectedFiles: File[];
+  selectedFileUrls: string[];
+  selectedFileIndex: number;
+  regions: SchemaRegion[];
+  showRegions: boolean;
+  regionTarget: RegionEditorTarget | null;
   message: string | null;
   currentSchemaDirty: boolean;
   canSaveCurrentSchema: boolean;
-  onSingleUpload: (file: File) => void;
   onSchema: (schemaId: string) => void;
-  onSelectFiles: (files: FileList | null) => void;
+  onSelectFile: (index: number) => void;
+  onSelectFiles: (files: FileList | File[] | null) => void;
+  onShowRegions: (show: boolean) => void;
+  onSaveRegion: (region: SchemaRegion) => void;
+  onRemoveRegion: (regionId: string) => void;
   onClearFiles: () => void;
   onRunBatch: () => void;
   onSaveCurrentSchema: () => void;
 }) {
-  function onSingleDrop(event: DragEvent<HTMLLabelElement>) {
+  const selectedFile = props.selectedFiles[props.selectedFileIndex] ?? props.selectedFiles[0] ?? null;
+  const selectedUrl = props.selectedFileUrls[props.selectedFileIndex] ?? props.selectedFileUrls[0] ?? null;
+  const [regionsOpen, setRegionsOpen] = useState(false);
+
+  async function onUnifiedDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
-    const file = event.dataTransfer.files[0];
-    if (file) props.onSingleUpload(file);
+    props.onSelectFiles(await filesFromDataTransfer(event.dataTransfer));
   }
 
-  function onSingleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (file) props.onSingleUpload(file);
-    event.currentTarget.value = "";
-  }
-
-  function onBatchFileChange(event: ChangeEvent<HTMLInputElement>) {
+  function onUnifiedFileChange(event: ChangeEvent<HTMLInputElement>) {
     props.onSelectFiles(event.target.files);
     event.currentTarget.value = "";
+  }
+
+  function renderBatchControls() {
+    return (
+      <>
+        <label className="field-stack">
+          <span>Schema</span>
+          <select value={props.selectedSchemaId} onChange={(event) => props.onSchema(event.target.value)}>
+            <option value="">Select saved schema</option>
+            {props.schemas.map((schema) => (
+              <option key={schema.id} value={schema.id}>
+                {schema.display_name || schema.name} · v{schema.current_version} · {schema.fields.length} fields
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {props.currentSchemaDirty && (
+          <div className="notice-card">
+            현재 schema 변경사항이 저장되지 않았습니다. 최신 schema로 배치 처리하려면 먼저 저장하세요.
+          </div>
+        )}
+
+        <div className="action-row">
+          <button className="secondary" disabled={!props.canSaveCurrentSchema} onClick={props.onSaveCurrentSchema}>
+            <Save size={16} />
+            Save current schema
+          </button>
+        </div>
+
+        <div className="file-picker-grid">
+          <label className="batch-upload">
+            <FileUp size={16} />
+            <span>Select files</span>
+            <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
+          </label>
+          <label className="batch-upload">
+            <UploadCloud size={16} />
+            <span>Select folder</span>
+            <input
+              type="file"
+              accept={KIE_FILE_ACCEPT}
+              multiple
+              onChange={onUnifiedFileChange}
+              {...{ webkitdirectory: "", directory: "" }}
+            />
+          </label>
+        </div>
+
+        {props.message && <div className="success-card">{props.message}</div>}
+
+        <button className="primary run-batch-button" disabled={!props.selectedSchemaId || !props.selectedFiles.length} onClick={props.onRunBatch}>
+          <Play size={16} />
+          Run batch
+        </button>
+      </>
+    );
+  }
+
+  if (props.selectedFiles.length > 0) {
+    return (
+      <div className="kie-upload-panel" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
+        <div className="pane-header">
+          <div>
+            <p className="eyebrow">Batch draft</p>
+            <h2>{props.selectedFiles.length}개 파일 선택됨</h2>
+          </div>
+          <button type="button" className="secondary compact" onClick={props.onClearFiles}>
+            <X size={16} />
+            Clear
+          </button>
+        </div>
+
+        <section className="batch-main-upload draft-controls draft-controls-horizontal">
+          <div className="batch-intro">
+            <strong>Batch upload</strong>
+            <p>선택한 파일과 schema region을 확인한 뒤 같은 schema로 추출을 실행합니다.</p>
+          </div>
+          <div className="draft-region-actions">
+            <button
+              type="button"
+              className={props.showRegions ? "secondary compact active-tool" : "secondary compact"}
+              disabled={!props.regions.length}
+              onClick={() => props.onShowRegions(!props.showRegions)}
+              title={props.regions.length ? "선택한 이미지 위에 schema region을 표시합니다." : "저장된 region이 없습니다."}
+            >
+              <PanelLeft size={14} />
+              Regions
+            </button>
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={!props.regionTarget}
+              onClick={() => setRegionsOpen(true)}
+              title={props.regionTarget ? "현재 선택한 batch 이미지 기준으로 region을 편집합니다." : "이미지 파일을 선택해야 region을 편집할 수 있습니다."}
+            >
+              Manage regions
+            </button>
+          </div>
+          {renderBatchControls()}
+        </section>
+
+        <div className="draft-batch-workbench">
+          <aside className="draft-file-rail" aria-label="Selected batch files">
+            <div className="batch-rail-header">
+              <div>
+                <p className="eyebrow">Selected</p>
+                <strong>{props.selectedFileIndex + 1} / {props.selectedFiles.length}</strong>
+              </div>
+            </div>
+            <div className="batch-file-list">
+              {props.selectedFiles.map((file, index) => {
+                const isImage = isImageFile(file);
+                return (
+                  <button
+                    type="button"
+                    key={`${fileDisplayName(file)}_${file.size}_${index}`}
+                    className={`batch-file-item ${index === props.selectedFileIndex ? "active" : ""}`}
+                    onClick={() => props.onSelectFile(index)}
+                  >
+                    <span className="batch-file-thumb">
+                      {isImage ? <img src={props.selectedFileUrls[index]} alt="" /> : <FileUp size={18} />}
+                      <em>{index + 1}</em>
+                    </span>
+                    <span className="batch-file-main">
+                      <strong>{fileDisplayName(file)}</strong>
+                      <em>{formatFileSize(file.size)}</em>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+
+          <section className="draft-preview-pane">
+            <div className="draft-preview-stage">
+              {selectedFile && selectedUrl && isImageFile(selectedFile) ? (
+                <div className="draft-preview-image-wrap">
+                  <img src={selectedUrl} alt={fileDisplayName(selectedFile)} />
+                  {props.showRegions && <RegionOverlay regions={props.regions} page={1} />}
+                </div>
+              ) : selectedFile ? (
+                <div className="empty-state">
+                  <FileUp size={24} />
+                  <strong>{fileDisplayName(selectedFile)}</strong>
+                  <span>이 파일은 실행 후 PDF/page preview로 확인됩니다.</span>
+                </div>
+              ) : null}
+            </div>
+          </section>
+        </div>
+        {props.regionTarget && regionsOpen && (
+          <RegionManagerModal
+            target={props.regionTarget}
+            regions={props.regions}
+            activePage={0}
+            onSaveRegion={props.onSaveRegion}
+            onRemoveRegion={props.onRemoveRegion}
+            onClose={() => setRegionsOpen(false)}
+          />
+        )}
+      </div>
+    );
   }
 
   return (
@@ -1975,92 +2378,37 @@ function KieUploadPanel(props: {
       <div className="pane-header">
         <div>
           <p className="eyebrow">KIE Upload</p>
-          <h2>문서 또는 배치 업로드</h2>
+          <h2>파일 또는 폴더 업로드</h2>
         </div>
       </div>
 
-      <div className="kie-upload-grid">
-        <label className="upload-zone single-upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onSingleDrop}>
-          <UploadCloud size={32} />
-          <strong>Single document</strong>
-          <span>PDF, PNG, JPG, JPEG, DOCX, PPTX</span>
-          <input type="file" accept={KIE_FILE_ACCEPT} onChange={onSingleFileChange} />
-        </label>
-
-        <section className="batch-main-upload">
-          <div className="batch-intro">
-            <strong>Batch upload</strong>
-            <p>저장된 schema 하나를 선택하고 여러 이미지/문서를 같은 기준으로 추출합니다.</p>
-          </div>
-
-          <label className="field-stack">
-            <span>Schema</span>
-            <select value={props.selectedSchemaId} onChange={(event) => props.onSchema(event.target.value)}>
-              <option value="">Select saved schema</option>
-              {props.schemas.map((schema) => (
-                <option key={schema.id} value={schema.id}>
-                  {schema.display_name || schema.name} · v{schema.current_version} · {schema.fields.length} fields
-                </option>
-              ))}
-            </select>
+      <div className="unified-upload-layout" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
+        <section className="unified-upload-actions">
+          <label className="batch-upload folder-upload-action">
+            <UploadCloud size={18} />
+            <span>Select folder</span>
+            <input
+              type="file"
+              accept={KIE_FILE_ACCEPT}
+              multiple
+              onChange={onUnifiedFileChange}
+              {...{ webkitdirectory: "", directory: "" }}
+            />
           </label>
-
-          {props.currentSchemaDirty && (
-            <div className="notice-card">
-              현재 schema 변경사항이 저장되지 않았습니다. 최신 schema로 배치 처리하려면 먼저 저장하세요.
-            </div>
-          )}
-
-          <div className="action-row">
-            <button className="secondary" disabled={!props.canSaveCurrentSchema} onClick={props.onSaveCurrentSchema}>
-              <Save size={16} />
-              Save current schema
-            </button>
-          </div>
-
-          <div className="file-picker-grid">
-            <label className="batch-upload">
-              <FileUp size={16} />
-              <span>Select files</span>
-              <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onBatchFileChange} />
-            </label>
-            <label className="batch-upload">
-              <UploadCloud size={16} />
-              <span>Select folder</span>
-              <input
-                type="file"
-                accept={KIE_FILE_ACCEPT}
-                multiple
-                onChange={onBatchFileChange}
-                {...{ webkitdirectory: "", directory: "" }}
-              />
-            </label>
-          </div>
-
-          {props.selectedFiles.length > 0 && (
-            <div className="selected-files">
-              <div className="batch-top">
-                <strong>{props.selectedFiles.length} selected</strong>
-                <button type="button" className="ghost compact" onClick={props.onClearFiles}>
-                  Clear
-                </button>
-              </div>
-              <div className="mini-list">
-                {props.selectedFiles.slice(0, 10).map((file, index) => (
-                  <span key={`${fileDisplayName(file)}_${file.size}_${index}`}>{fileDisplayName(file)}</span>
-                ))}
-                {props.selectedFiles.length > 10 && <span className="muted">+ {props.selectedFiles.length - 10} more</span>}
-              </div>
-            </div>
-          )}
-
+          <label className="batch-upload file-upload-action">
+            <FileUp size={18} />
+            <span>Select file(s)</span>
+            <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
+          </label>
           {props.message && <div className="success-card">{props.message}</div>}
-
-          <button className="primary run-batch-button" disabled={!props.selectedSchemaId || !props.selectedFiles.length} onClick={props.onRunBatch}>
-            <Play size={16} />
-            Run batch
-          </button>
         </section>
+
+        <label className="upload-zone unified-upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
+          <UploadCloud size={32} />
+          <strong>Drop file(s) or folder</strong>
+          <span>1 supported file opens single mode. 2+ supported files open batch mode.</span>
+          <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
+        </label>
       </div>
     </div>
   );
@@ -2100,26 +2448,56 @@ function BatchFileRail(props: {
       </div>
       <div className="batch-file-list">
         {props.batch.items.map((item, index) => (
-          <button
-            type="button"
+          <BatchFileButton
             key={item.id}
-            className={`batch-file-item ${item.id === props.activeItemId ? "active" : ""} ${item.status}`}
-            onClick={() => props.onOpenItem(item.id)}
-          >
-            <span className="batch-file-thumb">
-              <img src={`${API_BASE}/api/documents/${item.document_id}/pages/1/image`} alt="" />
-              <em>{index + 1}</em>
-            </span>
-            <span className="batch-file-main">
-              <strong>{item.filename}</strong>
-              <em>{item.status}</em>
-            </span>
-          </button>
+            item={item}
+            index={index}
+            active={item.id === props.activeItemId}
+            onOpenItem={props.onOpenItem}
+          />
         ))}
       </div>
     </aside>
   );
 }
+
+const BatchFileButton = memo(
+  function BatchFileButton(props: {
+    item: BatchItem;
+    index: number;
+    active: boolean;
+    onOpenItem: (itemId: string) => void;
+  }) {
+    return (
+      <button
+        type="button"
+        className={`batch-file-item ${props.active ? "active" : ""} ${props.item.status}`}
+        onClick={() => props.onOpenItem(props.item.id)}
+      >
+        <span className="batch-file-thumb">
+          <img
+            src={documentPageThumbnailSrc(props.item.document_id, 1, 96)}
+            alt=""
+            loading="lazy"
+            decoding="async"
+          />
+          <em>{props.index + 1}</em>
+        </span>
+        <span className="batch-file-main">
+          <strong>{props.item.filename}</strong>
+          <em>{props.item.status}</em>
+        </span>
+      </button>
+    );
+  },
+  (previous, next) =>
+    previous.active === next.active &&
+    previous.index === next.index &&
+    previous.item.id === next.item.id &&
+    previous.item.status === next.item.status &&
+    previous.item.filename === next.item.filename &&
+    previous.item.document_id === next.item.document_id
+);
 
 function BatchItemStatusPanel(props: {
   batch: Batch;
@@ -2169,6 +2547,29 @@ function BatchItemStatusPanel(props: {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+function RegionOverlay({ regions, page }: { regions: SchemaRegion[]; page: number }) {
+  const visibleRegions = regions.filter((region) => region.page === page);
+  if (!visibleRegions.length) return null;
+  return (
+    <div className="document-region-layer" aria-label="Schema regions">
+      {visibleRegions.map((region) => (
+        <div
+          className="document-region-box"
+          key={region.id}
+          style={{
+            left: `${region.x * 100}%`,
+            top: `${region.y * 100}%`,
+            width: `${region.width * 100}%`,
+            height: `${region.height * 100}%`
+          }}
+        >
+          <span>{region.name}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -2246,10 +2647,13 @@ function DocumentViewer(props: {
   document: UploadedDocument;
   activePage: number;
   activeImageUrl: string | null;
+  regions: SchemaRegion[];
+  showRegions: boolean;
   zoom: number;
   zoomMode: ZoomMode;
   rotation: number;
   onPage: (page: number) => void;
+  onShowRegions: (show: boolean) => void;
   onZoom: (zoom: number) => void;
   onZoomMode: (mode: ZoomMode) => void;
   onRotation: (rotation: number) => void;
@@ -2257,9 +2661,13 @@ function DocumentViewer(props: {
   onClear: () => void;
 }) {
   const imageClass = `document-image ${props.zoomMode}`;
-  const imageStyle = {
-    transform: `rotate(${props.rotation}deg) scale(${props.zoomMode === "manual" ? props.zoom : 1})`
-  };
+  const activePageNumber = props.document.pages[props.activePage]?.page ?? props.activePage + 1;
+  const visibleRegions = props.regions.filter((region) => region.page === activePageNumber);
+  const transforms = [
+    props.rotation ? `rotate(${props.rotation}deg)` : "",
+    props.zoomMode === "manual" && props.zoom !== 1 ? `scale(${props.zoom})` : ""
+  ].filter(Boolean);
+  const imageStyle = transforms.length ? { transform: transforms.join(" ") } : undefined;
 
   return (
     <>
@@ -2316,6 +2724,15 @@ function DocumentViewer(props: {
           <button title="Rotate" onClick={() => props.onRotation((props.rotation + 90) % 360)}>
             <RotateCw size={18} />
           </button>
+          <button
+            title={props.regions.length ? "Show schema regions on the document" : "No schema regions saved"}
+            className={props.showRegions ? "active-tool" : ""}
+            disabled={!props.regions.length}
+            onClick={() => props.onShowRegions(!props.showRegions)}
+          >
+            <PanelLeft size={18} />
+            Regions
+          </button>
           <label className="toolbar-upload" title="Replace document">
             <FileUp size={18} />
             <span>Replace</span>
@@ -2344,14 +2761,39 @@ function DocumentViewer(props: {
               title={`Page ${page.page}`}
               onClick={() => props.onPage(index)}
             >
-              <img src={`${API_BASE}${page.image_url}`} alt={`Page ${page.page}`} />
+              <img
+                src={documentPageThumbnailSrc(props.document.document_id, page.page, 96)}
+                alt={`Page ${page.page}`}
+                loading="lazy"
+                decoding="async"
+              />
               <span>{page.page}</span>
             </button>
           ))}
         </div>
         <div className="image-stage">
           {props.activeImageUrl && (
-            <img className={imageClass} src={props.activeImageUrl} alt={`Page ${props.activePage + 1}`} style={imageStyle} />
+            <div className={`document-image-wrap ${props.zoomMode}`} style={imageStyle}>
+              <img className={imageClass} src={props.activeImageUrl} alt={`Page ${props.activePage + 1}`} />
+              {props.showRegions && visibleRegions.length > 0 && (
+                <div className="document-region-layer" aria-label="Schema regions">
+                  {visibleRegions.map((region) => (
+                    <div
+                      className="document-region-box"
+                      key={region.id}
+                      style={{
+                        left: `${region.x * 100}%`,
+                        top: `${region.y * 100}%`,
+                        width: `${region.width * 100}%`,
+                        height: `${region.height * 100}%`
+                      }}
+                    >
+                      <span>{region.name}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -2672,6 +3114,7 @@ function SchemaBuilder(props: {
   savedSchema: SavedSchema | null;
   schemaDirty: boolean;
   document: UploadedDocument | null;
+  regionTarget: RegionEditorTarget | null;
   activePage: number;
   systemStatus: SystemStatus | null;
   templates: SavedSchema[];
@@ -2712,6 +3155,7 @@ function SchemaBuilder(props: {
             type="button"
             className="primary compact"
             disabled={!props.document}
+            title={props.document ? "AI가 현재 문서를 기준으로 schema를 추천합니다." : "서버에 업로드된 문서가 있어야 AI schema 추천을 사용할 수 있습니다."}
             onClick={() => void props.onRecommendSchema()}
           >
             <Sparkles size={14} />
@@ -2738,72 +3182,69 @@ function SchemaBuilder(props: {
             <strong>Extraction regions</strong>
             <span>{props.regions.length ? `${props.regions.length} saved` : "No shared regions"}</span>
           </div>
-          <button type="button" className="secondary compact" disabled={!props.document} onClick={() => setRegionsOpen(true)}>
+          <button
+            type="button"
+            className="secondary compact"
+            disabled={!props.regionTarget}
+            title={props.regionTarget ? "현재 선택한 이미지 위에 extraction region을 지정합니다." : "문서 이미지가 있어야 region을 지정할 수 있습니다."}
+            onClick={() => setRegionsOpen(true)}
+          >
             Manage regions
           </button>
         </div>
 
-        <div className="field-list">
+        <div className="schema-table-wrap">
+          <div className="schema-field-table" role="table" aria-label="Schema fields">
+            <div className="schema-field-head" role="row">
+              <span>Key name</span>
+              <span>Description</span>
+              <span>Type</span>
+              <span>Region</span>
+              <span />
+            </div>
           {props.fields.map((field, index) => (
-            <div className="field-row" key={field.local_id}>
-              <div className="field-grid">
-                <label>
-                  <span>key name</span>
-                  <input value={field.key_name} onChange={(event) => props.onUpdateField(index, { key_name: event.target.value })} />
-                </label>
-                <label>
-                  <span>description</span>
-                  <input
-                    value={field.description}
-                    placeholder="Where and how the value should be found"
-                    onChange={(event) => props.onUpdateField(index, { description: event.target.value })}
-                  />
-                </label>
-                <label>
-                  <span>output format</span>
-                  <select
-                    value={field.output_format}
-                    onChange={(event) => props.onUpdateField(index, { output_format: event.target.value as OutputFormat })}
-                  >
-                    {OUTPUT_FORMATS.map((format) => (
-                      <option key={format} value={format}>
-                        {format}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  <span>region</span>
-                  <select
-                    value={field.region_id ?? ""}
-                    onChange={(event) => props.onUpdateField(index, { region_id: event.target.value || null, region: null })}
-                  >
-                    <option value="">Full document</option>
-                    {props.regions.map((region) => (
-                      <option key={region.id} value={region.id}>
-                        {region.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button className="ghost danger icon-only" title="Remove field" onClick={() => props.onRemoveField(index)}>
-                  <Trash2 size={16} />
-                </button>
-              </div>
-              {field.region_id && (
-                <div className="field-region-row">
-                  <span>{props.regions.find((region) => region.id === field.region_id)?.name ?? field.region_id}</span>
-                  <button
-                    type="button"
-                    className="ghost compact danger"
-                    onClick={() => props.onUpdateField(index, { region_id: null, region: null })}
-                  >
-                    Use full document
-                  </button>
-                </div>
-              )}
+            <div className="schema-field-row" role="row" key={field.local_id}>
+              <input
+                aria-label="Key name"
+                value={field.key_name}
+                onChange={(event) => props.onUpdateField(index, { key_name: event.target.value })}
+              />
+              <textarea
+                aria-label="Description"
+                className="schema-description-input"
+                value={field.description}
+                placeholder="Where and how the value should be found"
+                onChange={(event) => props.onUpdateField(index, { description: event.target.value })}
+              />
+              <select
+                aria-label="Output format"
+                value={field.output_format}
+                onChange={(event) => props.onUpdateField(index, { output_format: event.target.value as OutputFormat })}
+              >
+                {OUTPUT_FORMATS.map((format) => (
+                  <option key={format} value={format}>
+                    {format}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Region"
+                value={field.region_id ?? ""}
+                onChange={(event) => props.onUpdateField(index, { region_id: event.target.value || null, region: null })}
+              >
+                <option value="">—</option>
+                {props.regions.map((region) => (
+                  <option key={region.id} value={region.id}>
+                    {region.name}
+                  </option>
+                ))}
+              </select>
+              <button className="ghost danger icon-only" title="Remove field" onClick={() => props.onRemoveField(index)}>
+                <Trash2 size={16} />
+              </button>
             </div>
           ))}
+          </div>
         </div>
 
         <div className="action-row">
@@ -2917,9 +3358,9 @@ function SchemaBuilder(props: {
           </section>
         </div>
       )}
-      {props.document && regionsOpen && (
+      {props.regionTarget && regionsOpen && (
         <RegionManagerModal
-          document={props.document}
+          target={props.regionTarget}
           regions={props.regions}
           activePage={props.activePage}
           onSaveRegion={props.onSaveRegion}
@@ -2932,7 +3373,7 @@ function SchemaBuilder(props: {
 }
 
 function RegionManagerModal(props: {
-  document: UploadedDocument;
+  target: RegionEditorTarget;
   regions: SchemaRegion[];
   activePage: number;
   onSaveRegion: (region: SchemaRegion) => void;
@@ -2943,10 +3384,11 @@ function RegionManagerModal(props: {
 
   function createRegion() {
     const id = createRegionId(props.regions);
+    const page = props.target.pages[Math.min(props.activePage, props.target.pages.length - 1)]?.page ?? 1;
     setEditingRegion({
       id,
       name: `Region ${props.regions.length + 1}`,
-      page: props.activePage + 1,
+      page,
       x: 0.1,
       y: 0.1,
       width: 0.25,
@@ -3003,7 +3445,7 @@ function RegionManagerModal(props: {
 
         {editingRegion && (
           <RegionPickerModal
-            document={props.document}
+            target={props.target}
             region={editingRegion}
             onSave={(region) => {
               props.onSaveRegion(region);
@@ -3018,13 +3460,13 @@ function RegionManagerModal(props: {
 }
 
 function RegionPickerModal(props: {
-  document: UploadedDocument;
+  target: RegionEditorTarget;
   region: SchemaRegion;
   onSave: (region: SchemaRegion) => void;
   onClose: () => void;
 }) {
   const initialPageIndex = Math.min(
-    props.document.page_count - 1,
+    props.target.page_count - 1,
     Math.max(0, props.region.page - 1)
   );
   const [pageIndex, setPageIndex] = useState(initialPageIndex);
@@ -3032,8 +3474,8 @@ function RegionPickerModal(props: {
   const [draftRegion, setDraftRegion] = useState<FieldRegion | null>(props.region);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
-  const page = props.document.pages[pageIndex];
-  const imageUrl = `${API_BASE}${page.image_url}`;
+  const page = props.target.pages[pageIndex];
+  const imageUrl = resolveImageUrl(page.image_url);
   const normalizedRegion =
     draftRegion && draftRegion.page === page.page
       ? draftRegion
@@ -3117,10 +3559,10 @@ function RegionPickerModal(props: {
               onChange={(event) => {
                 const nextIndex = Number(event.target.value);
                 setPageIndex(nextIndex);
-                setDraftRegion((current) => (current ? { ...current, page: props.document.pages[nextIndex].page } : current));
+                setDraftRegion((current) => (current ? { ...current, page: props.target.pages[nextIndex].page } : current));
               }}
             >
-              {props.document.pages.map((item, index) => (
+              {props.target.pages.map((item, index) => (
                 <option key={item.id} value={index}>
                   Page {item.page}
                 </option>
@@ -3438,6 +3880,21 @@ function exportHref(resultId: string, format: "json" | "csv", presetId: string) 
   return `${API_BASE}/api/extraction-results/${resultId}/export?${params.toString()}`;
 }
 
+function documentPageImageSrc(page: DocumentPage) {
+  return `${API_BASE}${page.image_url}?v=${page.width}x${page.height}`;
+}
+
+function documentPageThumbnailSrc(documentId: string, pageNumber = 1, width = 96) {
+  return `${API_BASE}/api/documents/${documentId}/pages/${pageNumber}/thumbnail?width=${width}`;
+}
+
+function resolveImageUrl(url: string) {
+  if (url.startsWith("blob:") || url.startsWith("data:") || url.startsWith("http://") || url.startsWith("https://")) {
+    return url;
+  }
+  return `${API_BASE}${url}`;
+}
+
 function batchExportHref(batchId: string, format: "json" | "csv") {
   const params = new URLSearchParams({ format });
   return `${API_BASE}/api/batches/${batchId}/export?${params.toString()}`;
@@ -3612,6 +4069,17 @@ function formatDate(value: string) {
 
 function fileDisplayName(file: File) {
   return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+}
+
+function isImageFile(file: File) {
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  return ["png", "jpg", "jpeg"].includes(extension) || file.type.startsWith("image/");
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function batchCanCancel(batch: Batch) {

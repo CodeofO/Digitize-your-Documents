@@ -4,6 +4,7 @@ import os
 import zipfile
 
 import fitz
+from PIL import Image
 
 from app.config import get_settings
 from tests.conftest import get_client
@@ -185,9 +186,32 @@ def test_image_upload() -> None:
         image = client.get(document["pages"][0]["image_url"])
         assert image.status_code == 200
         assert image.headers["content-type"] == "image/png"
+        thumbnail = client.get(f"/api/documents/{document['document_id']}/pages/1/thumbnail?width=96")
+        assert thumbnail.status_code == 200
+        assert thumbnail.headers["content-type"] == "image/jpeg"
 
         documents = client.get("/api/documents").json()
         assert any(item["document_id"] == document["document_id"] for item in documents)
+
+
+def test_jpeg_upload_preserves_source_pixels_with_dpi_metadata() -> None:
+    image = Image.new("RGB", (300, 420), (255, 255, 255))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", dpi=(300, 300))
+
+    with get_client() as client:
+        response = client.post(
+            "/api/documents",
+            files={"file": ("scan.jpg", buffer.getvalue(), "image/jpeg")},
+        )
+        assert response.status_code == 200, response.text
+        document = response.json()
+        assert document["pages"][0]["width"] == 300
+        assert document["pages"][0]["height"] == 420
+        image_response = client.get(document["pages"][0]["image_url"])
+        assert image_response.status_code == 200
+        loaded = Image.open(io.BytesIO(image_response.content))
+        assert loaded.size == (300, 420)
 
 
 def test_pdf_upload() -> None:
@@ -406,10 +430,11 @@ def test_extraction_uses_schema_regions_for_cropped_inputs(monkeypatch) -> None:
     region_call = next(call for call in captured_calls if {field.key_name for field in call["fields"]} == {"handwritten_name", "handwritten_phone"})
     region_inputs = region_call["image_inputs"]
     assert isinstance(region_inputs, list)
+    assert any("Full page context" in item["label"] and "Handwriting block" in item["label"] for item in region_inputs)
     assert any("Masked full page context" in item["label"] and "Handwriting block" in item["label"] for item in region_inputs)
     assert any("Cropped extraction region" in item["label"] and "Handwriting block" in item["label"] for item in region_inputs)
     assert any("handwritten_name, handwritten_phone" in item["label"] for item in region_inputs)
-    assert len(region_inputs) == 2
+    assert len(region_inputs) == 3
     region_fields = region_call["fields"]
     assert region_fields[0].region_id == "region_1"
     assert region_fields[1].region_id == "region_1"

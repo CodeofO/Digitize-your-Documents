@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import fitz
 from fastapi import UploadFile
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.config import get_settings
 from app.raw_extractor import convert_office_to_pdf
@@ -58,6 +59,48 @@ def rasterize_document(source_path: Path) -> list[dict[str, int | str]]:
     raise DocumentProcessingError("Unsupported document type")
 
 
+def is_supported_image(source_path: Path) -> bool:
+    return source_path.suffix.lower() in IMAGE_EXTENSIONS
+
+
+def read_image_size(source_path: Path) -> tuple[int, int]:
+    try:
+        with Image.open(source_path) as source:
+            image = ImageOps.exif_transpose(source)
+            return image.size
+    except UnidentifiedImageError as exc:
+        raise DocumentProcessingError("Failed to read image") from exc
+    except OSError as exc:
+        raise DocumentProcessingError("Failed to process image") from exc
+
+
+def rasterize_image_page(source_path: Path, page_dir: Path) -> dict[str, int | str]:
+    image_path = page_dir / "page_1.png"
+    page_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with Image.open(source_path) as source:
+            image = ImageOps.exif_transpose(source)
+            if image.mode == "RGBA":
+                background = Image.new("RGB", image.size, (255, 255, 255))
+                background.paste(image, mask=image.getchannel("A"))
+                image = background
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+            width, height = image.size
+            image.save(image_path, format="PNG")
+    except UnidentifiedImageError as exc:
+        raise DocumentProcessingError("Failed to read image") from exc
+    except OSError as exc:
+        raise DocumentProcessingError("Failed to process image") from exc
+
+    return {
+        "page_number": 1,
+        "image_path": str(image_path),
+        "width": width,
+        "height": height,
+    }
+
+
 def _rasterize_office(source_path: Path, suffix: str, page_dir: Path) -> list[dict[str, int | str]]:
     pdf_path = source_path.parent / "preview.pdf"
     convert_office_to_pdf(source_path, suffix, pdf_path)
@@ -88,26 +131,18 @@ def _rasterize_pdf(source_path: Path, page_dir: Path) -> list[dict[str, int | st
 
 
 def _rasterize_image(source_path: Path, page_dir: Path) -> list[dict[str, int | str]]:
-    image_path = page_dir / "page_1.png"
     try:
-        with fitz.open(source_path) as document:
-            page = document[0]
-            pixmap = page.get_pixmap(alpha=False)
-            pixmap.save(image_path)
-            width = pixmap.width
-            height = pixmap.height
-    except Exception:
+        return [rasterize_image_page(source_path, page_dir)]
+    except DocumentProcessingError:
+        image_path = page_dir / "page_1.png"
         shutil.copyfile(source_path, image_path)
         with fitz.open(image_path) as document:
             page = document[0]
-            width = int(page.rect.width)
-            height = int(page.rect.height)
-
-    return [
-        {
-            "page_number": 1,
-            "image_path": str(image_path),
-            "width": width,
-            "height": height,
-        }
-    ]
+            return [
+                {
+                    "page_number": 1,
+                    "image_path": str(image_path),
+                    "width": int(page.rect.width),
+                    "height": int(page.rect.height),
+                }
+            ]

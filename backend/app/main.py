@@ -10,13 +10,21 @@ from typing import Any
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
 from app.config import DEFAULT_LIBREOFFICE_PATH, ROOT_ENV_PATH, get_settings, upsert_root_env
 from app.database import get_db, init_db
-from app.document_processor import DocumentProcessingError, rasterize_document, save_upload_file
+from app.document_processor import (
+    DocumentProcessingError,
+    is_supported_image,
+    rasterize_document,
+    rasterize_image_page,
+    read_image_size,
+    save_upload_file,
+)
 from app.extraction import result_to_dict, run_batch_jobs, run_extraction_job
 from app.models import (
     AuditEvent,
@@ -248,6 +256,7 @@ def get_document(document_id: str, db: Session = Depends(get_db)) -> DocumentRea
     document = db.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    _repair_image_document_if_needed(document, db)
     return _document_read(document)
 
 
@@ -260,10 +269,48 @@ def get_document_page_image(document_id: str, page_number: int, db: Session = De
     )
     if not page:
         raise HTTPException(status_code=404, detail="Document page not found")
+    document = db.get(Document, document_id)
+    if document:
+        _repair_image_document_if_needed(document, db)
+        db.refresh(page)
     path = Path(page.image_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Document page image missing")
     return FileResponse(path, media_type="image/png")
+
+
+@app.get("/api/documents/{document_id}/pages/{page_number}/thumbnail")
+def get_document_page_thumbnail(
+    document_id: str,
+    page_number: int,
+    width: int = Query(default=96, ge=48, le=512),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    page = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == document_id, DocumentPage.page_number == page_number)
+        .one_or_none()
+    )
+    if not page:
+        raise HTTPException(status_code=404, detail="Document page not found")
+    document = db.get(Document, document_id)
+    if document:
+        _repair_image_document_if_needed(document, db)
+        db.refresh(page)
+    source_path = Path(page.image_path)
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Document page image missing")
+
+    thumbnail_path = source_path.with_name(f"{source_path.stem}_thumb_{width}.jpg")
+    if not thumbnail_path.exists() or thumbnail_path.stat().st_mtime < source_path.stat().st_mtime:
+        with Image.open(source_path) as source:
+            image = source.convert("RGB")
+            ratio = width / max(1, image.width)
+            target_size = (width, max(1, round(image.height * ratio)))
+            image = image.resize(target_size, Image.Resampling.LANCZOS)
+            image.save(thumbnail_path, format="JPEG", quality=82, optimize=True)
+
+    return FileResponse(thumbnail_path, media_type="image/jpeg")
 
 
 @app.post("/api/schemas", response_model=SchemaRead)
@@ -422,6 +469,7 @@ def create_extraction_job(
         raise HTTPException(status_code=404, detail="Document not found")
     if not schema:
         raise HTTPException(status_code=404, detail="Schema not found")
+    _repair_image_document_if_needed(document, db)
 
     schema_version = payload.schema_version or schema.current_version
     version_exists = (
@@ -880,6 +928,37 @@ def _document_read(document: Document) -> DocumentRead:
             for page in document.pages
         ],
     )
+
+
+def _repair_image_document_if_needed(document: Document, db: Session) -> None:
+    source_path = Path(document.storage_path)
+    if not is_supported_image(source_path) or not source_path.exists() or not document.pages:
+        return
+
+    page = document.pages[0]
+    try:
+        source_width, source_height = read_image_size(source_path)
+    except DocumentProcessingError:
+        return
+    if page.width == source_width and page.height == source_height and Path(page.image_path).exists():
+        return
+
+    try:
+        page_info = rasterize_image_page(source_path, Path(page.image_path).parent)
+    except DocumentProcessingError:
+        return
+
+    next_width = int(page_info["width"])
+    next_height = int(page_info["height"])
+    if page.width == next_width and page.height == next_height and Path(page.image_path).exists():
+        return
+
+    page.image_path = str(page_info["image_path"])
+    page.width = next_width
+    page.height = next_height
+    document.page_count = 1
+    db.commit()
+    db.refresh(document)
 
 
 def _raw_extraction_read(raw: RawExtraction) -> RawExtractionRead:

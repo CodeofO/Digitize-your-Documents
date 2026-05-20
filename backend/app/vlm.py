@@ -175,23 +175,24 @@ def _build_user_prompt(fields: list[FieldDefinition]) -> str:
         if field.region_id:
             lines.append(
                 f"- {field.key_name} ({field.output_format}): {field.description}. "
-                f"Use the masked full page context and cropped extraction region for region_id '{field.region_id}'. "
+                f"Use the full page context, masked full page context, and enlarged cropped extraction region for region_id '{field.region_id}'. "
                 "Location words in the description refer to the original page position shown by the masked context. "
-                "Read the value from the crop, and do not use unrelated region crops for this field."
+                "Use the full page only for layout context, read the value from the crop, and do not use unrelated region crops for this field."
             )
         elif field.region:
             region = field.region
             lines.append(
                 f"- {field.key_name} ({field.output_format}): {field.description}. "
-                f"Use the masked full page context and extraction region crop for this field on page {region.page}; "
+                f"Use the full page context, masked full page context, and enlarged extraction region crop for this field on page {region.page}; "
                 "location words in the description refer to the original page position."
             )
         else:
             lines.append(f"- {field.key_name} ({field.output_format}): {field.description}. Use the full document pages.")
     if has_regions:
         lines.append(
-            "Images are labeled. For region fields, first use the masked full page image to understand where the region sits "
-            "in the original page, then use the matching crop to read the value. Region images should only affect their matching fields."
+            "Images are labeled. For region fields, use the full page image for document context, then use the masked full page image "
+            "to understand where the region sits in the original page, then use the matching enlarged crop to read the value. "
+            "Region images should only affect their matching fields."
         )
     lines.append("Return null for fields that are not visible.")
     return "\n".join(lines)

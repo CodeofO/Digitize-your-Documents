@@ -4,8 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import fitz
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
@@ -190,6 +189,14 @@ def _build_extraction_requests(
                 "fields": region_fields,
                 "image_inputs": [
                     {
+                        "path": page.image_path,
+                        "label": (
+                            f"Full page context for extraction region '{region_ref['label']}' on page {region.page}. "
+                            "Use this image only to understand the overall document layout and nearby labels; "
+                            f"extract values only for these fields: {', '.join(region_ref['field_names'])}."
+                        ),
+                    },
+                    {
                         "path": str(masked_path),
                         "label": (
                             f"Masked full page context for extraction region '{region_ref['label']}' on page {region.page}. "
@@ -248,19 +255,26 @@ def _group_region_refs(field_region_refs: dict[str, dict[str, Any]]) -> list[dic
 
 def _crop_region_image(page: DocumentPage, region: FieldRegion, output_path: Path) -> Path:
     source_path = Path(page.image_path)
-    with fitz.open(source_path) as image_document:
-        image_page = image_document[0]
-        rect = image_page.rect
-        clip = fitz.Rect(
-            rect.x0 + rect.width * region.x,
-            rect.y0 + rect.height * region.y,
-            rect.x0 + rect.width * (region.x + region.width),
-            rect.y0 + rect.height * (region.y + region.height),
-        )
-        if clip.is_empty or clip.width <= 0 or clip.height <= 0:
-            raise RuntimeError("Extraction region is empty")
-        pixmap = image_page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=clip, alpha=False)
-        pixmap.save(output_path)
+    with Image.open(source_path) as source:
+        image = source.convert("RGB")
+
+    width, height = image.size
+    box = _region_pixel_box(region, width, height, padding_ratio=0.16)
+    crop = image.crop(box)
+    if crop.width <= 0 or crop.height <= 0:
+        raise RuntimeError("Extraction region is empty")
+
+    scale = max(2.0, min(4.0, 1200 / max(1, crop.width)))
+    max_dimension = max(crop.width, crop.height)
+    if max_dimension * scale > 2800:
+        scale = 2800 / max(1, max_dimension)
+    target_size = (max(1, round(crop.width * scale)), max(1, round(crop.height * scale)))
+    if target_size != crop.size:
+        crop = crop.resize(target_size, Image.Resampling.LANCZOS)
+
+    crop = ImageEnhance.Contrast(crop).enhance(1.08)
+    crop = crop.filter(ImageFilter.SHARPEN)
+    crop.save(output_path)
     return output_path
 
 
@@ -284,11 +298,23 @@ def _mask_region_image(page: DocumentPage, region: FieldRegion, output_path: Pat
     return output_path
 
 
-def _region_pixel_box(region: FieldRegion, width: int, height: int) -> tuple[int, int, int, int]:
+def _region_pixel_box(
+    region: FieldRegion,
+    width: int,
+    height: int,
+    padding_ratio: float = 0.0,
+) -> tuple[int, int, int, int]:
     left = max(0, min(width - 1, round(width * region.x)))
     top = max(0, min(height - 1, round(height * region.y)))
     right = max(left + 1, min(width, round(width * (region.x + region.width))))
     bottom = max(top + 1, min(height, round(height * (region.y + region.height))))
+    if padding_ratio > 0:
+        pad_x = max(4, round((right - left) * padding_ratio))
+        pad_y = max(4, round((bottom - top) * padding_ratio))
+        left = max(0, left - pad_x)
+        top = max(0, top - pad_y)
+        right = min(width, right + pad_x)
+        bottom = min(height, bottom + pad_y)
     return left, top, right, bottom
 
 

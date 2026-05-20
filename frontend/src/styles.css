@@ -228,7 +228,16 @@ textarea {
 .busy-line {
   background: #eaf5f3;
   border: 1px solid #b9dcd7;
+  box-shadow: 0 14px 34px rgba(25, 39, 38, 0.16);
   color: #0f625e;
+  left: 50%;
+  margin-top: 0;
+  pointer-events: none;
+  position: fixed;
+  top: 82px;
+  transform: translateX(-50%);
+  width: fit-content;
+  z-index: 40;
 }
 
 .spin {
@@ -431,19 +440,139 @@ textarea {
   min-height: 0;
 }
 
-.kie-upload-grid {
+.kie-upload-grid,
+.unified-upload-layout {
   display: grid;
   flex: 1;
   gap: 12px;
-  grid-template-columns: minmax(260px, 0.9fr) minmax(300px, 1.1fr);
+  grid-template-rows: auto minmax(240px, 1fr);
   min-height: 0;
   overflow: auto;
   padding: 14px;
 }
 
-.single-upload-zone {
+.single-upload-zone,
+.unified-upload-zone {
   margin: 0;
   min-height: 360px;
+}
+
+.unified-upload-actions {
+  border: 1px solid #d9e0da;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-rows: repeat(2, minmax(54px, auto));
+  padding: 12px;
+}
+
+.folder-upload-action,
+.file-upload-action {
+  justify-content: flex-start;
+  min-height: 56px;
+}
+
+.draft-batch-workbench {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.draft-file-rail {
+  background: #f4f6f3;
+  border-right: 1px solid #dce4de;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 10px;
+}
+
+.draft-preview-pane {
+  background: #eef1ed;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+.draft-preview-stage {
+  align-items: flex-start;
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  min-height: 0;
+  overflow: auto;
+  padding: 28px;
+}
+
+.draft-preview-image-wrap {
+  background: #ffffff;
+  box-shadow: 0 12px 32px rgba(25, 39, 38, 0.14);
+  position: relative;
+  width: min(100%, 920px);
+}
+
+.draft-preview-image-wrap img {
+  display: block;
+  height: auto;
+  width: 100%;
+}
+
+.draft-controls {
+  border-bottom: 0;
+  border-right: 0;
+  border-top: 0;
+  border-radius: 0;
+}
+
+.draft-controls-horizontal {
+  align-items: flex-end;
+  border-left: 0;
+  border-right: 0;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px;
+}
+
+.draft-controls-horizontal .batch-intro {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+
+.draft-controls-horizontal .field-stack {
+  flex: 1 1 260px;
+  min-width: 220px;
+}
+
+.draft-controls-horizontal .notice-card,
+.draft-controls-horizontal .success-card {
+  flex: 1 1 220px;
+  margin: 0;
+}
+
+.draft-controls-horizontal .action-row,
+.draft-region-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.draft-controls-horizontal .file-picker-grid {
+  flex: 1 1 260px;
+  min-width: 240px;
+}
+
+.draft-controls-horizontal .run-batch-button {
+  flex: 0 0 auto;
+  min-height: 42px;
+  padding-left: 18px;
+  padding-right: 18px;
 }
 
 .batch-main-upload {
@@ -457,6 +586,11 @@ textarea {
   padding: 12px;
 }
 
+.batch-main-upload.draft-controls-horizontal {
+  flex-direction: row;
+  overflow: visible;
+}
+
 .document-workbench {
   display: grid;
   flex: 1;
@@ -465,7 +599,7 @@ textarea {
 }
 
 .document-workbench.batch-active {
-  grid-template-columns: 190px minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 240px) minmax(0, 1fr);
 }
 
 .document-viewer-panel {
@@ -502,7 +636,7 @@ textarea {
 .batch-rail-actions {
   display: grid;
   gap: 6px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .batch-rail-actions .link-button,
@@ -512,11 +646,19 @@ textarea {
   padding-right: 6px;
 }
 
+.batch-rail-actions .danger-outline {
+  grid-column: 1 / -1;
+}
+
 .batch-file-list {
   display: grid;
   gap: 6px;
+  align-content: start;
+  flex: 1 1 auto;
+  grid-auto-rows: minmax(78px, max-content);
   min-height: 0;
   overflow-y: auto;
+  padding-right: 4px;
 }
 
 .batch-file-item {
@@ -525,9 +667,10 @@ textarea {
   border-color: #d8e0da;
   display: grid;
   gap: 8px;
-  grid-template-columns: 46px minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr);
   justify-content: stretch;
-  min-height: 0;
+  min-height: 78px;
+  overflow: hidden;
   padding: 8px;
   text-align: left;
   width: 100%;
@@ -552,10 +695,10 @@ textarea {
   background: #ffffff;
   border: 1px solid #dce4de;
   border-radius: 6px;
-  height: 58px;
+  height: 62px;
   overflow: hidden;
   position: relative;
-  width: 46px;
+  width: 52px;
 }
 
 .batch-file-thumb img {
@@ -563,6 +706,14 @@ textarea {
   height: 100%;
   object-fit: cover;
   width: 100%;
+}
+
+.batch-file-thumb svg {
+  color: #65736c;
+  left: 50%;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
 }
 
 .batch-file-thumb em {
@@ -587,11 +738,15 @@ textarea {
   display: grid;
   gap: 3px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .batch-file-main strong {
+  display: block;
   font-size: 12px;
+  line-height: 1.25;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .batch-file-main em {
@@ -741,23 +896,64 @@ textarea {
 .document-image {
   background: #ffffff;
   box-shadow: 0 12px 32px rgba(25, 39, 38, 0.14);
+  display: block;
+  height: auto;
+  width: 100%;
+}
+
+.document-image-wrap {
+  background: #ffffff;
+  box-shadow: 0 12px 32px rgba(25, 39, 38, 0.14);
+  position: relative;
   transform-origin: top center;
 }
 
-.document-image.manual {
+.document-image-wrap.manual {
   max-width: 100%;
 }
 
-.document-image.fitWidth {
+.document-image-wrap.fitWidth {
   height: auto;
   max-width: none;
   width: 100%;
 }
 
-.document-image.fitPage {
+.document-image-wrap.fitPage {
+  max-height: 100%;
+  max-width: 100%;
+}
+
+.document-image-wrap.fitPage .document-image {
   max-height: 100%;
   max-width: 100%;
   object-fit: contain;
+}
+
+.document-region-layer {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.document-region-box {
+  background: rgba(21, 127, 120, 0.14);
+  border: 2px solid #157f78;
+  border-radius: 4px;
+  color: #ffffff;
+  position: absolute;
+}
+
+.document-region-box span {
+  background: #157f78;
+  border-radius: 0 0 4px 0;
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 3px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .schema-builder,
@@ -1105,6 +1301,94 @@ progress {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.schema-table-wrap {
+  border: 1px solid #d9e0da;
+  border-radius: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.schema-field-table {
+  min-width: 760px;
+}
+
+.schema-field-head,
+.schema-field-row {
+  align-items: stretch;
+  display: grid;
+  gap: 0;
+  grid-template-columns: minmax(140px, 1fr) minmax(280px, 2.1fr) 112px 132px 42px;
+}
+
+.schema-field-head {
+  background: #f3f6f3;
+  border-bottom: 1px solid #d9e0da;
+  color: #53615a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.schema-field-head span {
+  border-right: 1px solid #dfe6e1;
+  padding: 9px 10px;
+}
+
+.schema-field-head span:last-child {
+  border-right: 0;
+}
+
+.schema-field-row {
+  background: #ffffff;
+  border-bottom: 1px solid #edf1ee;
+}
+
+.schema-field-row:last-child {
+  border-bottom: 0;
+}
+
+.schema-field-row input,
+.schema-field-row textarea,
+.schema-field-row select {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0;
+  min-height: 38px;
+  padding: 8px 10px;
+}
+
+.schema-field-row input,
+.schema-field-row textarea,
+.schema-field-row select {
+  border-right-color: #edf1ee;
+}
+
+.schema-field-row input:focus,
+.schema-field-row textarea:focus,
+.schema-field-row select:focus {
+  background: #ffffff;
+  border-color: #157f78;
+  border-radius: 6px;
+  outline: none;
+}
+
+.schema-description-input {
+  line-height: 1.45;
+  min-height: 38px;
+  overflow: hidden;
+  resize: none;
+  white-space: pre-wrap;
+  word-break: keep-all;
+}
+
+.schema-field-row .icon-only {
+  align-self: center;
+  background: transparent;
+  border: 0;
+  min-height: 34px;
+  min-width: 34px;
+  padding: 6px;
 }
 
 .intel-card,
@@ -1718,8 +2002,16 @@ pre {
   }
 
   .kie-upload-grid,
+  .unified-upload-layout,
+  .draft-batch-workbench,
   .document-workbench.batch-active {
     grid-template-columns: 1fr;
+  }
+
+  .draft-file-rail {
+    border-bottom: 1px solid #dce4de;
+    border-right: 0;
+    max-height: 260px;
   }
 
   .batch-file-rail {
