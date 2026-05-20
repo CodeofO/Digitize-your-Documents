@@ -498,8 +498,10 @@ def create_extraction_job(
     )
     db.commit()
     db.refresh(job)
+    response = _job_read(job)
+    db.close()
     background_tasks.add_task(run_extraction_job, job.id)
-    return _job_read(job)
+    return response
 
 
 @app.get("/api/extraction-jobs", response_model=list[ExtractionJobRead])
@@ -747,8 +749,10 @@ def create_batch(
     )
     db.commit()
     db.refresh(batch)
+    response = _batch_read(batch)
+    db.close()
     background_tasks.add_task(run_batch_jobs, batch.id, job_ids)
-    return _batch_read(batch)
+    return response
 
 
 @app.get("/api/batches", response_model=list[BatchRead])

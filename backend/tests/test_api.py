@@ -365,6 +365,37 @@ def test_extraction_mock_mode_returns_evidence_and_normalized_values() -> None:
         get_settings.cache_clear()
 
 
+def test_extraction_releases_db_connection_during_vlm_call(monkeypatch) -> None:
+    from app.database import engine
+
+    checked_out_counts: list[int] = []
+
+    def fake_extract(fields, image_paths=None, image_inputs=None):
+        checkedout = getattr(engine.pool, "checkedout", None)
+        checked_out_counts.append(checkedout() if checkedout else 0)
+        return {
+            "invoice_number": {"value": "INV-POOL-001", "page": 1, "evidence": "test", "confidence": 0.9},
+            "total_amount": {"value": "10.00", "page": 1, "evidence": "test", "confidence": 0.9},
+        }
+
+    monkeypatch.setattr("app.extraction.extract_with_vlm", fake_extract)
+
+    with get_client() as client:
+        document = upload_png(client)
+        schema = create_schema(client)
+        response = client.post(
+            "/api/extraction-jobs",
+            json={"document_id": document["document_id"], "schema_id": schema["id"]},
+        )
+        assert response.status_code == 200, response.text
+        job_id = response.json()["job_id"]
+        job = client.get(f"/api/extraction-jobs/{job_id}").json()
+        assert job["status"] == "completed"
+
+    assert checked_out_counts
+    assert max(checked_out_counts) == 0
+
+
 def test_extraction_uses_schema_regions_for_cropped_inputs(monkeypatch) -> None:
     captured_calls: list[dict[str, object]] = []
 
@@ -535,6 +566,43 @@ def test_batch_finalizes_after_mock_jobs() -> None:
             assert payload["completed_at"] is not None
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_batch_high_worker_count_does_not_exhaust_db_pool() -> None:
+    previous_workers = os.environ.get("BATCH_MAX_WORKERS")
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        os.environ["BATCH_MAX_WORKERS"] = "16"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client)
+            response = client.post(
+                "/api/batches",
+                data={"schema_id": schema["id"]},
+                files=[
+                    ("files", (f"batch_{index}.png", ONE_BY_ONE_PNG, "image/png"))
+                    for index in range(20)
+                ],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+
+            loaded = client.get(f"/api/batches/{batch['id']}")
+            assert loaded.status_code == 200, loaded.text
+            payload = loaded.json()
+            assert payload["status"] == "completed"
+            assert payload["completed_count"] == 20
+            assert payload["failed_count"] == 0
+
+            recent = client.get("/api/batches?limit=12")
+            assert recent.status_code == 200, recent.text
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        if previous_workers is None:
+            os.environ.pop("BATCH_MAX_WORKERS", None)
+        else:
+            os.environ["BATCH_MAX_WORKERS"] = previous_workers
         get_settings.cache_clear()
 
 

@@ -1,5 +1,65 @@
 # 오류 기록
 
+## 2026-05-21 - Frontend build 중 중복 type package 자동 포함
+
+### 증상
+
+- `npm run build`의 `tsc --noEmit` 단계가 불안정하게 멈추거나 실패했다.
+- 실패 시 `Cannot find type definition file for 'react 2'`, `node 2`, `babel__core 2` 같은 TypeScript 오류가 표시되었다.
+
+### 영향
+
+- 앱 런타임 기능과 직접 관련된 오류는 아니지만, 검증 단계에서 frontend build가 실패해 배포 가능 상태를 확인할 수 없었다.
+
+### 원인
+
+- iCloud 동기화 경로의 `frontend/node_modules/@types` 아래에 `react 2`, `node 2` 같은 중복 type package 디렉터리가 생겨 있었다.
+- TypeScript가 기본 동작으로 모든 `@types` 패키지를 자동 포함하면서 잘못된 중복 디렉터리까지 type package로 해석했다.
+
+### 수정
+
+- `frontend/tsconfig.json`에 앱에서 필요한 type package만 명시했다.
+- `frontend/tsconfig.node.json`에도 Vite config 검증에 필요한 `node` type만 명시했다.
+- `lucide-react`는 공식 package entrypoint를 유지하고, dependency version을 exact pin으로 고정해 lockfile과 package manifest의 설치 기준을 맞췄다.
+
+### 검증
+
+- `npm run build` 통과
+
+## 2026-05-21 - Batch 실행 중 DB connection pool 고갈
+
+### 증상
+
+- Batch upload 후 `배치 추출 준비 중` 상태에서 frontend에 `Failed to fetch`가 표시되었다.
+- Backend log에 `/api/extraction-jobs/{job_id}`와 `/api/batches?limit=12` 요청이 500을 반환했다.
+- 예외는 `sqlalchemy.exc.TimeoutError: QueuePool limit of size 5 overflow 10 reached`였다.
+
+### 영향
+
+- Batch worker가 많이 돌 때 polling API가 DB connection을 얻지 못해 review UI가 멈춘 것처럼 보였다.
+- Batch 자체가 진행 중이어도 frontend는 최신 상태를 읽지 못해 사용자에게 실패처럼 보였다.
+
+### 원인
+
+- `.env`에 `BATCH_MAX_WORKERS="16"`이 설정되어 있었다.
+- 기존 extraction worker는 document/schema/page 정보를 읽은 뒤 VLM 호출이 끝날 때까지 같은 SQLAlchemy session을 유지했다.
+- FastAPI `BackgroundTasks` 실행 시 endpoint의 request session도 pool slot을 하나 들고 있을 수 있었다.
+- 결과적으로 16개 worker session과 request/polling session이 겹쳐 SQLite QueuePool 한도 15개를 초과할 수 있었다.
+
+### 수정
+
+- Extraction worker를 `prepare -> VLM call -> save` 단계로 분리했다.
+- `prepare` 단계에서 job/document/schema/page 정보를 plain snapshot으로 복사한 뒤 DB session을 닫는다.
+- VLM 호출 중에는 DB connection을 들고 있지 않도록 변경했다.
+- 결과 저장과 실패 저장은 별도 짧은 DB session으로 처리한다.
+- `POST /api/extraction-jobs`, `POST /api/batches`는 response payload를 만든 뒤 request DB session을 닫고 background task를 등록한다.
+
+### 검증
+
+- `.venv/bin/python -m pytest backend/tests/test_api.py -k "extraction_releases_db_connection_during_vlm_call or batch" -vv` 통과
+- `test_extraction_releases_db_connection_during_vlm_call`에서 VLM 호출 시점의 checked-out DB connection 수가 0임을 검증
+- `test_batch_high_worker_count_does_not_exhaust_db_pool`에서 `BATCH_MAX_WORKERS=16`, 20개 파일 batch가 완료되고 `/api/batches` 조회가 200 OK임을 검증
+
 ## 2026-05-20 - 임시 우회 제거 및 개발환경 정식 복구
 
 ### 증상

@@ -1,16 +1,16 @@
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
-from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import Document, DocumentPage, ExtractionJob, ExtractionResult, SchemaVersion
+from app.models import Document, ExtractionJob, ExtractionResult, SchemaVersion
 from app.schemas import FieldDefinition, FieldRegion, SchemaRegion
 from app.validation import validate_extracted_values
 from app.vlm import extract_with_vlm
@@ -19,12 +19,37 @@ from app.vlm import extract_with_vlm
 TERMINAL_JOB_STATUSES = {"completed", "needs_review", "failed", "canceled"}
 
 
+@dataclass(frozen=True)
+class DocumentPageSnapshot:
+    page_number: int
+    image_path: str
+
+
+@dataclass(frozen=True)
+class DocumentSnapshot:
+    id: str
+    storage_path: str
+    pages: list[DocumentPageSnapshot]
+
+
+@dataclass(frozen=True)
+class ExtractionContext:
+    document: DocumentSnapshot
+    schema_id: str
+    schema_version: int
+    fields: list[FieldDefinition]
+    regions: list[SchemaRegion]
+
+
 def run_extraction_job(job_id: str) -> None:
-    db = SessionLocal()
     try:
-        _run_extraction_job(db, job_id)
-    finally:
-        db.close()
+        context = _prepare_extraction_job(job_id)
+        if not context:
+            return
+        raw_values = _extract_grouped_values(context.document, context.fields, context.regions, job_id)
+        _save_extraction_result(job_id, context, raw_values)
+    except Exception as exc:
+        _mark_job_failed(job_id, str(exc))
 
 
 def run_batch_jobs(batch_id: str, job_ids: list[str]) -> None:
@@ -55,18 +80,18 @@ def run_batch_jobs(batch_id: str, job_ids: list[str]) -> None:
         _finalize_batch(batch_id)
 
 
-def _run_extraction_job(db: Session, job_id: str) -> None:
-    job = db.get(ExtractionJob, job_id)
-    if not job:
-        return
-    if job.status == "canceled":
-        return
-
-    job.status = "running"
-    job.started_at = datetime.utcnow()
-    db.commit()
-
+def _prepare_extraction_job(job_id: str) -> ExtractionContext | None:
+    db = SessionLocal()
     try:
+        job = db.get(ExtractionJob, job_id)
+        if not job:
+            return None
+        if job.status == "canceled":
+            return None
+
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        db.commit()
         document = db.get(Document, job.document_id)
         schema_version = (
             db.query(SchemaVersion)
@@ -82,9 +107,27 @@ def _run_extraction_job(db: Session, job_id: str) -> None:
         schema_data = json.loads(schema_version.schema_json)
         fields = [FieldDefinition(**field) for field in schema_data["fields"]]
         regions = [SchemaRegion(**region) for region in schema_data.get("regions", [])]
+        pages = [
+            DocumentPageSnapshot(page_number=page.page_number, image_path=page.image_path)
+            for page in sorted(document.pages, key=lambda item: item.page_number)
+        ]
+        return ExtractionContext(
+            document=DocumentSnapshot(id=document.id, storage_path=document.storage_path, pages=pages),
+            schema_id=job.schema_id,
+            schema_version=job.schema_version,
+            fields=fields,
+            regions=regions,
+        )
+    finally:
+        db.close()
 
-        raw_values = _extract_grouped_values(document, fields, regions, job.id)
-        db.refresh(job)
+
+def _save_extraction_result(job_id: str, context: ExtractionContext, raw_values: dict[str, Any]) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(ExtractionJob, job_id)
+        if not job:
+            return
         if job.status == "canceled":
             log_audit_event(
                 db,
@@ -97,11 +140,11 @@ def _run_extraction_job(db: Session, job_id: str) -> None:
             db.commit()
             return
 
-        values, warnings = validate_extracted_values(raw_values, fields)
+        values, warnings = validate_extracted_values(raw_values, context.fields)
         validated_output = {
-            "document_id": document.id,
-            "schema_id": job.schema_id,
-            "schema_version": job.schema_version,
+            "document_id": context.document.id,
+            "schema_id": context.schema_id,
+            "schema_version": context.schema_version,
             "status": "needs_review" if warnings else "completed",
             "values": values,
         }
@@ -127,22 +170,8 @@ def _run_extraction_job(db: Session, job_id: str) -> None:
             metadata={"result_id": result.id, "warning_count": len(warnings)},
         )
         db.commit()
-    except Exception as exc:
-        db.refresh(job)
-        if job.status == "canceled":
-            return
-        job.status = "failed"
-        job.error_message = str(exc)
-        job.completed_at = datetime.utcnow()
-        log_audit_event(
-            db,
-            entity_type="extraction_job",
-            entity_id=job.id,
-            action="failed",
-            message=str(exc),
-            metadata={"document_id": job.document_id, "schema_id": job.schema_id},
-        )
-        db.commit()
+    finally:
+        db.close()
 
 
 def _mark_job_failed(job_id: str, message: str) -> None:
@@ -223,7 +252,7 @@ def _finalize_batch(batch_id: str) -> None:
 
 
 def _extract_grouped_values(
-    document: Document,
+    document: DocumentSnapshot,
     fields: list[FieldDefinition],
     regions: list[SchemaRegion],
     job_id: str,
@@ -238,7 +267,7 @@ def _extract_grouped_values(
 
 
 def _build_extraction_requests(
-    document: Document,
+    document: DocumentSnapshot,
     fields: list[FieldDefinition],
     regions: list[SchemaRegion],
     job_id: str,
@@ -351,7 +380,7 @@ def _group_region_refs(field_region_refs: dict[str, dict[str, Any]]) -> list[dic
     return list(grouped.values())
 
 
-def _crop_region_image(page: DocumentPage, region: FieldRegion, output_path: Path) -> Path:
+def _crop_region_image(page: DocumentPageSnapshot, region: FieldRegion, output_path: Path) -> Path:
     source_path = Path(page.image_path)
     with Image.open(source_path) as source:
         image = source.convert("RGB")
@@ -376,7 +405,7 @@ def _crop_region_image(page: DocumentPage, region: FieldRegion, output_path: Pat
     return output_path
 
 
-def _mask_region_image(page: DocumentPage, region: FieldRegion, output_path: Path) -> Path:
+def _mask_region_image(page: DocumentPageSnapshot, region: FieldRegion, output_path: Path) -> Path:
     source_path = Path(page.image_path)
     with Image.open(source_path) as source:
         image = source.convert("RGB")

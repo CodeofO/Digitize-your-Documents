@@ -154,6 +154,7 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 - 하나의 region은 여러 field의 primary source가 될 수 있다.
 - `region_id`가 없는 field는 기존처럼 full page image를 사용한다.
 - VLM 호출은 group 단위로 수행한다. `region_id`가 없는 field들은 full-page group 1회로 추출하고, `region_id`가 있는 field들은 사용 중인 region별 group으로 나눠 추출한다.
+- Extraction worker는 DB session을 VLM 호출 중 유지하지 않는다. Job/document/schema/page 정보는 호출 전에 snapshot으로 복사하고, 결과 저장과 실패 저장은 짧은 별도 session에서 처리한다.
 - 호출 수는 `full-page field가 있으면 1회 + 사용 중인 region 수`이다.
 - 각 group 호출의 structured output schema는 해당 group field만 포함한다.
 - VLM 응답이 stringified JSON이면 실패 처리한다.
