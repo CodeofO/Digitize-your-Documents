@@ -1,5 +1,45 @@
 # 오류 기록
 
+## 2026-05-20 - 임시 우회 제거 및 개발환경 정식 복구
+
+### 증상
+
+- 이전 frontend 복구 과정에서 Vite React plugin과 HMR을 끈 상태가 남아 있었다.
+- `.venv`에는 PyMuPDF/bleach package file이 불완전하게 설치되어 전체 backend test가 실패할 수 있었다.
+- `run_dev.sh`는 frontend `node_modules`가 존재하기만 하면 불완전 설치를 감지하지 못했다.
+
+### 영향
+
+- React Fast Refresh/HMR 없는 개발환경은 실제 Vite React 개발환경과 달라져 이후 검증 신뢰도가 낮아질 수 있었다.
+- raw extraction/PDF 관련 테스트와 기능이 local dependency 상태에 따라 실패할 수 있었다.
+- 일부 패키지 파일이 빠진 `node_modules`가 남아도 dev server가 늦게 실패할 수 있었다.
+
+### 원인
+
+- 깨진 `node_modules`를 먼저 복구하지 않은 상태에서 Vite/lucide 문제를 코드 우회로 처리했다.
+- 최신 PyMuPDF 설치본은 `pymupdf` import가 정상 경로인데, 코드와 테스트는 `fitz` import에만 의존했다.
+- `.venv`의 `bleach` package에 `html5lib_shim.py` 같은 실제 source file이 빠져 있었다.
+
+### 수정
+
+- `npm ci`로 frontend dependencies를 lockfile 기준으로 재설치했다.
+- `frontend/vite.config.ts`에 `@vitejs/plugin-react`와 기본 HMR을 복구했다.
+- `backend/app`과 backend test에서 `pymupdf` 우선 import, `fitz` fallback으로 바꿨다.
+- `uv pip install --reinstall pymupdf bleach`로 깨진 `.venv` package file을 복구했다.
+- `run_dev.sh`에 backend 핵심 dependency check와 frontend package file completeness check를 추가했다.
+- README와 개발정의서에 `npm ci`, PyMuPDF import 기준, 실행 전 의존성 점검 내용을 반영했다.
+
+### 검증
+
+- `.venv/bin/python -m pytest backend` 통과, 25개 테스트 기준
+- `npm run build` 통과
+- `./scripts/run_dev.sh`로 backend/frontend 동시 기동 확인
+- `curl -I http://127.0.0.1:5173/` 200 OK
+- `curl -I http://127.0.0.1:5173/src/App.tsx` 200 OK
+- `curl -s http://127.0.0.1:8000/api/health` `{"status":"ok"}`
+- Playwright screenshot 생성 성공: `/tmp/kie-dev-check-no-workaround.png`
+- 검증 후 `8000`, `5173` listen process 없음
+
 ## 2026-05-20 - Vite/lucide frontend startup failure
 
 ### 증상
@@ -16,22 +56,21 @@
 
 ### 원인
 
-- 현재 설치된 `@vitejs/plugin-react@5.2.0`과 transitive dependency `@rolldown/pluginutils@1.0.0-rc.3` 조합이 Vite config 로딩 과정에서 ESM export mismatch를 일으켰다.
 - `frontend/node_modules`의 `lucide-react` package가 일부 `.js` file 없이 `.map` file만 남은 불완전한 상태였다.
-- KIE frontend는 HMR을 꺼둔 상태라 React plugin의 fast-refresh 기능에 의존하지 않는다.
+- 불완전한 `node_modules` 때문에 `@vitejs/plugin-react`와 transitive dependency import도 정상 검증되지 않았다.
 - 기존 cleanup은 background parent process만 종료할 수 있어 Uvicorn reload child가 남을 여지가 있었다.
 
 ### 수정
 
 - `npm ci`로 frontend dependencies를 깨끗하게 재설치했다.
-- `frontend/vite.config.ts`에서 `@vitejs/plugin-react` import와 plugin 등록을 제거했다.
+- 임시로 제거했던 `@vitejs/plugin-react`와 HMR은 후속 정리에서 복구했다.
 - lucide icon import를 package 내부 file path 대신 공식 `lucide-react` entrypoint named import로 변경했다.
 - 더 이상 필요 없는 direct icon module declaration file을 제거했다.
 - `scripts/run_dev.sh` cleanup을 process tree 종료 방식으로 보강했다.
 
 ### 검증
 
-- `node -e "import('@vitejs/plugin-react')..."`로 dependency mismatch 재현
+- `node -e "import('@vitejs/plugin-react')..."` 통과
 - `npm ci` 이후 `node -e "import('lucide-react')..."` 통과
 - `npm run build` 통과
 - `./scripts/run_dev.sh`로 backend/frontend 동시 기동 확인
@@ -96,7 +135,7 @@
 
 - `.venv/bin/python -m pytest backend/tests/test_api.py -k batch_export_csv_and_json_mock_mode -vv` 통과
 - `.venv/bin/python -m pytest backend/tests/test_api.py -k extraction_mock_mode_returns_evidence_and_normalized_values -vv` 통과
-- `.venv/bin/python -m pytest backend`는 로컬 `.venv`의 `fitz`/`bleach` 의존성 문제로 실패
+- 후속 조치로 `.venv`의 PyMuPDF/bleach를 재설치하고 `pymupdf` 우선 import로 변경해 `.venv/bin/python -m pytest backend` 통과 상태로 복구했다.
 
 ## 2026-05-20 - `.venv` 감시로 인한 backend reload loop 및 Batch 중단 부재
 
@@ -188,7 +227,7 @@
 
 - 기존 로컬 SQLite data는 유지되어야 한다.
 - 운영 migration tooling은 현재 MVP 범위에서 제외한다.
-- Dev HMR은 이전 Vite blank screen 수정 이후 안정성을 위해 비활성 상태를 유지한다.
+- Dev HMR은 후속 정리에서 `@vitejs/plugin-react`와 함께 복구했다.
 
 ## 2026-05-19 - Frontend dev server blank screen
 
@@ -213,7 +252,8 @@
 
 - `frontend/src/App.tsx`의 lucide import를 root barrel import에서 icon별 direct module import로 변경했다.
 - TypeScript가 direct lucide icon module import를 허용하도록 `frontend/src/lucide-icons.d.ts`를 추가했다.
-- MVP 검증 중 React Refresh/Babel 정지 경로를 피하기 위해 `frontend/vite.config.ts`에서 Vite dev HMR을 비활성화했다.
+- MVP 검증 중 React Refresh/Babel 정지 경로를 피하기 위해 당시에는 `frontend/vite.config.ts`에서 Vite dev HMR을 비활성화했다.
+- 후속 정리에서 `npm ci`로 깨진 dependency를 복구한 뒤 React plugin과 HMR을 다시 켰다.
 
 ### 검증
 
@@ -241,5 +281,4 @@ VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev -- --host 127.0.0.1 --port 5
 
 ### 메모
 
-- Dev HMR은 현재 안정성을 위해 꺼져 있다.
-- Hot reload가 필요하면 먼저 최신 Vite/plugin-react/lucide 조합으로 재검증한 뒤 `server.hmr`을 다시 켠다.
+- Dev HMR은 후속 정리에서 복구했다.

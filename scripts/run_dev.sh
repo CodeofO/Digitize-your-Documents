@@ -15,9 +15,31 @@ if [[ ! -x "${ROOT_DIR}/.venv/bin/python" ]]; then
   exit 1
 fi
 
+if ! "${ROOT_DIR}/.venv/bin/python" - <<'PY' >/dev/null 2>&1
+import bleach
+import pymupdf
+PY
+then
+  echo "Backend dependencies look incomplete. Refresh the uv environment:"
+  echo "  uv pip install -e 'backend[dev]'"
+  echo "  uv pip install --reinstall pymupdf bleach"
+  exit 1
+fi
+
+install_frontend_dependencies() {
+  if [[ -f "${ROOT_DIR}/frontend/package-lock.json" ]]; then
+    (cd "${ROOT_DIR}/frontend" && npm ci)
+  else
+    (cd "${ROOT_DIR}/frontend" && npm install)
+  fi
+}
+
 if [[ ! -d "${ROOT_DIR}/frontend/node_modules" ]]; then
   echo "Installing frontend dependencies..."
-  (cd "${ROOT_DIR}/frontend" && npm install)
+  install_frontend_dependencies
+elif [[ ! -f "${ROOT_DIR}/frontend/node_modules/lucide-react/dist/esm/icons/chevron-down.js" ]]; then
+  echo "Frontend dependencies look incomplete. Reinstalling from lockfile..."
+  install_frontend_dependencies
 fi
 
 require_free_port() {

@@ -2,7 +2,10 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
-import fitz
+try:
+    import pymupdf as fitz
+except ImportError:  # pragma: no cover - compatibility for older PyMuPDF installs
+    import fitz
 from fastapi import UploadFile
 from PIL import Image, ImageOps, UnidentifiedImageError
 

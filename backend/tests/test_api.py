@@ -3,7 +3,10 @@ import io
 import os
 import zipfile
 
-import fitz
+try:
+    import pymupdf as fitz
+except ImportError:  # pragma: no cover - compatibility for older PyMuPDF installs
+    import fitz
 from PIL import Image
 
 from app.config import get_settings

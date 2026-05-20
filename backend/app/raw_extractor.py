@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import fitz
+try:
+    import pymupdf as fitz
+except ImportError:  # pragma: no cover - compatibility for older PyMuPDF installs
+    import fitz
 from fastapi import UploadFile
 
 from app.config import get_settings

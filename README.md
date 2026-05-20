@@ -60,7 +60,7 @@ Frontend 의존성을 설치합니다.
 
 ```bash
 cd frontend
-npm install
+npm ci
 cd ..
 ```
 
@@ -78,6 +78,7 @@ Backend와 frontend를 한 번에 실행합니다.
 | Frontend | `http://127.0.0.1:5173` | Vite dev server |
 
 `scripts/run_dev.sh`의 backend reload 감시 범위는 `.venv`, local DB, storage output 변경으로 extraction 작업이 재시작되지 않도록 `backend/app`으로 제한합니다.
+`run_dev.sh`는 실행 전에 backend 핵심 의존성(`pymupdf`, `bleach`)과 frontend 핵심 패키지 파일을 점검합니다. `node_modules`가 없거나 불완전하면 lockfile 기준 `npm ci`로 복구합니다.
 
 ## 설정
 

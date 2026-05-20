@@ -213,6 +213,14 @@ uv pip install -e 'backend[dev]'
 ```
 
 `backend/pyproject.toml`이 바뀌면 같은 설치 명령으로 `.venv`를 업데이트한다.
+PyMuPDF는 `pymupdf` import를 우선 사용하고, 구버전 호환을 위해 `fitz` fallback을 둔다.
+
+Frontend 의존성은 lockfile 기준으로 재현 가능하게 설치한다.
+
+```bash
+cd frontend
+npm ci
+```
 
 VLM 환경변수는 Home 화면의 Save를 통해 root `.env`에 자동 저장한다.
 
