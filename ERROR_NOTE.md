@@ -1,5 +1,35 @@
 # 오류 기록
 
+## 2026-05-20 - Excel CSV 한글 깨짐 및 로컬 의존성 검증 이슈
+
+### 증상
+
+- CSV export 파일을 Excel에서 바로 열면 한글 column/value가 깨져 보일 수 있었다.
+- `.venv/bin/python -m pytest backend` 전체 실행 시 PDF/raw extraction 관련 테스트가 실패했다.
+
+### 영향
+
+- CSV export 자체는 UTF-8 문자열로 생성되지만, Excel이 BOM 없는 CSV를 시스템 기본 인코딩으로 해석하면 한글이 깨진다.
+- 전체 backend 회귀 테스트는 현재 로컬 `.venv` 의존성 상태 때문에 완료되지 않는다.
+
+### 원인
+
+- CSV 응답에 UTF-8 BOM이 없고 `Content-Type`이 `text/csv`만 내려가 Excel 자동 감지가 불안정했다.
+- 현재 `.venv`의 `fitz` module이 PyMuPDF API(`fitz.open`)를 제공하지 않는 package로 잡혀 있다.
+- 현재 `.venv`에서 `bleach` import가 `html5lib_shim` circular import 오류로 실패한다.
+
+### 수정
+
+- 단일 extraction result CSV와 batch CSV export에 UTF-8 BOM을 붙였다.
+- CSV 응답 `Content-Type`을 `text/csv; charset=utf-8`로 명시했다.
+- CSV export 테스트에 BOM byte와 charset header 검증을 추가했다.
+
+### 검증
+
+- `.venv/bin/python -m pytest backend/tests/test_api.py -k batch_export_csv_and_json_mock_mode -vv` 통과
+- `.venv/bin/python -m pytest backend/tests/test_api.py -k extraction_mock_mode_returns_evidence_and_normalized_values -vv` 통과
+- `.venv/bin/python -m pytest backend`는 로컬 `.venv`의 `fitz`/`bleach` 의존성 문제로 실패
+
 ## 2026-05-20 - `.venv` 감시로 인한 backend reload loop 및 Batch 중단 부재
 
 ### 증상

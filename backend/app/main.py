@@ -598,11 +598,7 @@ def export_extraction_result(
                 "warnings": ";".join(value.get("warnings", [])),
             }
         )
-    return Response(
-        content=output.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{result_id}.csv"'},
-    )
+    return _csv_download_response(output.getvalue(), f"{result_id}.csv")
 
 
 @app.post("/api/export-presets", response_model=ExportPresetRead)
@@ -869,11 +865,7 @@ def export_batch(
     for row in rows:
         writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
 
-    return Response(
-        content=output.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{batch.id}.csv"'},
-    )
+    return _csv_download_response(output.getvalue(), f"{batch.id}.csv")
 
 
 @app.get("/api/archive/search", response_model=list[ArchiveSearchResult])
@@ -1171,6 +1163,14 @@ def _csv_cell(value: Any) -> Any:
     if isinstance(value, dict):
         return json.dumps(value, ensure_ascii=False)
     return value
+
+
+def _csv_download_response(content: str, filename: str) -> Response:
+    return Response(
+        content=f"\ufeff{content}",
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _export_preset_read(preset: ExportPreset) -> ExportPresetRead:

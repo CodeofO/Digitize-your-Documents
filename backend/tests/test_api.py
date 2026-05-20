@@ -345,6 +345,8 @@ def test_extraction_mock_mode_returns_evidence_and_normalized_values() -> None:
 
             csv_export = client.get(f"/api/extraction-results/{job['result_id']}/export?format=csv")
             assert csv_export.status_code == 200
+            assert csv_export.content.startswith(b"\xef\xbb\xbf")
+            assert "charset=utf-8" in csv_export.headers["content-type"]
             assert "evidence" in csv_export.text.splitlines()[0]
 
             corrected_output = job["result"]["validated_output"]
@@ -486,6 +488,8 @@ def test_batch_export_csv_and_json_mock_mode() -> None:
 
             csv_response = client.get(f"/api/batches/{batch['id']}/export?format=csv")
             assert csv_response.status_code == 200, csv_response.text
+            assert csv_response.content.startswith(b"\xef\xbb\xbf")
+            assert "charset=utf-8" in csv_response.headers["content-type"]
             csv_text = csv_response.text
             assert "filename,document_id,job_id,status,error_message,invoice_number,total_amount,warnings" in csv_text.splitlines()[0]
             assert "first.png" in csv_text
