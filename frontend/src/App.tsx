@@ -27,8 +27,8 @@ import UploadCloud from "lucide-react/dist/esm/icons/upload-cloud.js";
 import X from "lucide-react/dist/esm/icons/x.js";
 import ZoomIn from "lucide-react/dist/esm/icons/zoom-in.js";
 import ZoomOut from "lucide-react/dist/esm/icons/zoom-out.js";
-import { ChangeEvent, DragEvent, PointerEvent, memo, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { ChangeEvent, DragEvent, PointerEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, ReactNode, UIEvent } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const WORKSPACE_STATE_KEY = "digitize_workspace_state_v1";
@@ -36,6 +36,8 @@ const LEFT_PANE_PERCENT_KEY = "digitize_left_pane_percent_v1";
 const OUTPUT_FORMATS = ["string", "float", "date", "bool"] as const;
 const KIE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const KIE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
+const BATCH_FILE_ROW_HEIGHT = 84;
+const BATCH_FILE_OVERSCAN = 8;
 const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
   {
     key_name: "document_number",
@@ -410,18 +412,78 @@ function savePersistedLeftPanePercent(percent: number) {
   }
 }
 
-function useObjectUrls(files: File[]) {
-  const [urls, setUrls] = useState<string[]>([]);
+function useObjectUrl(file: File | null) {
+  const [url, setUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    const nextUrls = files.map((file) => URL.createObjectURL(file));
-    setUrls(nextUrls);
-    return () => {
-      nextUrls.forEach((url) => URL.revokeObjectURL(url));
-    };
-  }, [files]);
+    if (!file) {
+      setUrl(null);
+      return;
+    }
+    const nextUrl = URL.createObjectURL(file);
+    setUrl(nextUrl);
+    return () => URL.revokeObjectURL(nextUrl);
+  }, [file]);
 
-  return urls;
+  return url;
+}
+
+function useVirtualFileList(count: number, activeIndex: number) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(480);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+
+    const updateHeight = () => setViewportHeight(element.clientHeight || 480);
+    updateHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateHeight);
+      return () => window.removeEventListener("resize", updateHeight);
+    }
+
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element || activeIndex < 0 || count <= 0) return;
+
+    const rowTop = activeIndex * BATCH_FILE_ROW_HEIGHT;
+    const rowBottom = rowTop + BATCH_FILE_ROW_HEIGHT;
+    const viewTop = element.scrollTop;
+    const viewBottom = viewTop + element.clientHeight;
+    if (rowTop < viewTop) {
+      element.scrollTop = Math.max(0, rowTop - BATCH_FILE_ROW_HEIGHT * 2);
+      setScrollTop(element.scrollTop);
+    } else if (rowBottom > viewBottom) {
+      element.scrollTop = Math.max(0, rowBottom - element.clientHeight + BATCH_FILE_ROW_HEIGHT * 2);
+      setScrollTop(element.scrollTop);
+    }
+  }, [activeIndex, count]);
+
+  const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    setScrollTop(event.currentTarget.scrollTop);
+  }, []);
+
+  const start = Math.max(0, Math.floor(scrollTop / BATCH_FILE_ROW_HEIGHT) - BATCH_FILE_OVERSCAN);
+  const visibleCount = Math.ceil(viewportHeight / BATCH_FILE_ROW_HEIGHT) + BATCH_FILE_OVERSCAN * 2;
+  const end = Math.min(count, start + visibleCount);
+  const spacerStyle = useMemo<CSSProperties>(
+    () => ({ height: Math.max(1, count) * BATCH_FILE_ROW_HEIGHT }),
+    [count]
+  );
+  const windowStyle = useMemo<CSSProperties>(
+    () => ({ transform: `translateY(${start * BATCH_FILE_ROW_HEIGHT}px)` }),
+    [start]
+  );
+
+  return { containerRef, onScroll, start, end, spacerStyle, windowStyle };
 }
 
 async function filesFromDataTransfer(dataTransfer: DataTransfer) {
@@ -538,6 +600,7 @@ export default function App() {
   const schemaCacheRef = useRef<Map<string, SavedSchema>>(new Map());
   const jobCacheRef = useRef<Map<string, ExtractionJob>>(new Map());
   const loadJobRequestRef = useRef(0);
+  const loadJobAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     void bootstrapWorkspace();
@@ -619,9 +682,8 @@ export default function App() {
 
   const rawPdfUrl = useMemo(() => (rawExtraction?.pdf_url ? `${API_BASE}${rawExtraction.pdf_url}` : null), [rawExtraction]);
   const rawHtmlUrl = useMemo(() => (rawExtraction?.html_url ? `${API_BASE}${rawExtraction.html_url}` : null), [rawExtraction]);
-  const batchFileUrls = useObjectUrls(batchFiles);
   const selectedDraftFile = batchFiles[draftBatchIndex] ?? batchFiles[0] ?? null;
-  const selectedDraftUrl = batchFileUrls[draftBatchIndex] ?? batchFileUrls[0] ?? null;
+  const selectedDraftUrl = useObjectUrl(selectedDraftFile && isImageFile(selectedDraftFile) ? selectedDraftFile : null);
   const draftRegionTarget = useMemo<RegionEditorTarget | null>(() => {
     if (!selectedDraftFile || !selectedDraftUrl || !isImageFile(selectedDraftFile)) return null;
     return {
@@ -1154,20 +1216,43 @@ export default function App() {
     }
   }
 
-  async function getCachedDocument(documentId: string) {
+  async function getCachedDocument(documentId: string, options: { signal?: AbortSignal } = {}) {
     const cached = documentCacheRef.current.get(documentId);
     if (cached) return cached;
-    const loaded = await api<UploadedDocument>(`/api/documents/${documentId}`);
+    const loaded = await api<UploadedDocument>(`/api/documents/${documentId}`, { signal: options.signal });
     documentCacheRef.current.set(documentId, loaded);
     return loaded;
   }
 
-  async function getCachedSchema(schemaId: string, options: { force?: boolean } = {}) {
+  async function getCachedSchema(schemaId: string, options: { force?: boolean; signal?: AbortSignal } = {}) {
     const cached = schemaCacheRef.current.get(schemaId);
     if (cached && !options.force) return cached;
-    const loaded = await api<SavedSchema>(`/api/schemas/${schemaId}`);
+    const loaded = await api<SavedSchema>(`/api/schemas/${schemaId}`, { signal: options.signal });
     schemaCacheRef.current.set(schemaId, loaded);
     return loaded;
+  }
+
+  function applyLoadedJob(
+    loadedJob: ExtractionJob,
+    loadedDocument: UploadedDocument,
+    loadedSchema: SavedSchema,
+    options: { forceReviewStep?: boolean } = {}
+  ) {
+    applyDocument(loadedDocument, { clearExtractionState: false });
+    if (!schema || schema.id !== loadedSchema.id || schema.current_version !== loadedSchema.current_version) {
+      applySchema(loadedSchema);
+    }
+    setJob(loadedJob);
+    if (loadedJob.result) {
+      setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
+      setReviewedFields(loadedJob.result.reviewed_fields ?? []);
+      setEditedKeys([]);
+      setReviewFilter("all");
+      setStep("review");
+      void loadAuditEvents("extraction_result", loadedJob.result.id);
+    } else {
+      setStep(options.forceReviewStep ? "review" : "schema");
+    }
   }
 
   async function loadJob(
@@ -1175,6 +1260,9 @@ export default function App() {
     options: { preserveBatch?: boolean; forceReviewStep?: boolean; silent?: boolean } = {}
   ) {
     const requestId = ++loadJobRequestRef.current;
+    loadJobAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadJobAbortRef.current = controller;
     if (!options.silent) setBusy("추출 결과 로드 중");
     setError(null);
     try {
@@ -1182,32 +1270,28 @@ export default function App() {
         setActiveBatchId(null);
         setActiveBatchItemId(null);
       }
-      const loadedJob = await api<ExtractionJob>(`/api/extraction-jobs/${jobId}`);
+
+      const cachedJob = jobCacheRef.current.get(jobId);
+      const cachedDocument = cachedJob ? documentCacheRef.current.get(cachedJob.document_id) : null;
+      const cachedSchema = cachedJob ? schemaCacheRef.current.get(cachedJob.schema_id) : null;
+      if (cachedJob && cachedDocument && cachedSchema) {
+        applyLoadedJob(cachedJob, cachedDocument, cachedSchema, { forceReviewStep: options.forceReviewStep });
+      }
+
+      const loadedJob = await api<ExtractionJob>(`/api/extraction-jobs/${jobId}`, { signal: controller.signal });
       jobCacheRef.current.set(jobId, loadedJob);
       const [loadedDocument, loadedSchema] = await Promise.all([
-        getCachedDocument(loadedJob.document_id),
-        getCachedSchema(loadedJob.schema_id)
+        getCachedDocument(loadedJob.document_id, { signal: controller.signal }),
+        getCachedSchema(loadedJob.schema_id, { signal: controller.signal })
       ]);
-      if (requestId !== loadJobRequestRef.current) return;
-      applyDocument(loadedDocument, { clearExtractionState: false });
-      if (!schema || schema.id !== loadedSchema.id || schema.current_version !== loadedSchema.current_version) {
-        applySchema(loadedSchema);
-      }
-      setJob(loadedJob);
-      if (loadedJob.result) {
-        setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
-        setReviewedFields(loadedJob.result.reviewed_fields ?? []);
-        setEditedKeys([]);
-        setReviewFilter("all");
-        setStep("review");
-        void loadAuditEvents("extraction_result", loadedJob.result.id);
-      } else {
-        setStep(options.forceReviewStep ? "review" : "schema");
-      }
+      if (requestId !== loadJobRequestRef.current || controller.signal.aborted) return;
+      applyLoadedJob(loadedJob, loadedDocument, loadedSchema, { forceReviewStep: options.forceReviewStep });
     } catch (err) {
+      if (isAbortError(err)) return;
       setError(toFriendlyError(err));
     } finally {
-      if (!options.silent) setBusy(null);
+      if (loadJobAbortRef.current === controller) loadJobAbortRef.current = null;
+      if (!options.silent && requestId === loadJobRequestRef.current) setBusy(null);
     }
   }
 
@@ -1692,7 +1776,7 @@ export default function App() {
               schemas={batchSchemaOptions}
               selectedSchemaId={batchSchemaId}
               selectedFiles={batchFiles}
-              selectedFileUrls={batchFileUrls}
+              selectedFileUrl={selectedDraftUrl}
               selectedFileIndex={draftBatchIndex}
               regions={regions}
               showRegions={regionsVisible}
@@ -2178,7 +2262,7 @@ function KieUploadPanel(props: {
   schemas: SavedSchema[];
   selectedSchemaId: string;
   selectedFiles: File[];
-  selectedFileUrls: string[];
+  selectedFileUrl: string | null;
   selectedFileIndex: number;
   regions: SchemaRegion[];
   showRegions: boolean;
@@ -2197,7 +2281,7 @@ function KieUploadPanel(props: {
   onSaveCurrentSchema: () => void;
 }) {
   const selectedFile = props.selectedFiles[props.selectedFileIndex] ?? props.selectedFiles[0] ?? null;
-  const selectedUrl = props.selectedFileUrls[props.selectedFileIndex] ?? props.selectedFileUrls[0] ?? null;
+  const selectedUrl = props.selectedFileUrl;
   const [regionsOpen, setRegionsOpen] = useState(false);
 
   async function onUnifiedDrop(event: DragEvent<HTMLElement>) {
@@ -2318,28 +2402,11 @@ function KieUploadPanel(props: {
                 <strong>{props.selectedFileIndex + 1} / {props.selectedFiles.length}</strong>
               </div>
             </div>
-            <div className="batch-file-list">
-              {props.selectedFiles.map((file, index) => {
-                const isImage = isImageFile(file);
-                return (
-                  <button
-                    type="button"
-                    key={`${fileDisplayName(file)}_${file.size}_${index}`}
-                    className={`batch-file-item ${index === props.selectedFileIndex ? "active" : ""}`}
-                    onClick={() => props.onSelectFile(index)}
-                  >
-                    <span className="batch-file-thumb">
-                      {isImage ? <img src={props.selectedFileUrls[index]} alt="" /> : <FileUp size={18} />}
-                      <em>{index + 1}</em>
-                    </span>
-                    <span className="batch-file-main">
-                      <strong>{fileDisplayName(file)}</strong>
-                      <em>{formatFileSize(file.size)}</em>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+            <VirtualDraftFileList
+              files={props.selectedFiles}
+              selectedIndex={props.selectedFileIndex}
+              onSelectFile={props.onSelectFile}
+            />
           </aside>
 
           <section className="draft-preview-pane">
@@ -2446,20 +2513,102 @@ function BatchFileRail(props: {
           </button>
         )}
       </div>
-      <div className="batch-file-list">
-        {props.batch.items.map((item, index) => (
-          <BatchFileButton
-            key={item.id}
-            item={item}
-            index={index}
-            active={item.id === props.activeItemId}
-            onOpenItem={props.onOpenItem}
-          />
-        ))}
-      </div>
+      <VirtualBatchFileList items={props.batch.items} activeItemId={props.activeItemId} onOpenItem={props.onOpenItem} />
     </aside>
   );
 }
+
+function VirtualBatchFileList(props: {
+  items: BatchItem[];
+  activeItemId: string | null;
+  onOpenItem: (itemId: string) => void;
+}) {
+  const activeIndex = props.items.findIndex((item) => item.id === props.activeItemId);
+  const virtual = useVirtualFileList(props.items.length, activeIndex);
+  const visibleItems = props.items.slice(virtual.start, virtual.end);
+
+  return (
+    <div className="batch-file-list virtual-file-list" ref={virtual.containerRef} onScroll={virtual.onScroll}>
+      <div className="virtual-list-spacer" style={virtual.spacerStyle}>
+        <div className="virtual-list-window" style={virtual.windowStyle}>
+          {visibleItems.map((item, offset) => {
+            const index = virtual.start + offset;
+            return (
+              <BatchFileButton
+                key={item.id}
+                item={item}
+                index={index}
+                active={item.id === props.activeItemId}
+                onOpenItem={props.onOpenItem}
+              />
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VirtualDraftFileList(props: {
+  files: File[];
+  selectedIndex: number;
+  onSelectFile: (index: number) => void;
+}) {
+  const virtual = useVirtualFileList(props.files.length, props.selectedIndex);
+  const visibleFiles = props.files.slice(virtual.start, virtual.end);
+
+  return (
+    <div className="batch-file-list virtual-file-list" ref={virtual.containerRef} onScroll={virtual.onScroll}>
+      <div className="virtual-list-spacer" style={virtual.spacerStyle}>
+        <div className="virtual-list-window" style={virtual.windowStyle}>
+          {visibleFiles.map((file, offset) => {
+            const index = virtual.start + offset;
+            return (
+              <DraftBatchFileButton
+                key={`${fileDisplayName(file)}_${file.size}_${index}`}
+                file={file}
+                index={index}
+                active={index === props.selectedIndex}
+                onSelectFile={props.onSelectFile}
+              />
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const DraftBatchFileButton = memo(
+  function DraftBatchFileButton(props: {
+    file: File;
+    index: number;
+    active: boolean;
+    onSelectFile: (index: number) => void;
+  }) {
+    const thumbnailUrl = useObjectUrl(isImageFile(props.file) ? props.file : null);
+    return (
+      <button
+        type="button"
+        className={`batch-file-item ${props.active ? "active" : ""}`}
+        onClick={() => props.onSelectFile(props.index)}
+      >
+        <span className="batch-file-thumb">
+          {thumbnailUrl ? <img src={thumbnailUrl} alt="" loading="lazy" decoding="async" /> : <FileUp size={18} />}
+          <em>{props.index + 1}</em>
+        </span>
+        <span className="batch-file-main">
+          <strong>{fileDisplayName(props.file)}</strong>
+          <em>{formatFileSize(props.file.size)}</em>
+        </span>
+      </button>
+    );
+  },
+  (previous, next) =>
+    previous.active === next.active &&
+    previous.index === next.index &&
+    previous.file === next.file
+);
 
 const BatchFileButton = memo(
   function BatchFileButton(props: {
@@ -4059,6 +4208,10 @@ function toFriendlyError(error: unknown): string {
     return "Unsupported VLM_PROVIDER. Use openai for real extraction or mock for local demo mode.";
   }
   return message;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function formatDate(value: string) {

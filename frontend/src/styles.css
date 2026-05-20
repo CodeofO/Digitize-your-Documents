@@ -661,6 +661,25 @@ textarea {
   padding-right: 4px;
 }
 
+.batch-file-list.virtual-file-list {
+  display: block;
+  position: relative;
+}
+
+.virtual-list-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.virtual-list-window {
+  display: grid;
+  gap: 6px;
+  left: 0;
+  position: absolute;
+  right: 4px;
+  top: 0;
+}
+
 .batch-file-item {
   align-items: center;
   background: #ffffff;
