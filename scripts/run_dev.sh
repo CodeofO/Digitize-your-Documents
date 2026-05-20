@@ -20,6 +20,29 @@ if [[ ! -d "${ROOT_DIR}/frontend/node_modules" ]]; then
   (cd "${ROOT_DIR}/frontend" && npm install)
 fi
 
+require_free_port() {
+  local label="$1"
+  local port="$2"
+  local env_name="$3"
+
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Cannot start ${label}: port ${port} is already in use."
+    echo
+    lsof -nP -iTCP:"${port}" -sTCP:LISTEN || true
+    echo
+    echo "Stop the existing process, or run with a different port:"
+    echo "  ${env_name}=<port> ./scripts/run_dev.sh"
+    exit 1
+  fi
+}
+
+require_free_port "backend" "${BACKEND_PORT}" "BACKEND_PORT"
+require_free_port "frontend" "${FRONTEND_PORT}" "FRONTEND_PORT"
+
 cleanup() {
   if [[ -n "${BACKEND_PID:-}" ]]; then kill "${BACKEND_PID}" 2>/dev/null || true; fi
   if [[ -n "${FRONTEND_PID:-}" ]]; then kill "${FRONTEND_PID}" 2>/dev/null || true; fi

@@ -1,5 +1,32 @@
 # 오류 기록
 
+## 2026-05-20 - dev server `Address already in use`
+
+### 증상
+
+- `./scripts/run_dev.sh` 실행 시 backend 시작 로그 직후 `ERROR: [Errno 48] Address already in use`가 출력되었다.
+
+### 영향
+
+- 기존 backend process가 `127.0.0.1:8000`을 점유해 새 backend가 뜨지 못했다.
+- frontend port `5173`은 비어 있었지만, backend 실패 메시지만 보이면 어느 포트가 문제인지 파악하기 어려웠다.
+
+### 원인
+
+- 이전 Uvicorn reload parent/child process가 종료되지 않고 남아 `8000` port를 점유했다.
+- `run_dev.sh`가 port 사전 점검 없이 backend/frontend를 바로 실행해 충돌 원인을 명확히 보여주지 못했다.
+
+### 수정
+
+- 남아 있던 KIE backend process를 종료했다.
+- `scripts/run_dev.sh`에 backend/frontend port 사전 점검을 추가했다.
+- 포트가 사용 중이면 `lsof` 결과와 대체 port 실행 예시를 출력하고 시작 전에 종료하도록 했다.
+
+### 검증
+
+- `lsof -nP -iTCP:8000 -sTCP:LISTEN` 결과 없음
+- `lsof -nP -iTCP:5173 -sTCP:LISTEN` 결과 없음
+
 ## 2026-05-20 - Excel CSV 한글 깨짐 및 로컬 의존성 검증 이슈
 
 ### 증상
