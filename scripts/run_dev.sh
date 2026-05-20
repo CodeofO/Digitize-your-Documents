@@ -33,7 +33,8 @@ echo "Starting backend:  http://${BACKEND_HOST}:${BACKEND_PORT}"
     --app-dir backend \
     --host "${BACKEND_HOST}" \
     --port "${BACKEND_PORT}" \
-    --reload
+    --reload \
+    --reload-dir "${ROOT_DIR}/backend/app"
 ) &
 BACKEND_PID=$!
 

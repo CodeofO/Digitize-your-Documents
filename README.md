@@ -65,10 +65,10 @@ Backend와 frontend를 한 번에 실행합니다.
 
 | 서버 | 주소 | 개발 반영 |
 | --- | --- | --- |
-| Backend | `http://127.0.0.1:8000` | `uvicorn --reload` |
-| Frontend | `http://127.0.0.1:5173` | Vite HMR |
+| Backend | `http://127.0.0.1:8000` | `backend/app` 변경 시 `uvicorn --reload` |
+| Frontend | `http://127.0.0.1:5173` | Vite dev server |
 
-`scripts/run_dev.sh`를 한 번 재시작한 뒤에는 backend Python 코드 변경과 frontend React/CSS 변경이 개발 서버에 자동 반영됩니다.
+`scripts/run_dev.sh`의 backend reload 감시 범위는 `.venv`, local DB, storage output 변경으로 extraction 작업이 재시작되지 않도록 `backend/app`으로 제한합니다.
 
 ## 설정
 

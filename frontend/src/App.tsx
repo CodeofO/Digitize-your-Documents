@@ -395,7 +395,24 @@ export default function App() {
     recentSchemas.forEach((item) => options.set(item.id, item));
     return Array.from(options.values());
   }, [schema, recentSchemas]);
+  const hasActiveBatch = useMemo(
+    () =>
+      batches.some(
+        (batch) =>
+          batch.status === "running" ||
+          batch.items.some((item) => item.status === "queued" || item.status === "running")
+      ),
+    [batches]
+  );
   const hasPreparedSchema = Boolean(document) || Boolean(schema) || schemaDirty || hasMeaningfulSchema(fields);
+
+  useEffect(() => {
+    if (!batchOpen || !hasActiveBatch) return;
+    const intervalId = window.setInterval(() => {
+      void refreshBatches();
+    }, 1500);
+    return () => window.clearInterval(intervalId);
+  }, [batchOpen, hasActiveBatch]);
 
   async function refreshAll() {
     await Promise.all([refreshHistory(), refreshRawHistory(), refreshSystemStatus(), loadVlmSettings(), refreshBatches(), searchArchive()]);
@@ -906,6 +923,7 @@ export default function App() {
     setBatchSchemaId(schema?.id ?? recentSchemas[0]?.id ?? "");
     setBatchMessage(null);
     setBatchOpen(true);
+    void refreshBatches();
   }
 
   function selectBatchFiles(files: FileList | null) {

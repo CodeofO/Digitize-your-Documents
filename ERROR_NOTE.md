@@ -1,5 +1,37 @@
 # 오류 기록
 
+## 2026-05-20 - Batch 진행률 미갱신 및 dev reload 재시작
+
+### 증상
+
+- Batch extraction 실행 후 popup의 progress bar가 자동으로 갱신되지 않았다.
+- 서버 로그에 `GET /api/batches?limit=8` 이후 `WatchFiles detected changes in '.venv/bin/activate_this.py'. Reloading...`가 출력되었다.
+- Uvicorn이 shutdown에 들어가며 `Waiting for background tasks to complete` 상태가 되었다.
+
+### 영향
+
+- 사용자는 배치 처리 진행률을 실시간으로 확인할 수 없었다.
+- 개발 서버가 `.venv` 변경을 backend code 변경으로 오인해 reload하면서, in-process `BackgroundTasks` 기반 extraction 작업이 중단되거나 지연될 수 있었다.
+
+### 원인
+
+- Frontend Batch popup은 batch 생성 직후와 수동 Refresh 때만 `/api/batches`를 호출했고, running batch에 대한 polling이 없었다.
+- `scripts/run_dev.sh`의 backend 실행이 `uvicorn --reload`만 사용해 프로젝트 root 전체를 감시했다.
+- root 전체 감시에는 `.venv`, storage, DB 같은 runtime artifact가 포함되어 개발 중 파일 변경이 backend reload로 이어질 수 있었다.
+
+### 수정
+
+- Batch popup이 열려 있고 running/queued batch item이 있으면 1.5초 간격으로 `/api/batches?limit=8`을 polling하도록 수정했다.
+- Batch popup을 열 때도 최신 batch 상태를 즉시 refresh하도록 수정했다.
+- `scripts/run_dev.sh`에서 Uvicorn reload 감시 범위를 `backend/app`으로 제한해 `.venv`, `backend/storage`, local DB 변경이 reload를 유발하지 않도록 했다.
+
+### 검증
+
+- `bash -n scripts/run_dev.sh` 통과
+- `npm run build` 통과
+- `.venv/bin/python -m pytest backend` 통과, 19개 테스트 기준
+- `git diff --check` 통과
+
 ## 2026-05-19 - 서비스 UX 확장 검증 기록
 
 ### 범위
