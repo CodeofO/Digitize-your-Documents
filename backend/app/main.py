@@ -751,7 +751,7 @@ def create_batch(
     )
     db.commit()
     db.refresh(batch)
-    background_tasks.add_task(run_batch_jobs, job_ids)
+    background_tasks.add_task(run_batch_jobs, batch.id, job_ids)
     return _batch_read(batch)
 
 

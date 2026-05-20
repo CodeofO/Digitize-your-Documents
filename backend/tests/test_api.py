@@ -441,7 +441,7 @@ def test_extraction_uses_schema_regions_for_cropped_inputs(monkeypatch) -> None:
 
 
 def test_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:
-    monkeypatch.setattr("app.main.run_batch_jobs", lambda job_ids: None)
+    monkeypatch.setattr("app.main.run_batch_jobs", lambda batch_id, job_ids: None)
 
     with get_client() as client:
         schema = create_schema(client)
@@ -497,6 +497,79 @@ def test_batch_export_csv_and_json_mock_mode() -> None:
             assert payload["batch_id"] == batch["id"]
             assert len(payload["rows"]) == 2
             assert payload["rows"][0]["invoice_number"] == "Sample invoice_number"
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_batch_finalizes_after_mock_jobs() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client)
+            response = client.post(
+                "/api/batches",
+                data={"schema_id": schema["id"]},
+                files=[
+                    ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+
+            loaded = client.get(f"/api/batches/{batch['id']}")
+            assert loaded.status_code == 200, loaded.text
+            payload = loaded.json()
+            assert payload["status"] == "completed"
+            assert payload["progress"] == 1
+            assert payload["completed_count"] == 2
+            assert payload["completed_at"] is not None
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_batch_worker_exception_does_not_leave_batch_running(monkeypatch) -> None:
+    from app import extraction as extraction_module
+
+    monkeypatch.setattr("app.main.run_batch_jobs", lambda batch_id, job_ids: None)
+
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client)
+            response = client.post(
+                "/api/batches",
+                data={"schema_id": schema["id"]},
+                files=[
+                    ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+            job_ids = [item["job_id"] for item in batch["items"]]
+            original_run_job = extraction_module.run_extraction_job
+
+            def flaky_run_job(job_id: str) -> None:
+                if job_id == job_ids[0]:
+                    raise RuntimeError("worker boom")
+                original_run_job(job_id)
+
+            monkeypatch.setattr(extraction_module, "run_extraction_job", flaky_run_job)
+            extraction_module.run_batch_jobs(batch["id"], job_ids)
+
+            loaded = client.get(f"/api/batches/{batch['id']}")
+            assert loaded.status_code == 200, loaded.text
+            payload = loaded.json()
+            assert payload["status"] == "completed_with_errors"
+            assert payload["progress"] == 1
+            assert payload["failed_count"] == 1
+            assert payload["completed_count"] == 1
+            assert {item["status"] for item in payload["items"]} == {"completed", "failed"}
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()

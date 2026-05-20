@@ -16,6 +16,9 @@ from app.validation import validate_extracted_values
 from app.vlm import extract_with_vlm
 
 
+TERMINAL_JOB_STATUSES = {"completed", "needs_review", "failed", "canceled"}
+
+
 def run_extraction_job(job_id: str) -> None:
     db = SessionLocal()
     try:
@@ -24,14 +27,32 @@ def run_extraction_job(job_id: str) -> None:
         db.close()
 
 
-def run_batch_jobs(job_ids: list[str]) -> None:
+def run_batch_jobs(batch_id: str, job_ids: list[str]) -> None:
     if not job_ids:
+        _finalize_batch(batch_id)
         return
     max_workers = max(1, min(get_settings().batch_max_workers, len(job_ids)))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(run_extraction_job, job_id) for job_id in job_ids]
-        for future in as_completed(futures):
-            future.result()
+    submitted_job_ids: set[str] = set()
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for job_id in job_ids:
+                future = executor.submit(run_extraction_job, job_id)
+                futures[future] = job_id
+                submitted_job_ids.add(job_id)
+
+            for future in as_completed(futures):
+                job_id = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    _mark_job_failed(job_id, f"Batch worker failed: {exc}")
+    except Exception as exc:
+        for job_id in set(job_ids) - submitted_job_ids:
+            _mark_job_failed(job_id, f"Batch worker did not start job: {exc}")
+        raise
+    finally:
+        _finalize_batch(batch_id)
 
 
 def _run_extraction_job(db: Session, job_id: str) -> None:
@@ -122,6 +143,83 @@ def _run_extraction_job(db: Session, job_id: str) -> None:
             metadata={"document_id": job.document_id, "schema_id": job.schema_id},
         )
         db.commit()
+
+
+def _mark_job_failed(job_id: str, message: str) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(ExtractionJob, job_id)
+        if not job or job.status in TERMINAL_JOB_STATUSES:
+            return
+        job.status = "failed"
+        job.error_message = message
+        job.completed_at = datetime.utcnow()
+        log_audit_event(
+            db,
+            entity_type="extraction_job",
+            entity_id=job.id,
+            action="failed",
+            message=message,
+            metadata={"document_id": job.document_id, "schema_id": job.schema_id},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _finalize_batch(batch_id: str) -> None:
+    from app.models import Batch
+
+    db = SessionLocal()
+    try:
+        batch = db.get(Batch, batch_id)
+        if not batch:
+            return
+
+        jobs = [item.job for item in batch.items if item.job]
+        if not jobs:
+            batch.status = "failed"
+            batch.completed_at = datetime.utcnow()
+            db.commit()
+            return
+
+        unfinished = [job for job in jobs if job.status not in TERMINAL_JOB_STATUSES]
+        for job in unfinished:
+            job.status = "failed"
+            job.error_message = "Batch worker finished before this job reached a terminal status"
+            job.completed_at = datetime.utcnow()
+            log_audit_event(
+                db,
+                entity_type="extraction_job",
+                entity_id=job.id,
+                action="failed",
+                message=job.error_message,
+                metadata={"document_id": job.document_id, "schema_id": job.schema_id},
+            )
+
+        statuses = [job.status for job in jobs]
+        failed_or_canceled = any(status in {"failed", "canceled"} for status in statuses)
+        if all(status == "canceled" for status in statuses):
+            next_status = "canceled"
+        elif failed_or_canceled:
+            next_status = "completed_with_errors"
+        else:
+            next_status = "completed"
+
+        if batch.status != next_status or batch.completed_at is None:
+            batch.status = next_status
+            batch.completed_at = datetime.utcnow()
+            log_audit_event(
+                db,
+                entity_type="batch",
+                entity_id=batch.id,
+                action=next_status,
+                message=f"Batch finished with status {next_status}",
+                metadata={"total_count": batch.total_count},
+            )
+        db.commit()
+    finally:
+        db.close()
 
 
 def _extract_grouped_values(
