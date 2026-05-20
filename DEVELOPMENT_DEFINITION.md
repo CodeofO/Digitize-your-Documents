@@ -239,7 +239,7 @@ Frontend:
 - Home VLM settings popup 열기/저장/닫기
 - 브라우저 Back으로 app Home 복귀
 - Recent/Search archive/Batch extraction utility modal 열기/닫기
-- Batch extraction modal에서 schema 선택, 복수 파일/폴더 업로드, running batch progress polling, 최근 batch 결과 열기
+- Batch extraction modal에서 schema 선택, 복수 파일/폴더 업로드, running batch progress polling, batch 중단, 최근 batch 결과 열기
 - Raw Data Extractor upload/preview layout
 - 이미지/수식 추출 옵션 toggle
 - Key Information Extractor 진입 및 기존 schema/review flow 유지

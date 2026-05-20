@@ -233,6 +233,7 @@ class BatchRead(BaseModel):
     total_count: int
     completed_count: int
     failed_count: int
+    canceled_count: int
     progress: float
     items: list[BatchItemRead]
     created_at: datetime

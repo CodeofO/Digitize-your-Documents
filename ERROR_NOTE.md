@@ -1,5 +1,41 @@
 # 오류 기록
 
+## 2026-05-20 - `.venv` 감시로 인한 backend reload loop 및 Batch 중단 부재
+
+### 증상
+
+- Backend가 시작 직후 `.venv/lib/python3.11/site-packages/openai/...` 파일 변경을 감지하며 반복적으로 reload되었다.
+- 로그가 `Started server process` → `WatchFiles detected changes in '.venv/...'` → `Shutting down`을 반복했다.
+- Batch extraction이 오래 걸릴 때 사용자가 작업을 중단할 수 있는 UI/API가 없었다.
+
+### 영향
+
+- 개발 서버가 안정적으로 떠 있지 못해 Batch progress polling과 background extraction이 정상 동작하기 어려웠다.
+- FastAPI in-process background task가 reload에 의해 중단되거나, 이미 시작된 VLM 호출이 끝날 때까지 기다리는 상태가 발생할 수 있었다.
+- 사용자는 잘못 시작한 batch를 멈추지 못했다.
+
+### 원인
+
+- 이전 `run_dev.sh`는 root에서 Uvicorn을 실행하면서 `--reload-dir`를 지정했지만, 실행 context와 기존 프로세스 상태에 따라 WatchFiles가 `.venv` 변경을 계속 감지할 수 있었다.
+- OpenAI 패키지 또는 iCloud 동기화가 `.venv/site-packages` 파일 metadata를 갱신하면 reload 대상처럼 잡혔다.
+- Batch는 생성/조회 API만 있고 cancel endpoint와 UI action이 없었다.
+
+### 수정
+
+- `run_dev.sh`를 `backend/` 디렉터리에서 실행하도록 변경하고, reload 감시 범위를 상대 경로 `app`으로 고정했다.
+- Uvicorn에 `--reload-include "*.py"`와 `.venv`, frontend, storage, DB exclude rule을 추가했다.
+- `POST /api/batches/{batch_id}/cancel` API를 추가했다.
+- cancel 요청 시 queued/running job을 `canceled`로 표시하고, Batch response에 `canceled_count`를 포함하도록 했다.
+- extraction worker가 이미 취소된 job은 시작하지 않고, VLM 호출 후에도 job 상태를 다시 확인해 취소된 job의 result 저장을 막도록 했다.
+- Frontend Batch result row에 running/queued batch를 멈추는 `Stop` 버튼을 추가했다.
+
+### 검증
+
+- `bash -n scripts/run_dev.sh` 통과
+- `npm run build` 통과
+- `.venv/bin/python -m pytest backend` 통과, 20개 테스트 기준
+- `git diff --check` 통과
+
 ## 2026-05-20 - Batch 진행률 미갱신 및 dev reload 재시작
 
 ### 증상

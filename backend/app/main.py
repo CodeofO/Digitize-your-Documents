@@ -716,6 +716,46 @@ def get_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
     return _batch_read(batch)
 
 
+@app.post("/api/batches/{batch_id}/cancel", response_model=BatchRead)
+def cancel_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    canceled_count = 0
+    now = datetime.utcnow()
+    for item in batch.items:
+        if item.job and item.job.status in {"queued", "running"}:
+            item.job.status = "canceled"
+            item.job.error_message = "Canceled by user"
+            item.job.completed_at = now
+            canceled_count += 1
+
+    if canceled_count:
+        batch.status = "cancel_requested"
+        log_audit_event(
+            db,
+            entity_type="batch",
+            entity_id=batch.id,
+            action="cancel_requested",
+            message=f"Cancel requested for {canceled_count} running or queued job(s)",
+            metadata={"canceled_count": canceled_count},
+        )
+    else:
+        log_audit_event(
+            db,
+            entity_type="batch",
+            entity_id=batch.id,
+            action="cancel_skipped",
+            message="No running or queued batch jobs to cancel",
+            metadata={},
+        )
+
+    db.commit()
+    db.refresh(batch)
+    return _batch_read(batch)
+
+
 @app.get("/api/archive/search", response_model=list[ArchiveSearchResult])
 def archive_search(
     q: str | None = None,
@@ -883,9 +923,17 @@ def _batch_read(batch: Batch) -> BatchRead:
     completed_statuses = {"completed", "needs_review"}
     completed_count = sum(1 for item in items if item.status in completed_statuses)
     failed_count = sum(1 for item in items if item.status == "failed")
-    finished_count = completed_count + failed_count
+    canceled_count = sum(1 for item in items if item.status == "canceled")
+    finished_count = completed_count + failed_count + canceled_count
     if batch.total_count and finished_count >= batch.total_count:
-        status = "completed" if failed_count == 0 else "completed_with_errors"
+        if canceled_count == batch.total_count:
+            status = "canceled"
+        elif failed_count or canceled_count:
+            status = "completed_with_errors"
+        else:
+            status = "completed"
+    elif canceled_count:
+        status = "canceling"
     else:
         status = "running"
     progress = finished_count / batch.total_count if batch.total_count else 0
@@ -897,6 +945,7 @@ def _batch_read(batch: Batch) -> BatchRead:
         total_count=batch.total_count,
         completed_count=completed_count,
         failed_count=failed_count,
+        canceled_count=canceled_count,
         progress=progress,
         items=items,
         created_at=batch.created_at,

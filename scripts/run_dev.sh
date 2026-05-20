@@ -28,13 +28,17 @@ trap cleanup EXIT INT TERM
 
 echo "Starting backend:  http://${BACKEND_HOST}:${BACKEND_PORT}"
 (
-  cd "${ROOT_DIR}"
+  cd "${ROOT_DIR}/backend"
   "${ROOT_DIR}/.venv/bin/python" -m uvicorn app.main:app \
-    --app-dir backend \
     --host "${BACKEND_HOST}" \
     --port "${BACKEND_PORT}" \
     --reload \
-    --reload-dir "${ROOT_DIR}/backend/app"
+    --reload-dir app \
+    --reload-include "*.py" \
+    --reload-exclude "../.venv/*" \
+    --reload-exclude "../frontend/*" \
+    --reload-exclude "storage/*" \
+    --reload-exclude "*.db"
 ) &
 BACKEND_PID=$!
 

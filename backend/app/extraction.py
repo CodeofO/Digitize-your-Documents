@@ -24,6 +24,8 @@ def _run_extraction_job(db: Session, job_id: str) -> None:
     job = db.get(ExtractionJob, job_id)
     if not job:
         return
+    if job.status == "canceled":
+        return
 
     job.status = "running"
     job.started_at = datetime.utcnow()
@@ -47,6 +49,19 @@ def _run_extraction_job(db: Session, job_id: str) -> None:
         image_paths = [page.image_path for page in document.pages]
 
         raw_values = extract_with_vlm(fields, image_paths)
+        db.refresh(job)
+        if job.status == "canceled":
+            log_audit_event(
+                db,
+                entity_type="extraction_job",
+                entity_id=job.id,
+                action="canceled",
+                message="Extraction job was canceled before saving VLM output",
+                metadata={"document_id": job.document_id, "schema_id": job.schema_id},
+            )
+            db.commit()
+            return
+
         values, warnings = validate_extracted_values(raw_values, fields)
         validated_output = {
             "document_id": document.id,
@@ -78,6 +93,9 @@ def _run_extraction_job(db: Session, job_id: str) -> None:
         )
         db.commit()
     except Exception as exc:
+        db.refresh(job)
+        if job.status == "canceled":
+            return
         job.status = "failed"
         job.error_message = str(exc)
         job.completed_at = datetime.utcnow()

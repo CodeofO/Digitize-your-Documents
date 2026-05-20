@@ -238,6 +238,7 @@ type Batch = {
   total_count: number;
   completed_count: number;
   failed_count: number;
+  canceled_count: number;
   progress: number;
   items: BatchItem[];
   created_at: string;
@@ -971,6 +972,22 @@ export default function App() {
     }
   }
 
+  async function cancelBatch(batchId: string) {
+    setBusy("Canceling batch extraction");
+    setError(null);
+    setBatchMessage(null);
+    try {
+      const canceled = await api<Batch>(`/api/batches/${batchId}/cancel`, { method: "POST" });
+      setBatches((current) => current.map((item) => (item.id === canceled.id ? canceled : item)));
+      setBatchMessage("배치 중단을 요청했습니다. 이미 VLM 호출 중인 항목은 현재 호출이 끝난 뒤 중단 상태로 정리됩니다.");
+      await refreshBatches();
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function saveDefaultExportPreset() {
     if (!schema) {
       setError("Save the schema before creating an export preset.");
@@ -1302,6 +1319,7 @@ export default function App() {
             }}
             onRunBatch={() => void runBatchUpload()}
             onSaveCurrentSchema={() => void saveCurrentSchemaForBatch()}
+            onCancelBatch={(batchId) => void cancelBatch(batchId)}
             onRefresh={() => void refreshBatches()}
             onOpenJob={(jobId) => {
               setBatchOpen(false);
@@ -1856,6 +1874,7 @@ function BatchPanel(props: {
   onClearFiles: () => void;
   onRunBatch: () => void;
   onSaveCurrentSchema: () => void;
+  onCancelBatch: (batchId: string) => void;
   onRefresh: () => void;
   onOpenJob: (jobId: string) => void;
 }) {
@@ -1961,9 +1980,17 @@ function BatchPanel(props: {
                   <span>{Math.round(batch.progress * 100)}%</span>
                 </div>
                 <progress max={1} value={batch.progress} />
-                <span className="muted">
-                  {batch.completed_count} done · {batch.failed_count} failed · {batch.total_count} total
-                </span>
+                <div className="batch-meta-row">
+                  <span className="muted">
+                    {batch.completed_count} done · {batch.failed_count} failed · {batch.canceled_count} canceled · {batch.total_count} total
+                  </span>
+                  {batchCanCancel(batch) && (
+                    <button type="button" className="secondary compact danger-outline" onClick={() => props.onCancelBatch(batch.id)}>
+                      <X size={14} />
+                      Stop
+                    </button>
+                  )}
+                </div>
                 {batch.items.map((item) => (
                   <button key={item.id} onClick={() => props.onOpenJob(item.job_id)}>
                     <strong>{item.filename}</strong>
@@ -2569,6 +2596,10 @@ function formatDate(value: string) {
 
 function fileDisplayName(file: File) {
   return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+}
+
+function batchCanCancel(batch: Batch) {
+  return batch.items.some((item) => item.status === "queued" || item.status === "running");
 }
 
 function formatConfidence(value: number | null | undefined) {

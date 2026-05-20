@@ -169,6 +169,7 @@ Batch extraction:
 
 - 저장된 schema 하나를 선택하고 여러 파일 또는 폴더를 업로드해 같은 기준으로 KIE 추출을 실행합니다.
 - Batch 결과 목록에서 각 파일의 `Open review`를 누르면 일반 KIE review 화면으로 이동합니다.
+- Running/queued batch는 `Stop`으로 중단 요청할 수 있습니다. 이미 VLM 호출 중인 파일은 현재 호출이 끝난 뒤 취소 상태로 정리됩니다.
 
 KIE API:
 
@@ -190,6 +191,7 @@ KIE API:
 | `GET` | `/api/extraction-results/{result_id}/export?format=json\|csv` |
 | `POST` | `/api/batches` |
 | `GET` | `/api/batches?limit=20` |
+| `POST` | `/api/batches/{batch_id}/cancel` |
 
 ## 문서와 구조
 

@@ -296,6 +296,33 @@ def test_extraction_mock_mode_returns_evidence_and_normalized_values() -> None:
         get_settings.cache_clear()
 
 
+def test_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_extraction_job", lambda job_id: None)
+
+    with get_client() as client:
+        schema = create_schema(client)
+        response = client.post(
+            "/api/batches",
+            data={"schema_id": schema["id"]},
+            files=[
+                ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+            ],
+        )
+        assert response.status_code == 200, response.text
+        batch = response.json()
+        assert batch["status"] == "running"
+        assert batch["progress"] == 0
+
+        canceled = client.post(f"/api/batches/{batch['id']}/cancel")
+        assert canceled.status_code == 200, canceled.text
+        payload = canceled.json()
+        assert payload["status"] == "canceled"
+        assert payload["canceled_count"] == 2
+        assert payload["progress"] == 1
+        assert {item["status"] for item in payload["items"]} == {"canceled"}
+
+
 def test_raw_dependency_imports() -> None:
     import bleach  # noqa: F401
     import mammoth  # noqa: F401

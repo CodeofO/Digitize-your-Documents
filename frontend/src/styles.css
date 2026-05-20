@@ -828,6 +828,18 @@ textarea {
   justify-content: space-between;
 }
 
+.batch-meta-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.danger-outline {
+  border-color: #d39a82;
+  color: #9a3412;
+}
+
 progress {
   accent-color: #157f78;
   width: 100%;
