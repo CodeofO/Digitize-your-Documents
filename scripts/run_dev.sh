@@ -43,9 +43,26 @@ require_free_port() {
 require_free_port "backend" "${BACKEND_PORT}" "BACKEND_PORT"
 require_free_port "frontend" "${FRONTEND_PORT}" "FRONTEND_PORT"
 
+kill_tree() {
+  local pid="$1"
+  local child
+
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    return 0
+  fi
+
+  if command -v pgrep >/dev/null 2>&1; then
+    for child in $(pgrep -P "${pid}" 2>/dev/null || true); do
+      kill_tree "${child}"
+    done
+  fi
+
+  kill "${pid}" 2>/dev/null || true
+}
+
 cleanup() {
-  if [[ -n "${BACKEND_PID:-}" ]]; then kill "${BACKEND_PID}" 2>/dev/null || true; fi
-  if [[ -n "${FRONTEND_PID:-}" ]]; then kill "${FRONTEND_PID}" 2>/dev/null || true; fi
+  if [[ -n "${FRONTEND_PID:-}" ]]; then kill_tree "${FRONTEND_PID}"; fi
+  if [[ -n "${BACKEND_PID:-}" ]]; then kill_tree "${BACKEND_PID}"; fi
 }
 trap cleanup EXIT INT TERM
 

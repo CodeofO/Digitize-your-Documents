@@ -1,5 +1,46 @@
 # 오류 기록
 
+## 2026-05-20 - Vite/lucide frontend startup failure
+
+### 증상
+
+- `./scripts/run_dev.sh` 실행 시 backend는 뜨지만 frontend dev server가 Vite config 로딩 단계에서 실패했다.
+- 에러 메시지는 `@vitejs/plugin-react/dist/index.js` default export를 찾지 못한다고 표시되었다.
+- 별도 import 재현에서는 `@rolldown/pluginutils`가 `exactRegex` export를 제공하지 않는 오류도 확인되었다.
+- Vite가 뜬 뒤에도 `lucide-react` icon file 일부를 resolve/read하지 못하는 에러가 이어졌다.
+
+### 영향
+
+- `http://127.0.0.1:5173` frontend가 시작되지 않았다.
+- frontend 실패 후 Uvicorn reload child process가 남으면 다음 실행 때 `8000` port 충돌로 이어질 수 있었다.
+
+### 원인
+
+- 현재 설치된 `@vitejs/plugin-react@5.2.0`과 transitive dependency `@rolldown/pluginutils@1.0.0-rc.3` 조합이 Vite config 로딩 과정에서 ESM export mismatch를 일으켰다.
+- `frontend/node_modules`의 `lucide-react` package가 일부 `.js` file 없이 `.map` file만 남은 불완전한 상태였다.
+- KIE frontend는 HMR을 꺼둔 상태라 React plugin의 fast-refresh 기능에 의존하지 않는다.
+- 기존 cleanup은 background parent process만 종료할 수 있어 Uvicorn reload child가 남을 여지가 있었다.
+
+### 수정
+
+- `npm ci`로 frontend dependencies를 깨끗하게 재설치했다.
+- `frontend/vite.config.ts`에서 `@vitejs/plugin-react` import와 plugin 등록을 제거했다.
+- lucide icon import를 package 내부 file path 대신 공식 `lucide-react` entrypoint named import로 변경했다.
+- 더 이상 필요 없는 direct icon module declaration file을 제거했다.
+- `scripts/run_dev.sh` cleanup을 process tree 종료 방식으로 보강했다.
+
+### 검증
+
+- `node -e "import('@vitejs/plugin-react')..."`로 dependency mismatch 재현
+- `npm ci` 이후 `node -e "import('lucide-react')..."` 통과
+- `npm run build` 통과
+- `./scripts/run_dev.sh`로 backend/frontend 동시 기동 확인
+- `curl -I http://127.0.0.1:5173/` 200 OK
+- `curl -I http://127.0.0.1:5173/src/App.tsx` 200 OK
+- `curl -s http://127.0.0.1:8000/api/health` `{"status":"ok"}`
+- Playwright screenshot 생성 성공: `/tmp/kie-dev-check-fixed.png`
+- 검증 후 `8000`, `5173` listen process 없음
+
 ## 2026-05-20 - dev server `Address already in use`
 
 ### 증상
