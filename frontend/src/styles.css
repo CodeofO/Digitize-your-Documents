@@ -1008,6 +1008,19 @@ textarea {
   gap: 10px;
 }
 
+.schema-name-grid {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 0.9fr);
+}
+
+.compact-notice {
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 9px 10px;
+}
+
 .upload-notes p {
   color: #43504a;
   line-height: 1.5;
@@ -1054,7 +1067,7 @@ textarea {
   border-radius: 8px;
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 12px;
   padding: 8px;
 }
@@ -1800,6 +1813,27 @@ pre {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.danger-zone {
+  align-items: center;
+  border: 1px solid #ead1c6;
+  border-radius: 8px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px;
+}
+
+.danger-zone div {
+  display: grid;
+  gap: 3px;
+}
+
+.danger-zone span {
+  color: #6b5a52;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .success-text {

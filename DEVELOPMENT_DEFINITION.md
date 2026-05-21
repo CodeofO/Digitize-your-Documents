@@ -111,9 +111,10 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 3. 좌측 문서 viewer에서 페이지를 확인한다.
 4. 우측 schema builder에서 `key_name`, `description`, `output_format`을 정의한다.
 5. 필요 필드만 선택적으로 extraction region을 지정한다.
-6. schema 저장 후 extraction을 실행한다.
-7. 결과 table에서 value, normalized value, status, page, confidence, warning을 검토한다.
-8. 사용자는 결과를 수정하고 JSON/CSV로 export한다.
+6. 저장된 schema는 Schema name 영역의 dropdown에서 바로 불러온다.
+7. Save schema는 명시적으로 누를 때만 schema를 저장한다. 저장하지 않은 draft schema로 Extract를 누르면 one-off extraction으로 실행하고 schema 목록에는 노출하지 않는다.
+8. 결과 table에서 value, normalized value, status, page, confidence, warning을 검토한다.
+9. 사용자는 결과를 수정하고 JSON/CSV로 export한다.
 
 ### 3.2 Schema
 
@@ -209,9 +210,18 @@ Raw workspace:
 Key Information workspace:
 
 - 기존 upload/schema/review 흐름 유지
+- Schema name 영역에서 신규 이름 입력과 저장된 schema dropdown 선택을 함께 제공한다.
+- 같은 schema name이 이미 저장되어 있으면 저장 시 사용자에게 알려주고 중복 저장을 막는다.
+- Recent items 진입 버튼은 제거하고, schema 재사용은 schema dropdown으로 옮긴다.
 - Home navigation 제공
 - Batch draft와 batch result sidebar는 파일명 기준 오름차순으로 표시한다.
 - Batch export CSV/JSON도 파일명 기준 오름차순으로 row를 정렬한다.
+
+Maintenance:
+
+- Setting popup에서 파싱 기록 삭제 버튼을 제공한다.
+- 삭제 범위는 documents, document pages, extraction jobs/results, batches, raw extractions, audit events, one-off draft schemas와 관련 local storage이다.
+- 사용자가 저장한 schema와 export preset은 유지한다.
 
 브라우저 Back:
 

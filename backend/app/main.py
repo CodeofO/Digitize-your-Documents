@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -47,6 +48,7 @@ from app.schemas import (
     BatchRead,
     DocumentPageRead,
     DocumentRead,
+    DraftExtractionJobCreate,
     ExportPresetCreate,
     ExportPresetRead,
     ExportPresetUpdate,
@@ -327,6 +329,7 @@ def get_document_page_thumbnail(
 
 @app.post("/api/schemas", response_model=SchemaRead)
 def create_schema(payload: SchemaCreate, db: Session = Depends(get_db)) -> SchemaRead:
+    _raise_if_schema_name_conflicts(db, payload.name)
     schema = Schema(
         name=payload.name,
         display_name=payload.display_name,
@@ -335,6 +338,7 @@ def create_schema(payload: SchemaCreate, db: Session = Depends(get_db)) -> Schem
         is_template=payload.is_template,
         template_category=payload.template_category,
         pinned=payload.pinned,
+        ephemeral=False,
     )
     db.add(schema)
     db.flush()
@@ -363,9 +367,12 @@ def create_schema(payload: SchemaCreate, db: Session = Depends(get_db)) -> Schem
 @app.get("/api/schemas", response_model=list[SchemaRead])
 def list_schemas(
     templates: bool | None = None,
+    include_ephemeral: bool = False,
     db: Session = Depends(get_db),
 ) -> list[SchemaRead]:
     query = db.query(Schema)
+    if not include_ephemeral:
+        query = query.filter(Schema.ephemeral == False)  # noqa: E712
     if templates is not None:
         query = query.filter(Schema.is_template == templates)
     schemas = query.order_by(Schema.pinned.desc(), Schema.created_at.desc()).all()
@@ -437,6 +444,7 @@ def update_schema(schema_id: str, payload: SchemaUpdate, db: Session = Depends(g
         "fields": [field.model_dump() for field in payload.fields] if payload.fields is not None else current["fields"],
     }
     _validate_schema_region_references(next_schema_data)
+    _raise_if_schema_name_conflicts(db, next_schema_data["name"], schema_id=schema.id)
 
     schema.name = next_schema_data["name"]
     schema.display_name = next_schema_data["display_name"]
@@ -507,6 +515,67 @@ def create_extraction_job(
         action="created",
         message="Extraction job created",
         metadata={"document_id": document.id, "schema_id": schema.id, "schema_version": schema_version},
+    )
+    db.commit()
+    db.refresh(job)
+    response = _job_read(job)
+    db.close()
+    background_tasks.add_task(run_extraction_job, job.id)
+    return response
+
+
+@app.post("/api/extraction-jobs/draft", response_model=ExtractionJobRead)
+def create_draft_extraction_job(
+    payload: DraftExtractionJobCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> ExtractionJobRead:
+    document = db.get(Document, payload.document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    _repair_image_document_if_needed(document, db)
+
+    draft_schema = payload.schema_definition
+    schema_data = draft_schema.model_dump()
+    schema_data["is_template"] = False
+    schema_data["template_category"] = None
+    schema_data["pinned"] = False
+    _validate_schema_region_references(schema_data)
+
+    schema = Schema(
+        name=draft_schema.name,
+        display_name=draft_schema.display_name or draft_schema.name,
+        description=draft_schema.description,
+        current_version=1,
+        is_template=False,
+        template_category=None,
+        pinned=False,
+        ephemeral=True,
+    )
+    db.add(schema)
+    db.flush()
+    db.add(
+        SchemaVersion(
+            schema_id=schema.id,
+            version=1,
+            schema_json=json.dumps(schema_data, ensure_ascii=False),
+        )
+    )
+    job = ExtractionJob(
+        document_id=document.id,
+        schema_id=schema.id,
+        schema_version=1,
+        status="queued",
+    )
+    db.add(job)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="extraction_job",
+        entity_id=job.id,
+        action="created",
+        message="Draft extraction job created",
+        metadata={"document_id": document.id, "schema_id": schema.id, "schema_mode": "draft"},
     )
     db.commit()
     db.refresh(job)
@@ -896,6 +965,45 @@ def archive_search(
     return _archive_search(db, q=q, status=status, schema_id=schema_id, document_type=document_type, limit=limit)
 
 
+@app.delete("/api/maintenance/parsing-history")
+def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
+    settings = get_settings()
+    counts = {
+        "batches": db.query(Batch).count(),
+        "batch_items": db.query(BatchItem).count(),
+        "documents": db.query(Document).count(),
+        "document_pages": db.query(DocumentPage).count(),
+        "extraction_jobs": db.query(ExtractionJob).count(),
+        "extraction_results": db.query(ExtractionResult).count(),
+        "raw_extractions": db.query(RawExtraction).count(),
+        "audit_events": db.query(AuditEvent).count(),
+        "draft_schemas": db.query(Schema).filter(Schema.ephemeral == True).count(),  # noqa: E712
+    }
+
+    ephemeral_schema_ids = [row[0] for row in db.query(Schema.id).filter(Schema.ephemeral == True).all()]  # noqa: E712
+    db.query(BatchItem).delete(synchronize_session=False)
+    db.query(Batch).delete(synchronize_session=False)
+    db.query(ExtractionResult).delete(synchronize_session=False)
+    db.query(ExtractionJob).delete(synchronize_session=False)
+    db.query(DocumentPage).delete(synchronize_session=False)
+    db.query(Document).delete(synchronize_session=False)
+    db.query(RawExtraction).delete(synchronize_session=False)
+    db.query(AuditEvent).delete(synchronize_session=False)
+    if ephemeral_schema_ids:
+        db.query(SchemaVersion).filter(SchemaVersion.schema_id.in_(ephemeral_schema_ids)).delete(synchronize_session=False)
+        db.query(Schema).filter(Schema.id.in_(ephemeral_schema_ids)).delete(synchronize_session=False)
+    db.commit()
+
+    removed_paths: list[str] = []
+    for path in [settings.resolved_storage_dir, settings.resolved_raw_storage_dir]:
+        if path.exists():
+            shutil.rmtree(path)
+            removed_paths.append(str(path))
+        path.mkdir(parents=True, exist_ok=True)
+
+    return {"status": "cleared", "counts": counts, "removed_paths": removed_paths}
+
+
 @app.get("/api/audit-events", response_model=list[AuditEventRead])
 def list_audit_events(
     entity_type: str | None = None,
@@ -1028,6 +1136,7 @@ def _schema_read(schema: Schema) -> SchemaRead:
         is_template=schema.is_template,
         template_category=schema.template_category,
         pinned=schema.pinned,
+        ephemeral=schema.ephemeral,
         regions=schema_data.get("regions", []),
         fields=schema_data["fields"],
         created_at=schema.created_at,
@@ -1056,6 +1165,17 @@ def _validate_schema_region_references(schema_data: dict[str, Any]) -> None:
             status_code=422,
             detail=f"schema field region_id values are missing from regions: {', '.join(missing_region_ids)}",
         )
+
+
+def _raise_if_schema_name_conflicts(db: Session, name: str, schema_id: str | None = None) -> None:
+    normalized = name.strip()
+    if not normalized:
+        return
+    query = db.query(Schema).filter(Schema.name == normalized, Schema.ephemeral == False)  # noqa: E712
+    if schema_id:
+        query = query.filter(Schema.id != schema_id)
+    if query.first():
+        raise HTTPException(status_code=409, detail=f"Schema name already exists: {normalized}")
 
 
 def _schema_recommendation_read(payload: dict[str, Any]) -> SchemaRecommendationRead:

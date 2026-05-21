@@ -17,6 +17,9 @@
 
 ## 2026-05-21 변경 사항
 
+- KIE 단일 문서 화면에서 저장된 schema를 Schema name 영역의 드롭다운으로 바로 불러올 수 있습니다.
+- `Extract`는 더 이상 draft schema를 자동 저장하지 않습니다. 저장하지 않은 schema는 one-off 추출로 실행되고 schema 목록에는 남지 않습니다.
+- Setting 창에 파싱 기록 삭제 버튼을 추가했습니다. 저장된 schema는 유지하고 문서, batch, 추출 결과, raw extraction 기록만 비울 수 있습니다.
 - Batch 파일은 업로드 직후부터 이미지명 오름차순으로 정렬해 sidebar에 표시합니다.
 - Batch CSV/JSON export도 이미지명 오름차순으로 정렬해 내려받습니다.
 - VLM runtime 설정에 `reasoning_effort`, `verbosity`, `max_completion_tokens`, `top_p`, `service_tier`를 추가했습니다. Thinking 계열 모델도 기본값 `reasoning_effort=minimal`, `verbosity=low`로 빠른 추출을 우선합니다.
@@ -53,7 +56,7 @@ Digitize Your Document를 사용하면 대량 문서에서 수작업으로 값�
 | Frontend | React 19, Vite 7, TypeScript, lucide-react |
 | Backend API | FastAPI, Uvicorn, Pydantic Settings |
 | Database | SQLite, SQLAlchemy |
-| VLM | LangChain, langchain-openai, structured output |
+| VLM | LangChain, langchain-openai, google-genai, structured output |
 | PDF/Image | PyMuPDF |
 | Office Preview | LibreOffice `soffice` CLI |
 | DOCX Parsing | mammoth, OOXML fallback |

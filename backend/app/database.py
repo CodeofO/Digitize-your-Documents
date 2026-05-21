@@ -49,6 +49,7 @@ def _run_lightweight_migrations() -> None:
             ("is_template", "INTEGER NOT NULL DEFAULT 0"),
             ("template_category", "VARCHAR"),
             ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+            ("ephemeral", "INTEGER NOT NULL DEFAULT 0"),
         ],
         "extraction_results": [
             ("reviewed_fields", "TEXT NOT NULL DEFAULT '[]'"),

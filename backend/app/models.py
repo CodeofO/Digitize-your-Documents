@@ -59,6 +59,7 @@ class Schema(Base):
     is_template: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     template_category: Mapped[str | None] = mapped_column(String, nullable=True)
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    ephemeral: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

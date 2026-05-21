@@ -148,6 +148,7 @@ type SavedSchema = {
   is_template: boolean;
   template_category: string | null;
   pinned: boolean;
+  ephemeral: boolean;
   regions: SchemaRegion[];
   fields: FieldDefinition[];
   created_at: string;
@@ -241,6 +242,12 @@ type VlmSettings = {
   batch_max_workers: number;
   has_api_key: boolean;
   env_path: string;
+};
+
+type MaintenanceClearResponse = {
+  status: string;
+  counts: Record<string, number>;
+  removed_paths: string[];
 };
 
 type ExportPresetField = {
@@ -720,10 +727,14 @@ export default function App() {
   const templates = recentSchemas.filter((item) => item.is_template || item.pinned);
   const batchSchemaOptions = useMemo(() => {
     const options = new Map<string, SavedSchema>();
-    if (schema) options.set(schema.id, schema);
+    if (schema && !schema.ephemeral) options.set(schema.id, schema);
     recentSchemas.forEach((item) => options.set(item.id, item));
     return Array.from(options.values());
   }, [schema, recentSchemas]);
+  const schemaNameConflict = useMemo(
+    () => findSavedSchemaNameConflict(schemaName, recentSchemas, schema?.ephemeral ? null : schema?.id ?? null),
+    [schemaName, recentSchemas, schema?.id, schema?.ephemeral]
+  );
   const activeBatch = useMemo(
     () => (activeBatchId ? batches.find((batch) => batch.id === activeBatchId) ?? null : null),
     [batches, activeBatchId]
@@ -878,7 +889,7 @@ export default function App() {
         api<ExtractionJob[]>("/api/extraction-jobs?limit=12")
       ]);
       setRecentDocuments(documents);
-      setRecentSchemas(schemas.slice(0, 12));
+      setRecentSchemas(schemas);
       setRecentJobs(jobs);
     } catch {
       // History should not block the primary workflow.
@@ -936,6 +947,43 @@ export default function App() {
       setSettingsMessage(".env 저장 완료");
       setSettingsOpen(false);
       await refreshSystemStatus();
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function clearParsingHistory() {
+    const confirmed = window.confirm(
+      "저장된 문서, 추출 job/result, batch, raw extraction 기록을 모두 삭제합니다. 저장된 schema는 유지됩니다. 계속할까요?"
+    );
+    if (!confirmed) return;
+    setBusy("파싱 기록 삭제 중");
+    setError(null);
+    setSettingsMessage(null);
+    try {
+      const cleared = await api<MaintenanceClearResponse>("/api/maintenance/parsing-history", { method: "DELETE" });
+      setDocument(null);
+      setJob(null);
+      setRawExtraction(null);
+      setActiveBatchId(null);
+      setActiveBatchItemId(null);
+      setBatchFiles([]);
+      setBatches([]);
+      setRecentDocuments([]);
+      setRecentJobs([]);
+      setRecentRawExtractions([]);
+      setArchiveResults([]);
+      setEdits({});
+      setEditedKeys([]);
+      setReviewedFields([]);
+      setAuditEvents([]);
+      setReviewFilter("all");
+      setStep("upload");
+      clearPersistedWorkspaceState();
+      await refreshHistory();
+      setSettingsMessage(`파싱 기록 삭제 완료: ${cleared.counts.documents ?? 0}개 문서, ${cleared.counts.extraction_jobs ?? 0}개 job`);
     } catch (err) {
       setError(toFriendlyError(err));
     } finally {
@@ -1114,6 +1162,11 @@ export default function App() {
       setError(validationError);
       return null;
     }
+    const conflict = findSavedSchemaNameConflict(schemaName, recentSchemas, schema?.ephemeral ? null : schema?.id ?? null);
+    if (conflict) {
+      setError(`이미 저장된 schema 이름입니다: ${conflict.display_name || conflict.name}. 드롭다운에서 불러오거나 다른 이름으로 저장하세요.`);
+      return null;
+    }
     setBusy(schema ? "Saving schema version" : "Saving schema");
     setError(null);
     try {
@@ -1146,21 +1199,40 @@ export default function App() {
       setError("Upload a document first.");
       return;
     }
-    const activeSchema = !schema || schemaDirty ? await saveSchema() : schema;
-    if (!activeSchema) return;
+    const validationError = validateFields(schemaPayloadFields, schemaPayloadRegions);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    const useSavedSchema = Boolean(schema && !schemaDirty && !schema.ephemeral);
 
     setBusy("Running extraction");
     setError(null);
     try {
-      const created = await api<ExtractionJob>("/api/extraction-jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          document_id: document.document_id,
-          schema_id: activeSchema.id,
-          schema_version: activeSchema.current_version
-        })
-      });
+      const created = useSavedSchema
+        ? await api<ExtractionJob>("/api/extraction-jobs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              document_id: document.document_id,
+              schema_id: schema!.id,
+              schema_version: schema!.current_version
+            })
+          })
+        : await api<ExtractionJob>("/api/extraction-jobs/draft", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              document_id: document.document_id,
+              schema: {
+                name: schemaName.trim() || "draft_schema",
+                display_name: schemaName.trim() || "draft_schema",
+                description: schemaDescription || null,
+                regions: schemaPayloadRegions,
+                fields: schemaPayloadFields
+              }
+            })
+          });
       setActiveBatchId(null);
       setActiveBatchItemId(null);
       setJob(created);
@@ -1409,7 +1481,7 @@ export default function App() {
   function applySchema(nextSchema: SavedSchema) {
     const normalized = normalizeSchemaFieldsAndRegions(nextSchema.fields, nextSchema.regions ?? []);
     schemaCacheRef.current.set(nextSchema.id, nextSchema);
-    setSchema(nextSchema);
+    setSchema(nextSchema.ephemeral ? null : nextSchema);
     setSchemaName(nextSchema.name);
     setSchemaDescription(nextSchema.description ?? "");
     setRegions(normalized.regions);
@@ -1909,6 +1981,8 @@ export default function App() {
               regionTarget={activeRegionTarget}
               activePage={activeRegionPage}
               systemStatus={systemStatus}
+              savedSchemas={recentSchemas}
+              schemaNameConflict={schemaNameConflict}
               templates={templates}
               onSchemaName={(value) => {
                 setSchemaName(value);
@@ -1918,6 +1992,7 @@ export default function App() {
                 setSchemaDescription(value);
                 setSchemaDirty(true);
               }}
+              onLoadSavedSchema={(schemaId) => void loadSchema(schemaId)}
               onSchemaJsonInput={setSchemaJsonInput}
               onImportSchemaJson={importSchemaJson}
               onUpdateField={updateField}
@@ -1985,7 +2060,6 @@ export default function App() {
           )}
           <KieUtilityDock
             onArchive={() => setArchiveOpen(true)}
-            onHistory={() => setHistoryOpen(true)}
             onBatch={openBatchExtraction}
           />
         </aside>
@@ -2097,6 +2171,7 @@ export default function App() {
           onServiceTier={setVlmServiceTier}
           onBatchMaxWorkers={setBatchMaxWorkers}
           onSave={() => void saveVlmSettings()}
+          onClearParsingHistory={() => void clearParsingHistory()}
           onClose={() => setSettingsOpen(false)}
         />
       )}
@@ -2104,13 +2179,9 @@ export default function App() {
   );
 }
 
-function KieUtilityDock(props: { onArchive: () => void; onHistory: () => void; onBatch: () => void }) {
+function KieUtilityDock(props: { onArchive: () => void; onBatch: () => void }) {
   return (
     <section className="utility-dock" aria-label="KIE utility actions">
-      <button type="button" className="secondary" onClick={props.onHistory}>
-        <History size={16} />
-        Recent items
-      </button>
       <button type="button" className="secondary" onClick={props.onArchive}>
         <FileJson size={16} />
         Search archive
@@ -2807,6 +2878,7 @@ function SettingsDialog(props: {
   onServiceTier: (value: string) => void;
   onBatchMaxWorkers: (value: string) => void;
   onSave: () => void;
+  onClearParsingHistory: () => void;
   onClose: () => void;
 }) {
   return (
@@ -2898,6 +2970,16 @@ function SettingsDialog(props: {
           </button>
           <button type="button" className="secondary compact" disabled={Boolean(props.busy)} onClick={props.onClose}>
             Close
+          </button>
+        </div>
+        <div className="danger-zone">
+          <div>
+            <strong>파싱 기록 삭제</strong>
+            <span>저장된 schema는 유지하고 문서, batch, 추출 결과, raw extraction 기록만 비웁니다.</span>
+          </div>
+          <button type="button" className="danger-outline compact" disabled={Boolean(props.busy)} onClick={props.onClearParsingHistory}>
+            <Trash2 size={16} />
+            기록 비우기
           </button>
         </div>
         <div className="settings-status">
@@ -3384,9 +3466,12 @@ function SchemaBuilder(props: {
   regionTarget: RegionEditorTarget | null;
   activePage: number;
   systemStatus: SystemStatus | null;
+  savedSchemas: SavedSchema[];
+  schemaNameConflict: SavedSchema | null;
   templates: SavedSchema[];
   onSchemaName: (value: string) => void;
   onSchemaDescription: (value: string) => void;
+  onLoadSavedSchema: (schemaId: string) => void;
   onSchemaJsonInput: (value: string) => void;
   onImportSchemaJson: () => void;
   onUpdateField: (index: number, patch: Partial<FieldDefinition>) => void;
@@ -3436,10 +3521,34 @@ function SchemaBuilder(props: {
       </div>
 
       <div className="schema-core-panel">
-        <label className="field-stack">
-          <span>Schema name</span>
-          <input value={props.schemaName} onChange={(event) => props.onSchemaName(event.target.value)} />
-        </label>
+        <div className="schema-name-grid">
+          <label className="field-stack">
+            <span>Schema name</span>
+            <input value={props.schemaName} onChange={(event) => props.onSchemaName(event.target.value)} />
+          </label>
+          <label className="field-stack">
+            <span>Load saved schema</span>
+            <select
+              value={props.savedSchema?.id ?? ""}
+              onChange={(event) => {
+                if (event.target.value) props.onLoadSavedSchema(event.target.value);
+              }}
+            >
+              <option value="">저장된 schema 선택</option>
+              {props.savedSchemas.map((savedSchema) => (
+                <option key={savedSchema.id} value={savedSchema.id}>
+                  {savedSchema.display_name || savedSchema.name} · v{savedSchema.current_version} · {savedSchema.fields.length} fields
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {props.schemaNameConflict && (
+          <div className="notice-card compact-notice">
+            이미 저장된 schema 이름입니다. 기존 schema를 수정하려면 드롭다운에서{" "}
+            <strong>{props.schemaNameConflict.display_name || props.schemaNameConflict.name}</strong>을 불러오세요.
+          </div>
+        )}
         <label className="field-stack">
           <span>Schema description</span>
           <textarea value={props.schemaDescription} onChange={(event) => props.onSchemaDescription(event.target.value)} />
@@ -4144,6 +4253,19 @@ function hasMeaningfulSchema(fields: SchemaField[]) {
   return fields.some((field) => field.key_name.trim() || field.description.trim());
 }
 
+function findSavedSchemaNameConflict(name: string, schemas: SavedSchema[], currentSchemaId: string | null) {
+  const normalized = name.trim();
+  if (!normalized) return null;
+  return (
+    schemas.find(
+      (schema) =>
+        !schema.ephemeral &&
+        schema.id !== currentSchemaId &&
+        (schema.name.trim() === normalized || (schema.display_name ?? "").trim() === normalized)
+    ) ?? null
+  );
+}
+
 function exportHref(resultId: string, format: "json" | "csv", presetId: string) {
   const params = new URLSearchParams({ format });
   if (presetId) params.set("preset_id", presetId);
@@ -4327,6 +4449,9 @@ function toFriendlyError(error: unknown): string {
   }
   if (message.includes("Unsupported VLM_PROVIDER")) {
     return "Unsupported VLM_PROVIDER. Use auto, mock, openai_compatible, or google_genai.";
+  }
+  if (message.includes("Schema name already exists")) {
+    return "이미 저장된 schema 이름입니다. 드롭다운에서 기존 schema를 불러오거나 다른 이름으로 저장하세요.";
   }
   return message;
 }

@@ -149,6 +149,7 @@ class SchemaRead(BaseModel):
     is_template: bool
     template_category: str | None
     pinned: bool
+    ephemeral: bool = False
     regions: list[SchemaRegion]
     fields: list[FieldDefinition]
     created_at: datetime
@@ -239,6 +240,12 @@ class ExtractionJobCreate(BaseModel):
     document_id: str
     schema_id: str
     schema_version: int | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+class DraftExtractionJobCreate(BaseModel):
+    document_id: str
+    schema_definition: SchemaCreate = Field(alias="schema")
     options: dict[str, Any] = Field(default_factory=dict)
 
 

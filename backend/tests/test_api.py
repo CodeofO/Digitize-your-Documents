@@ -16,6 +16,7 @@ from tests.conftest import get_client
 ONE_BY_ONE_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+SCHEMA_COUNTER = 0
 
 
 def test_health() -> None:
@@ -426,6 +427,87 @@ def test_extraction_mock_mode_returns_evidence_and_normalized_values() -> None:
             )
             assert patch.status_code == 200, patch.text
             assert patch.json()["corrected_output"]["values"]["invoice_number"]["value"] == "INV-EDITED"
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_draft_extraction_does_not_list_schema() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            document = upload_png(client)
+            response = client.post(
+                "/api/extraction-jobs/draft",
+                json={
+                    "document_id": document["document_id"],
+                    "schema": {
+                        "name": "unsaved_draft_schema",
+                        "display_name": "Unsaved Draft Schema",
+                        "fields": [
+                            {
+                                "key_name": "draft_value",
+                                "description": "Value visible in the draft document.",
+                                "output_format": "string",
+                            }
+                        ],
+                    },
+                },
+            )
+            assert response.status_code == 200, response.text
+            job = client.get(f"/api/extraction-jobs/{response.json()['job_id']}").json()
+            assert job["status"] == "completed"
+            assert job["result"]["validated_output"]["values"]["draft_value"]["value"] == "Sample draft_value"
+
+            schemas = client.get("/api/schemas").json()
+            assert all(item["name"] != "unsaved_draft_schema" for item in schemas)
+            hidden_schema = client.get(f"/api/schemas/{job['schema_id']}")
+            assert hidden_schema.status_code == 200
+            assert hidden_schema.json()["ephemeral"] is True
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_schema_name_conflict_and_clear_parsing_history() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="conflict_schema")
+            duplicate = client.post(
+                "/api/schemas",
+                json={
+                    "name": "conflict_schema",
+                    "fields": [
+                        {
+                            "key_name": "other",
+                            "description": "Other field.",
+                            "output_format": "string",
+                        }
+                    ],
+                },
+            )
+            assert duplicate.status_code == 409
+
+            document = upload_png(client)
+            job_response = client.post(
+                "/api/extraction-jobs",
+                json={"document_id": document["document_id"], "schema_id": schema["id"]},
+            )
+            assert job_response.status_code == 200
+            job = client.get(f"/api/extraction-jobs/{job_response.json()['job_id']}").json()
+            assert job["status"] == "completed"
+
+            cleared = client.delete("/api/maintenance/parsing-history")
+            assert cleared.status_code == 200, cleared.text
+            payload = cleared.json()
+            assert payload["status"] == "cleared"
+            assert payload["counts"]["documents"] >= 1
+            assert client.get("/api/documents").json() == []
+            assert client.get("/api/extraction-jobs").json() == []
+            assert any(item["id"] == schema["id"] for item in client.get("/api/schemas").json())
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
@@ -883,12 +965,15 @@ def upload_png(client):
     return response.json()
 
 
-def create_schema(client):
+def create_schema(client, name: str | None = None):
+    global SCHEMA_COUNTER
+    SCHEMA_COUNTER += 1
+    schema_name = name or ("invoice_basic" if SCHEMA_COUNTER == 1 else f"invoice_basic_{SCHEMA_COUNTER}")
     response = client.post(
         "/api/schemas",
         json={
-            "name": "invoice_basic",
-            "display_name": "Invoice Basic",
+            "name": schema_name,
+            "display_name": schema_name.replace("_", " ").title(),
             "fields": [
                 {
                     "key_name": "invoice_number",
