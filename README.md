@@ -1,22 +1,45 @@
 <div align="center">
   <h1>Digitize Your Document</h1>
-  <p><b>대용량 문서에서 사람이 반복해서 찾던 값을 업로드, 추출, 검토, 정렬 export까지 자동화하는 워크스페이스</b></p>
+  <p><b>반복적인 문서 접수, 분류, 누락 검수, 핵심 정보 추출, 결과 정리를 한 화면에서 자동화합니다.</b></p>
   <p>
-    <code>React</code>
-    <code>Vite</code>
-    <code>TypeScript</code>
-    <code>FastAPI</code>
-    <code>SQLite</code>
-    <code>LangChain</code>
-    <code>LibreOffice</code>
-    <code>PyMuPDF</code>
+    <code>문서 접수 자동화</code>
+    <code>필수 항목 누락 검수</code>
+    <code>문서 종류 분류</code>
+    <code>핵심 정보 추출</code>
+    <code>배치 CSV/JSON export</code>
   </p>
 </div>
 
 ![Digitize Your Document Overview](assets/readme_overview.png)
 
+## 어디에 활용할 수 있나
+
+대량 문서를 사람이 열어 보고, 어떤 문서인지 나누고, 비어 있는 항목을 확인하고, 필요한 값을 엑셀로 옮기는 업무에 바로 적용할 수 있습니다.
+
+| 활용 영역 | 자동화할 수 있는 일 | 기대 효과 |
+| --- | --- | --- |
+| 금융/보험 접수 | 신청서, 동의서, 신분/소득 증빙 분류와 필수 서명/체크박스 누락 확인 | 접수 반려와 재요청 시간을 줄입니다. |
+| 공공/병원/교육 서류 | 신청서 유형 분류, 작성일/성명/서명/첨부 여부 확인 | 담당자 검수 대기열을 빠르게 정리합니다. |
+| 회계/구매/정산 | 영수증, 세금계산서, 발주서, 검수 문서의 핵심값 추출 | 수기 입력과 파일명별 취합 작업을 줄입니다. |
+| 운영/연구 문서 | PDF, PPTX, DOCX, XLSX 원문을 HTML로 변환하고 필요한 표/문장을 확인 | 검색 가능한 내부 자료화와 검토 속도를 높입니다. |
+| 대량 백오피스 처리 | 50장 이상 파일을 한 번에 업로드하고 결과를 검수/export | 반복 클릭과 엑셀 정리 시간을 줄입니다. |
+
+## 업무 자동화 범위
+
+Digitize Your Document를 사용하면 대량 문서에서 수작업으로 값을 확인하던 업무를 몇 분 단위의 자동 처리로 바꿀 수 있습니다.
+
+| 자동화 대상 | 처리 방식 | 결과 |
+| --- | --- | --- |
+| 대량 이미지/PDF에서 특정 값 추출 | 사용자 schema + 선택 region + VLM structured output | 파일명 기준 정렬 CSV/JSON |
+| 문서 종류 분류 | 사용자가 정의한 class 후보 + unknown 허용 | 파일별 class, confidence, evidence |
+| 필수 항목 누락 확인 | checklist + evidence type + optional region | complete/incomplete/needs_review |
+| DOCX/PPTX/PDF 원문 확인 | LibreOffice/PyMuPDF preview + Python parser | PDF preview + HTML 원문 |
+| 50장 이상 반복 검토 | Batch sidebar + progress polling + result review | 항목별 검토와 batch export |
+| 손글씨/복잡한 레이아웃 보조 | full page context + masked page + enlarged crop | region 기반 집중 추출 |
+
 ## 2026-05-21 변경 사항
 
+- README 상단 이미지를 최신 모듈 구조와 비즈니스 활용 중심으로 교체했습니다.
 - GitHub에 올라가는 문서를 `README.md`, `DEVELOPMENT_DEFINITION.md`, `ERROR_NOTE.md` 중심으로 정리했습니다. 로컬 이해용 HTML과 디자인 기록은 저장소에 올리지 않습니다.
 - `.gitignore`를 default-deny 방식으로 바꿨습니다. 모든 파일을 먼저 무시하고, 제품 실행에 필요한 source/config/docs/assets만 `!` allowlist로 추적합니다.
 - 표로 표현 가능한 설정/결과 UI는 KIE field table 스타일로 통일합니다. Document Classifier의 class 후보, Required Field Checker의 checklist item, 결과/review table도 같은 문법을 따릅니다.
@@ -34,21 +57,6 @@
 - Batch progress polling은 active batch를 1초 간격으로 직접 조회하고, API cache를 끄도록 보강했습니다.
 - SQLite는 WAL과 busy timeout을 적용해 batch worker와 polling read가 겹칠 때의 잠금 대기를 줄였습니다.
 - README와 개발정의서를 “업무 자동화 가치 → 기술 세부사항” 흐름으로 재정리했습니다.
-
-## 할 수 있는 일
-
-Digitize Your Document를 사용하면 대량 문서에서 수작업으로 값을 확인하던 업무를 몇 분 단위의 자동 처리로 바꿀 수 있습니다.
-
-| 자동화 대상 | 처리 방식 | 결과 |
-| --- | --- | --- |
-| 대량 이미지/PDF에서 특정 값 추출 | 사용자 schema + 선택 region + VLM structured output | 파일명 기준 정렬 CSV/JSON |
-| 문서 종류 분류 | 사용자가 정의한 class 후보 + unknown 허용 | 파일별 class, confidence, evidence |
-| 필수 항목 누락 확인 | checklist + evidence type + optional region | complete/incomplete/needs_review |
-| DOCX/PPTX/PDF 원문 확인 | LibreOffice/PyMuPDF preview + Python parser | PDF preview + HTML 원문 |
-| 50장 이상 반복 검토 | Batch sidebar + progress polling + result review | 항목별 검토와 batch export |
-| 손글씨/복잡한 레이아웃 보조 | full page context + masked page + enlarged crop | region 기반 집중 추출 |
-
-![KIE VLM 작동 원리](assets/vlm_runtime_overview.png)
 
 ## 기능
 
@@ -256,6 +264,8 @@ Raw API:
 Region field는 VLM 입력 시 두 이미지를 함께 사용합니다. 하나는 region 외부를 흐리게 만든 원본 page context이고, 다른 하나는 실제 판독용 crop입니다. 따라서 description에 “우측 하단” 같은 위치 표현이 있어도 원본 page 위치 맥락과 crop 집중도를 함께 제공합니다.
 
 KIE 추출은 group 단위로 나뉩니다. `region_id`가 없는 field들은 full-page group 1회로 추출하고, `region_id`가 있는 field들은 사용 중인 region별로 묶어 각각 추출합니다. 따라서 호출 수는 `full-page field가 있으면 1회 + 사용 중인 region 수`입니다.
+
+![KIE VLM 작동 원리](assets/vlm_runtime_overview.png)
 
 KIE 결과 확인 후 다른 문서를 다시 로드하려면 좌측 Document toolbar의 `Replace`를 사용합니다. 현재 schema는 유지하고 문서/결과만 교체됩니다. `Clear`는 현재 문서와 결과를 비우고 업로드 화면으로 돌아갑니다.
 
