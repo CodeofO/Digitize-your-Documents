@@ -1,5 +1,35 @@
 # 오류 기록
 
+## 2026-05-21 - Gemini API key가 OpenAI endpoint로 전달됨
+
+### 증상
+
+- Gemini API key(`AIza...`)와 Gemini model name을 설정한 뒤 batch extraction을 실행하면 401 오류가 발생했다.
+- 오류 메시지는 OpenAI 쪽에서 `Incorrect API key provided: AIza...`로 반환되었다.
+
+### 영향
+
+- 사용자는 Gemini를 선택했다고 생각하지만 backend는 OpenAI-compatible client로 호출해 실제 추출이 실패했다.
+- Batch status는 running/failed로 남고 결과 export까지 진행할 수 없었다.
+
+### 원인
+
+- 기존 구현은 `VLM_PROVIDER=openai`/`mock` 중심이었고, provider 값이 `openai`이면 무조건 LangChain `ChatOpenAI` 경로를 사용했다.
+- `VLM_API_KEY` 값이 Gemini native key인지 확인하지 않아 `AIza...` key가 OpenAI endpoint로 전달되었다.
+
+### 수정
+
+- 기본 provider를 `auto`로 변경했다.
+- `VLM_BASE_URL`이 있으면 OpenAI-compatible endpoint를 사용한다.
+- `VLM_API_KEY`가 `AIza`로 시작하고 `VLM_BASE_URL`이 없으면 Google GenAI native Gemini 경로를 사용한다.
+- Gemini native 경로는 `google-genai` SDK의 `models.generate_content`를 사용하고, `response_mime_type="application/json"`과 `response_json_schema`로 structured output을 강제한다.
+
+### 검증
+
+- `.venv/bin/python -m pytest backend/tests -q` 통과
+- `npm run build` 통과
+- `google-genai` import 및 `GenerateContentConfig(response_json_schema=...)` local smoke test 통과
+
 ## 2026-05-21 - 로컬 이동 후 Batch progress polling 지연
 
 ### 증상

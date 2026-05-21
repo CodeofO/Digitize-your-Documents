@@ -27,6 +27,7 @@ Digitize Your Document는 사람이 대량 문서에서 반복적으로 확인�
 - Python 친화적인 backend 중심 구조를 유지한다.
 - VLM secret은 frontend로 전달하지 않는다.
 - Home 화면 우측 상단 Setting popup에서 VLM API key/model name과 LibreOffice path를 저장하면 root `.env`가 자동 생성/갱신된다.
+- VLM 호출 방식은 `.env`의 API key와 base URL을 기반으로 자동 결정한다. `VLM_BASE_URL`이 있으면 OpenAI-compatible, `AIza` key이면 Google GenAI native Gemini, 그 외는 OpenAI-compatible로 호출한다.
 - VLM runtime parameter는 `.env`와 Setting popup에서 제어한다. Thinking 계열 모델은 기본 `reasoning_effort=minimal`, `verbosity=low`로 빠른 추출을 우선한다.
 - 사용자는 별도 환경 파일 복사 절차 없이 git clone 후 Home에서 설정할 수 있다.
 
@@ -156,6 +157,8 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 - LangChain `with_structured_output`을 사용한다.
 - 동적 JSON schema는 사용자 schema field를 기준으로 생성한다.
 - 문서 page image는 base64 data URL로 전달한다.
+- OpenAI-compatible endpoint는 LangChain `ChatOpenAI.with_structured_output(method="json_schema", strict=True)`로 호출한다.
+- Google GenAI native Gemini는 `google-genai` SDK의 `models.generate_content`에 `response_mime_type="application/json"`, `response_json_schema=<동적 JSON schema>`, `types.Part.from_bytes(...)` image part를 전달한다.
 - 공통 runtime parameter는 `.env`에서 제어한다. `VLM_REASONING_EFFORT=minimal`, `VLM_VERBOSITY=low`를 기본값으로 두어 thinking 모델도 빠른 응답을 우선한다.
 - 선택 parameter로 `VLM_MAX_COMPLETION_TOKENS`, `VLM_TOP_P`, `VLM_SERVICE_TIER`를 지원한다. 값이 비어 있으면 해당 parameter는 VLM 호출에 전달하지 않는다.
 - `region_id`가 있는 field는 해당 region crop을 함께 전달한다.
@@ -238,7 +241,7 @@ VLM 환경변수는 Home 화면의 Save를 통해 root `.env`에 자동 저장�
 
 ```env
 APP_ENV=local
-VLM_PROVIDER=openai
+VLM_PROVIDER=auto
 VLM_API_KEY=
 VLM_MODEL_NAME=
 VLM_BASE_URL=

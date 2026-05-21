@@ -19,6 +19,7 @@ fi
 if ! "${ROOT_DIR}/.venv/bin/python" - <<'PY' >/dev/null 2>&1
 import bleach
 import fastapi
+import google.genai
 import pymupdf
 import uvicorn
 import uvicorn.middleware.asgi2
@@ -27,7 +28,7 @@ PY
 then
   echo "Backend dependencies look incomplete. Refresh the uv environment:"
   echo "  uv pip install -e 'backend[dev]'"
-  echo "  uv pip install --reinstall 'uvicorn[standard]' fastapi pymupdf bleach"
+  echo "  uv pip install --reinstall 'uvicorn[standard]' fastapi pymupdf bleach google-genai"
   exit 1
 fi
 

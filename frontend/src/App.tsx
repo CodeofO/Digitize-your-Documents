@@ -928,7 +928,7 @@ export default function App() {
           top_p: vlmTopP,
           service_tier: vlmServiceTier,
           batch_max_workers: Number.parseInt(batchMaxWorkers, 10) || 4,
-          provider: "openai"
+          provider: "auto"
         })
       });
       setVlmSettings(settings);
@@ -4088,7 +4088,7 @@ function StepPill({ label, active, done }: { label: string; active: boolean; don
 
 function ProviderPill({ status }: { status: SystemStatus | null }) {
   if (!status) return <span className="provider-pill warning">API unknown</span>;
-  const label = status.is_mock ? "Mock mode" : "OpenAI mode";
+  const label = status.is_mock ? "Mock mode" : status.vlm_provider === "google_genai" ? "Gemini mode" : "OpenAI-compatible mode";
   const detail = status.vlm_model_name || (status.has_vlm_credentials ? "model ready" : "missing model");
   return (
     <span className={`provider-pill ${status.is_mock ? "mock" : status.has_vlm_credentials ? "ready" : "warning"}`}>
@@ -4325,8 +4325,8 @@ function toFriendlyError(error: unknown): string {
   if (message.includes("VLM API key and model name are required")) {
     return "VLM credentials are missing. Go Home and use Setting to save API key and model name, or use VLM_PROVIDER=mock for a local demo.";
   }
-  if (message.includes("Only openai or mock")) {
-    return "Unsupported VLM_PROVIDER. Use openai for real extraction or mock for local demo mode.";
+  if (message.includes("Unsupported VLM_PROVIDER")) {
+    return "Unsupported VLM_PROVIDER. Use auto, mock, openai_compatible, or google_genai.";
   }
   return message;
 }

@@ -212,7 +212,7 @@ class VlmSettingsUpdate(BaseModel):
     api_key: str | None = None
     model_name: str
     libreoffice_path: str | None = None
-    provider: str = "openai"
+    provider: str = "auto"
     reasoning_effort: str | None = None
     verbosity: str | None = None
     max_completion_tokens: str | None = None

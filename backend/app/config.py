@@ -11,7 +11,7 @@ ROOT_ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_LIBREOFFICE_PATH = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
 DEFAULT_ENV_VALUES = {
     "APP_ENV": "local",
-    "VLM_PROVIDER": "openai",
+    "VLM_PROVIDER": "auto",
     "VLM_API_KEY": "",
     "VLM_MODEL_NAME": "",
     "VLM_BASE_URL": "",
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     raw_storage_dir: str | None = None
     libreoffice_path: str | None = None
 
-    vlm_provider: str = "openai"
+    vlm_provider: str = "auto"
     vlm_api_key: str | None = None
     vlm_model_name: str | None = None
     vlm_base_url: str | None = None

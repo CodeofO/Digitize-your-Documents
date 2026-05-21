@@ -1,4 +1,5 @@
 import base64
+import json
 import mimetypes
 from pathlib import Path
 from typing import Any
@@ -47,44 +48,83 @@ def extract_with_vlm(
     image_inputs: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
-    provider = settings.vlm_provider.lower()
-    if provider == "mock":
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
         return _mock_extraction(fields)
 
-    api_key = settings.resolved_vlm_api_key
-    model_name = settings.resolved_vlm_model_name
-    if not api_key or not model_name:
-        raise RuntimeError("VLM API key and model name are required")
-    if provider != "openai":
-        raise RuntimeError("Only openai or mock VLM_PROVIDER is supported in this MVP")
+    _ensure_vlm_credentials(settings)
 
-    content = _build_multimodal_content(_build_user_prompt(fields), image_inputs or _image_inputs_from_paths(image_paths or []))
-    return _invoke_structured_llm(SYSTEM_PROMPT, content, build_structured_output_schema(fields))
+    prompt = _build_user_prompt(fields)
+    inputs = image_inputs or _image_inputs_from_paths(image_paths or [])
+    return _invoke_structured_llm(SYSTEM_PROMPT, prompt, inputs, build_structured_output_schema(fields), api_style)
 
 
 def recommend_schema_with_vlm(image_paths: list[str]) -> dict[str, Any]:
     settings = get_settings()
-    provider = settings.vlm_provider.lower()
-    if provider == "mock":
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
         return _mock_schema_recommendation()
 
-    api_key = settings.resolved_vlm_api_key
-    model_name = settings.resolved_vlm_model_name
-    if not api_key or not model_name:
-        raise RuntimeError("VLM API key and model name are required")
-    if provider != "openai":
-        raise RuntimeError("Only openai or mock VLM_PROVIDER is supported in this MVP")
+    _ensure_vlm_credentials(settings)
 
     prompt = (
         "Recommend 5 to 8 fields that a user is likely to want from this document. "
         "Prefer visible business-critical fields over generic metadata. "
         "Choose key_name values in the document's primary language."
     )
-    content = _build_multimodal_content(prompt, _image_inputs_from_paths(image_paths))
-    return _invoke_structured_llm(SCHEMA_RECOMMENDATION_PROMPT, content, _schema_recommendation_output_schema())
+    return _invoke_structured_llm(
+        SCHEMA_RECOMMENDATION_PROMPT,
+        prompt,
+        _image_inputs_from_paths(image_paths),
+        _schema_recommendation_output_schema(),
+        api_style,
+    )
 
 
-def _invoke_structured_llm(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any]) -> dict[str, Any]:
+def resolve_vlm_api_style(settings=None) -> str:
+    settings = settings or get_settings()
+    provider = (settings.vlm_provider or "auto").strip().lower()
+    api_key = settings.resolved_vlm_api_key or ""
+    base_url = (settings.vlm_base_url or "").strip()
+
+    if provider == "mock":
+        return "mock"
+    if provider in {"google", "gemini", "google_genai"}:
+        return "google_genai"
+    if provider in {"openai_compatible", "openai"} and api_key.startswith("AIza") and not base_url:
+        return "google_genai"
+    if provider in {"auto", ""}:
+        if base_url:
+            return "openai_compatible"
+        if api_key.startswith("AIza"):
+            return "google_genai"
+        return "openai_compatible"
+    if provider in {"openai_compatible", "openai"}:
+        return "openai_compatible"
+    raise RuntimeError("Unsupported VLM_PROVIDER. Use auto, mock, openai_compatible, or google_genai.")
+
+
+def _ensure_vlm_credentials(settings) -> None:
+    if not settings.resolved_vlm_api_key or not settings.resolved_vlm_model_name:
+        raise RuntimeError("VLM API key and model name are required")
+
+
+def _invoke_structured_llm(
+    system_prompt: str,
+    prompt: str,
+    image_inputs: list[dict[str, str]],
+    output_schema: dict[str, Any],
+    api_style: str,
+) -> dict[str, Any]:
+    if api_style == "google_genai":
+        return _invoke_google_genai(system_prompt, prompt, image_inputs, output_schema)
+    if api_style != "openai_compatible":
+        raise RuntimeError(f"Unsupported VLM API style: {api_style}")
+    content = _build_multimodal_content(prompt, image_inputs)
+    return _invoke_openai_compatible(system_prompt, content, output_schema)
+
+
+def _invoke_openai_compatible(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any]) -> dict[str, Any]:
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_openai import ChatOpenAI
 
@@ -103,6 +143,37 @@ def _invoke_structured_llm(system_prompt: str, content: list[dict[str, Any]], ou
     if isinstance(response, str):
         raise RuntimeError("VLM returned a string instead of a structured object")
     raise RuntimeError("VLM returned an unsupported structured response")
+
+
+def _invoke_google_genai(
+    system_prompt: str,
+    prompt: str,
+    image_inputs: list[dict[str, str]],
+    output_schema: dict[str, Any],
+) -> dict[str, Any]:
+    settings = get_settings()
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError("Gemini native mode requires google-genai. Run: uv pip install -e 'backend[dev]'") from exc
+
+    contents: list[Any] = [prompt]
+    for image_input in image_inputs:
+        label = image_input.get("label")
+        if label:
+            contents.append(label)
+        image_path = Path(image_input["path"])
+        contents.append(types.Part.from_bytes(data=image_path.read_bytes(), mime_type=_mime_type_for_path(image_path)))
+
+    config = _build_google_generation_config(system_prompt, output_schema)
+    client = genai.Client(api_key=settings.resolved_vlm_api_key)
+    response = client.models.generate_content(
+        model=settings.resolved_vlm_model_name,
+        contents=contents,
+        config=config,
+    )
+    return _coerce_structured_response(response)
 
 
 def _build_llm_kwargs() -> dict[str, Any]:
@@ -140,6 +211,62 @@ def _build_llm_kwargs() -> dict[str, Any]:
     return llm_kwargs
 
 
+def _build_google_generation_config(system_prompt: str, output_schema: dict[str, Any]) -> dict[str, Any]:
+    settings = get_settings()
+    config: dict[str, Any] = {
+        "system_instruction": system_prompt,
+        "temperature": settings.vlm_temperature,
+        "response_mime_type": "application/json",
+        "response_json_schema": output_schema,
+    }
+    max_output_tokens = _optional_int(settings.vlm_max_completion_tokens)
+    if max_output_tokens is not None:
+        config["max_output_tokens"] = max_output_tokens
+
+    top_p = _optional_float(settings.vlm_top_p)
+    if top_p is not None:
+        config["top_p"] = top_p
+
+    thinking_config = _google_thinking_config(settings.vlm_reasoning_effort)
+    if thinking_config:
+        config["thinking_config"] = thinking_config
+
+    return config
+
+
+def _google_thinking_config(reasoning_effort: str | None) -> dict[str, Any] | None:
+    effort = _clean_optional_text(reasoning_effort)
+    if not effort:
+        return None
+    normalized = effort.lower()
+    if normalized in {"none", "off", "instant", "0"}:
+        return {"thinking_budget": 0}
+    if normalized in {"minimal", "low", "medium", "high"}:
+        return {"thinking_level": normalized}
+    return {"thinking_level": normalized}
+
+
+def _coerce_structured_response(response: Any) -> dict[str, Any]:
+    parsed = getattr(response, "parsed", None)
+    if hasattr(parsed, "model_dump"):
+        return parsed.model_dump()
+    if isinstance(parsed, dict):
+        return parsed
+
+    text = getattr(response, "text", None)
+    if isinstance(text, str) and text.strip():
+        loaded = json.loads(text)
+        if isinstance(loaded, dict):
+            return loaded
+        raise RuntimeError("VLM returned structured JSON that is not an object")
+
+    if isinstance(response, dict):
+        return response
+    if isinstance(response, str):
+        raise RuntimeError("VLM returned a string instead of a structured object")
+    raise RuntimeError("VLM returned an unsupported structured response")
+
+
 def _clean_optional_text(value: str | None) -> str | None:
     if value is None:
         return None
@@ -165,6 +292,10 @@ def _optional_float(value: str | None) -> float | None:
         return float(cleaned)
     except ValueError as exc:
         raise RuntimeError(f"Invalid numeric VLM setting: {cleaned}") from exc
+
+
+def _mime_type_for_path(path: Path) -> str:
+    return mimetypes.guess_type(path.name)[0] or "image/png"
 
 
 def _json_schema_for_field(field: FieldDefinition) -> dict[str, Any]:

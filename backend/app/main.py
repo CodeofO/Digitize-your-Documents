@@ -63,7 +63,7 @@ from app.schemas import (
     VlmSettingsRead,
     VlmSettingsUpdate,
 )
-from app.vlm import recommend_schema_with_vlm
+from app.vlm import recommend_schema_with_vlm, resolve_vlm_api_style
 
 
 @asynccontextmanager
@@ -97,7 +97,7 @@ def health() -> dict[str, str]:
 @app.get("/api/system/status", response_model=SystemStatusRead)
 def system_status() -> SystemStatusRead:
     settings = get_settings()
-    provider = settings.vlm_provider.lower()
+    provider = resolve_vlm_api_style(settings)
     return SystemStatusRead(
         app_env=settings.app_env,
         vlm_provider=provider,
@@ -111,7 +111,7 @@ def system_status() -> SystemStatusRead:
 def get_vlm_settings() -> VlmSettingsRead:
     settings = get_settings()
     return VlmSettingsRead(
-        provider=settings.vlm_provider.lower(),
+        provider=resolve_vlm_api_style(settings),
         model_name=settings.resolved_vlm_model_name,
         libreoffice_path=settings.libreoffice_path or DEFAULT_LIBREOFFICE_PATH,
         reasoning_effort=settings.vlm_reasoning_effort,
@@ -127,9 +127,9 @@ def get_vlm_settings() -> VlmSettingsRead:
 
 @app.put("/api/settings/vlm", response_model=VlmSettingsRead)
 def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
-    provider = payload.provider.strip().lower() or "openai"
-    if provider not in {"openai", "mock"}:
-        raise HTTPException(status_code=400, detail="Only openai or mock provider is supported")
+    provider = payload.provider.strip().lower() or "auto"
+    if provider not in {"auto", "openai", "openai_compatible", "google", "gemini", "google_genai", "mock"}:
+        raise HTTPException(status_code=400, detail="Use auto, mock, openai_compatible, or google_genai")
 
     updates = {
         "VLM_PROVIDER": provider,

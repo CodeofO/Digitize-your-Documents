@@ -93,7 +93,7 @@ Backend와 frontend를 한 번에 실행합니다.
 | Frontend | `http://127.0.0.1:5173` | Vite dev server |
 
 `scripts/run_dev.sh`의 backend reload 감시 범위는 `.venv`, local DB, storage output 변경으로 extraction 작업이 재시작되지 않도록 `backend/app`으로 제한합니다.
-`run_dev.sh`는 실행 전에 backend 핵심 의존성(`pymupdf`, `bleach`)과 frontend 핵심 패키지 파일을 점검합니다. `node_modules`가 없거나 불완전하면 lockfile 기준 `npm ci`로 복구합니다.
+`run_dev.sh`는 실행 전에 backend 핵심 의존성(`pymupdf`, `bleach`, `google-genai`)과 frontend 핵심 패키지 파일을 점검합니다. `node_modules`가 없거나 불완전하면 lockfile 기준 `npm ci`로 복구합니다.
 
 ## 설정
 
@@ -105,7 +105,7 @@ Home 화면 우측 상단 `Setting` 버튼에서 API key, model name, LibreOffic
 APP_ENV=local
 DATABASE_URL=sqlite:///backend/kie.db
 DOCUMENT_STORAGE_DIR=backend/storage/documents
-VLM_PROVIDER=openai
+VLM_PROVIDER=auto
 VLM_API_KEY=
 VLM_MODEL_NAME=
 VLM_BASE_URL=
@@ -121,7 +121,34 @@ BATCH_MAX_WORKERS=8
 LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
 ```
 
+`VLM_PROVIDER=auto`에서는 별도 provider 선택 없이 호출 방식을 자동 결정합니다.
+
+| 입력 | 내부 호출 방식 |
+| --- | --- |
+| `VLM_BASE_URL` 있음 | OpenAI-compatible endpoint |
+| `VLM_API_KEY`가 `AIza`로 시작하고 `VLM_BASE_URL` 없음 | Google GenAI native Gemini |
+| 그 외 API key | OpenAI-compatible endpoint |
+| `VLM_PROVIDER=mock` | 로컬 mock |
+
 `VLM_API_KEY`와 `VLM_MODEL_NAME`이 있으면 이 값이 우선 사용됩니다. `OPENAI_API_KEY`, `OPENAI_MODEL_NAME`은 하위 호환 alias이며 `VLM_*`가 비어 있을 때만 fallback으로 사용합니다.
+
+예시:
+
+```env
+# Gemini native
+VLM_PROVIDER=auto
+VLM_API_KEY=AIza...
+VLM_MODEL_NAME=gemini-3.1-flash-lite
+VLM_BASE_URL=
+```
+
+```env
+# OpenAI-compatible gateway
+VLM_PROVIDER=auto
+VLM_API_KEY=...
+VLM_MODEL_NAME=google/gemini-3.1-flash-lite
+VLM_BASE_URL=https://openrouter.ai/api/v1
+```
 
 Thinking 모델을 빠르게 쓰고 싶다면 기본값을 유지합니다.
 

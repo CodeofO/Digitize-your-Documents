@@ -109,6 +109,49 @@ def test_vlm_runtime_kwargs_include_speed_controls(monkeypatch) -> None:
         get_settings.cache_clear()
 
 
+def test_vlm_api_style_auto_detects_google_and_base_url(monkeypatch) -> None:
+    from app.vlm import resolve_vlm_api_style
+
+    try:
+        monkeypatch.setenv("VLM_PROVIDER", "auto")
+        monkeypatch.setenv("VLM_API_KEY", "AIzaSyCP_test_key")
+        monkeypatch.setenv("VLM_MODEL_NAME", "gemini-3.1-flash-lite")
+        monkeypatch.delenv("VLM_BASE_URL", raising=False)
+        get_settings.cache_clear()
+        assert resolve_vlm_api_style() == "google_genai"
+
+        monkeypatch.setenv("VLM_BASE_URL", "https://openrouter.ai/api/v1")
+        get_settings.cache_clear()
+        assert resolve_vlm_api_style() == "openai_compatible"
+
+        monkeypatch.setenv("VLM_PROVIDER", "openai")
+        monkeypatch.delenv("VLM_BASE_URL", raising=False)
+        get_settings.cache_clear()
+        assert resolve_vlm_api_style() == "google_genai"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_google_generation_config_uses_structured_output_and_thinking_level(monkeypatch) -> None:
+    from app.vlm import _build_google_generation_config
+
+    try:
+        monkeypatch.setenv("VLM_PROVIDER", "auto")
+        monkeypatch.setenv("VLM_API_KEY", "AIzaSyCP_test_key")
+        monkeypatch.setenv("VLM_MODEL_NAME", "gemini-3.1-flash-lite")
+        monkeypatch.setenv("VLM_REASONING_EFFORT", "minimal")
+        get_settings.cache_clear()
+
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+        config = _build_google_generation_config("system", schema)
+        assert config["system_instruction"] == "system"
+        assert config["response_mime_type"] == "application/json"
+        assert config["response_json_schema"] == schema
+        assert config["thinking_config"] == {"thinking_level": "minimal"}
+    finally:
+        get_settings.cache_clear()
+
+
 def test_schema_validation_and_creation() -> None:
     with get_client() as client:
         invalid = client.post(
