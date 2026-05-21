@@ -114,6 +114,12 @@ def get_vlm_settings() -> VlmSettingsRead:
         provider=settings.vlm_provider.lower(),
         model_name=settings.resolved_vlm_model_name,
         libreoffice_path=settings.libreoffice_path or DEFAULT_LIBREOFFICE_PATH,
+        reasoning_effort=settings.vlm_reasoning_effort,
+        verbosity=settings.vlm_verbosity,
+        max_completion_tokens=settings.vlm_max_completion_tokens,
+        top_p=settings.vlm_top_p,
+        service_tier=settings.vlm_service_tier,
+        batch_max_workers=settings.batch_max_workers,
         has_api_key=bool(settings.resolved_vlm_api_key),
         env_path=str(ROOT_ENV_PATH),
     )
@@ -129,6 +135,12 @@ def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
         "VLM_PROVIDER": provider,
         "VLM_MODEL_NAME": payload.model_name.strip(),
         "LIBREOFFICE_PATH": (payload.libreoffice_path or "").strip() or DEFAULT_LIBREOFFICE_PATH,
+        "VLM_REASONING_EFFORT": (payload.reasoning_effort or "minimal").strip(),
+        "VLM_VERBOSITY": (payload.verbosity or "low").strip(),
+        "VLM_MAX_COMPLETION_TOKENS": (payload.max_completion_tokens or "").strip(),
+        "VLM_TOP_P": (payload.top_p or "").strip(),
+        "VLM_SERVICE_TIER": (payload.service_tier or "").strip(),
+        "BATCH_MAX_WORKERS": str(payload.batch_max_workers or get_settings().batch_max_workers),
     }
     api_key = (payload.api_key or "").strip()
     if api_key:
@@ -710,7 +722,7 @@ def create_batch(
     db.add(batch)
     db.flush()
     job_ids: list[str] = []
-    for file in files:
+    for file in sorted(files, key=_upload_file_sort_key):
         document = _create_document_from_upload(file, db)
         job = ExtractionJob(
             document_id=document.id,
@@ -829,7 +841,7 @@ def export_batch(
 
     schema_data = json.loads(schema_version.schema_json)
     field_names = [field["key_name"] for field in schema_data.get("fields", [])]
-    rows = [_batch_export_row(item, field_names) for item in batch.items]
+    rows = [_batch_export_row(item, field_names) for item in _sorted_batch_items(batch.items)]
     payload = {
         "batch_id": batch.id,
         "schema_id": batch.schema_id,
@@ -1083,7 +1095,7 @@ def _job_read(job: ExtractionJob) -> ExtractionJobRead:
 
 
 def _batch_read(batch: Batch) -> BatchRead:
-    items = [_batch_item_read(item) for item in batch.items]
+    items = [_batch_item_read(item) for item in _sorted_batch_items(batch.items)]
     completed_statuses = {"completed", "needs_review"}
     completed_count = sum(1 for item in items if item.status in completed_statuses)
     failed_count = sum(1 for item in items if item.status == "failed")
@@ -1128,6 +1140,19 @@ def _batch_item_read(item: BatchItem) -> BatchItemRead:
         error_message=item.job.error_message if item.job else None,
         created_at=item.created_at,
     )
+
+
+def _sorted_batch_items(items) -> list[BatchItem]:
+    return sorted(items, key=_batch_item_sort_key)
+
+
+def _batch_item_sort_key(item: BatchItem) -> tuple[str, str]:
+    return (item.filename.casefold(), item.id)
+
+
+def _upload_file_sort_key(file: UploadFile) -> tuple[str, str]:
+    filename = file.filename or ""
+    return (filename.casefold(), filename)
 
 
 def _batch_export_row(item: BatchItem, field_names: list[str]) -> dict[str, Any]:

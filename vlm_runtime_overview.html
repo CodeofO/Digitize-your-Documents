@@ -223,6 +223,7 @@
           <span class="pill">LangChain</span>
           <span class="pill">Structured output</span>
           <span class="pill">Batch parallel</span>
+          <span class="pill">Reasoning minimal</span>
         </div>
       </header>
 
@@ -282,12 +283,16 @@
               <span>batch는 문서 단위 job으로 나뉘며 BATCH_MAX_WORKERS 범위에서 병렬 실행합니다.</span>
             </div>
             <div class="data-card">
+              <strong>Runtime tuning</strong>
+              <span>thinking 모델은 기본 reasoning_effort=minimal, verbosity=low로 빠른 추출을 우선합니다.</span>
+            </div>
+            <div class="data-card">
               <strong>Review UI</strong>
               <span>batch item을 선택하면 좌측 문서와 우측 결과 테이블이 같은 job 기준으로 갱신됩니다.</span>
             </div>
             <div class="data-card">
               <strong>Export</strong>
-              <span>단일 result는 JSON/CSV로, batch는 모든 item을 합친 JSON/CSV로 다운로드합니다.</span>
+              <span>단일 result는 JSON/CSV로, batch는 파일명 오름차순으로 정렬해 JSON/CSV로 다운로드합니다.</span>
             </div>
             <div class="data-card">
               <strong>Region 재사용</strong>
@@ -297,7 +302,7 @@
         </article>
       </section>
 
-      <footer>Generated for README capture - 2026-05-20</footer>
+      <footer>Generated for README capture - 2026-05-21</footer>
     </main>
   </body>
 </html>

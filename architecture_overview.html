@@ -762,6 +762,9 @@ VLM_BASE_URL=
 VLM_TEMPERATURE=0
 VLM_MAX_RETRIES=2
 VLM_TIMEOUT_SECONDS=120
+VLM_REASONING_EFFORT=minimal
+VLM_VERBOSITY=low
+BATCH_MAX_WORKERS=8
 LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice</div>
             </div>
           </div>
@@ -845,6 +848,12 @@ LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice</div>
                 <td>KIE main batch upload + batch file sidebar</td>
                 <td>KIE 메인 업로드 화면에 batch upload를 추가하고, batch 실행 후 좌측 sidebar에서 thumbnail/status를 보며 item을 이동하도록 변경했습니다.</td>
                 <td>50장 이상의 이미지/문서도 별도 modal을 오가지 않고 선택 문서와 우측 결과를 즉시 검토하기 위한 UX 구조입니다.</td>
+              </tr>
+              <tr>
+                <td><strong>v0.7</strong><br />Runtime tuning + sorted export</td>
+                <td>VLM speed controls + filename ordering</td>
+                <td>thinking 모델용 reasoning/verbosity runtime parameter를 추가하고, batch sidebar/export row를 파일명 오름차순으로 고정했습니다.</td>
+                <td>대량 batch 결과를 예측 가능한 순서로 검토/저장하고, reasoning 모델도 빠른 추출 모드로 운용하기 위한 구조입니다.</td>
               </tr>
             </tbody>
           </table>

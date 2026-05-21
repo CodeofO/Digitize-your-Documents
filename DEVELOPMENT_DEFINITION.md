@@ -1,10 +1,16 @@
 # Digitize Your Document 개발정의서
 
-문서 목적: `Digitize Your Document`의 현재 MVP 범위, UX, API, 데이터 처리 방식, 검증 기준을 정의한다.
+문서 목적: `Digitize Your Document`로 대량 문서 추출 업무를 자동화하기 위한 현재 MVP 범위, UX, API, 데이터 처리 방식, 검증 기준을 정의한다.
 
 ## 1. 제품 정의
 
-Digitize Your Document는 다양한 문서를 디지털 정보로 변환하는 React + FastAPI 워크스페이스이다.
+Digitize Your Document는 사람이 대량 문서에서 반복적으로 확인하던 값을 자동 추출, 검토, export할 수 있게 만드는 React + FastAPI 워크스페이스이다.
+
+핵심 자동화 가치:
+
+- 이미지/PDF/Office 문서에서 필요한 값만 schema 기준으로 추출한다.
+- 50장 이상의 batch 문서도 파일명 기준 정렬, 병렬 처리, progress 확인, 일괄 export가 가능하다.
+- 문서 원문은 PDF preview와 HTML 추출 결과로 확인하고, 핵심 값은 VLM structured output으로 검증 가능한 형태로 저장한다.
 
 현재 구현 기능:
 
@@ -21,6 +27,7 @@ Digitize Your Document는 다양한 문서를 디지털 정보로 변환하는 R
 - Python 친화적인 backend 중심 구조를 유지한다.
 - VLM secret은 frontend로 전달하지 않는다.
 - Home 화면 우측 상단 Setting popup에서 VLM API key/model name과 LibreOffice path를 저장하면 root `.env`가 자동 생성/갱신된다.
+- VLM runtime parameter는 `.env`와 Setting popup에서 제어한다. Thinking 계열 모델은 기본 `reasoning_effort=minimal`, `verbosity=low`로 빠른 추출을 우선한다.
 - 사용자는 별도 환경 파일 복사 절차 없이 git clone 후 Home에서 설정할 수 있다.
 
 ## 2. Raw Data Extractor
@@ -149,6 +156,8 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 - LangChain `with_structured_output`을 사용한다.
 - 동적 JSON schema는 사용자 schema field를 기준으로 생성한다.
 - 문서 page image는 base64 data URL로 전달한다.
+- 공통 runtime parameter는 `.env`에서 제어한다. `VLM_REASONING_EFFORT=minimal`, `VLM_VERBOSITY=low`를 기본값으로 두어 thinking 모델도 빠른 응답을 우선한다.
+- 선택 parameter로 `VLM_MAX_COMPLETION_TOKENS`, `VLM_TOP_P`, `VLM_SERVICE_TIER`를 지원한다. 값이 비어 있으면 해당 parameter는 VLM 호출에 전달하지 않는다.
 - `region_id`가 있는 field는 해당 region crop을 함께 전달한다.
 - region field에는 원본 page에서 region 외부를 흐리게 만든 masked context image도 함께 전달한다.
 - 하나의 region은 여러 field의 primary source가 될 수 있다.
@@ -198,6 +207,8 @@ Key Information workspace:
 
 - 기존 upload/schema/review 흐름 유지
 - Home navigation 제공
+- Batch draft와 batch result sidebar는 파일명 기준 오름차순으로 표시한다.
+- Batch export CSV/JSON도 파일명 기준 오름차순으로 row를 정렬한다.
 
 브라우저 Back:
 
@@ -234,6 +245,12 @@ VLM_BASE_URL=
 VLM_TEMPERATURE=0
 VLM_MAX_RETRIES=2
 VLM_TIMEOUT_SECONDS=120
+VLM_REASONING_EFFORT=minimal
+VLM_VERBOSITY=low
+VLM_MAX_COMPLETION_TOKENS=
+VLM_TOP_P=
+VLM_SERVICE_TIER=
+BATCH_MAX_WORKERS=8
 LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
 ```
 
@@ -258,6 +275,7 @@ Backend:
 
 - health/system status
 - VLM settings read/write
+- VLM reasoning/verbosity/max token/top_p/service tier runtime parameter 적용
 - image/PDF/DOCX/PPTX document upload
 - schema create/update
 - extraction failure without credentials
@@ -276,6 +294,7 @@ Frontend:
 - Recent/Search archive/Batch results utility modal 열기/닫기
 - KIE 메인 업로드 화면에서 단일 문서 업로드와 batch 업로드를 함께 제공
 - Batch upload에서 schema 선택, 복수 파일/폴더 업로드, worker 제한 병렬 처리, running batch progress polling, batch 중단, batch CSV/JSON export
+- Batch draft/sidebar/export row가 파일명 기준 오름차순으로 정렬되는지 확인
 - Batch 실행 후 좌측 batch file sidebar에서 1페이지 thumbnail과 상태를 보며 파일 이동, 우측 review 영역에서 선택 파일 결과 즉시 확인
 - Raw Data Extractor upload/preview layout
 - 이미지/수식 추출 옵션 toggle

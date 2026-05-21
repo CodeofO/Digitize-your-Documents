@@ -198,6 +198,12 @@ class VlmSettingsRead(BaseModel):
     provider: str
     model_name: str | None
     libreoffice_path: str | None
+    reasoning_effort: str | None
+    verbosity: str | None
+    max_completion_tokens: str | None
+    top_p: str | None
+    service_tier: str | None
+    batch_max_workers: int
     has_api_key: bool
     env_path: str
 
@@ -207,6 +213,12 @@ class VlmSettingsUpdate(BaseModel):
     model_name: str
     libreoffice_path: str | None = None
     provider: str = "openai"
+    reasoning_effort: str | None = None
+    verbosity: str | None = None
+    max_completion_tokens: str | None = None
+    top_p: str | None = None
+    service_tier: str | None = None
+    batch_max_workers: int | None = Field(default=None, ge=1, le=64)
 
 
 class SchemaRecommendationRequest(BaseModel):

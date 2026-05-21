@@ -85,21 +85,10 @@ def recommend_schema_with_vlm(image_paths: list[str]) -> dict[str, Any]:
 
 
 def _invoke_structured_llm(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any]) -> dict[str, Any]:
-    settings = get_settings()
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_openai import ChatOpenAI
 
-    llm_kwargs: dict[str, Any] = {
-        "model": settings.resolved_vlm_model_name,
-        "api_key": settings.resolved_vlm_api_key,
-        "temperature": settings.vlm_temperature,
-        "timeout": settings.vlm_timeout_seconds,
-        "max_retries": settings.vlm_max_retries,
-    }
-    if settings.vlm_base_url:
-        llm_kwargs["base_url"] = settings.vlm_base_url
-
-    llm = ChatOpenAI(**llm_kwargs)
+    llm = ChatOpenAI(**_build_llm_kwargs())
     structured_llm = llm.with_structured_output(
         output_schema,
         method="json_schema",
@@ -114,6 +103,68 @@ def _invoke_structured_llm(system_prompt: str, content: list[dict[str, Any]], ou
     if isinstance(response, str):
         raise RuntimeError("VLM returned a string instead of a structured object")
     raise RuntimeError("VLM returned an unsupported structured response")
+
+
+def _build_llm_kwargs() -> dict[str, Any]:
+    settings = get_settings()
+    llm_kwargs: dict[str, Any] = {
+        "model": settings.resolved_vlm_model_name,
+        "api_key": settings.resolved_vlm_api_key,
+        "temperature": settings.vlm_temperature,
+        "timeout": settings.vlm_timeout_seconds,
+        "max_retries": settings.vlm_max_retries,
+    }
+    if settings.vlm_base_url:
+        llm_kwargs["base_url"] = settings.vlm_base_url
+
+    reasoning_effort = _clean_optional_text(settings.vlm_reasoning_effort)
+    if reasoning_effort:
+        llm_kwargs["reasoning_effort"] = reasoning_effort
+
+    verbosity = _clean_optional_text(settings.vlm_verbosity)
+    if verbosity:
+        llm_kwargs["verbosity"] = verbosity
+
+    max_completion_tokens = _optional_int(settings.vlm_max_completion_tokens)
+    if max_completion_tokens is not None:
+        llm_kwargs["max_completion_tokens"] = max_completion_tokens
+
+    top_p = _optional_float(settings.vlm_top_p)
+    if top_p is not None:
+        llm_kwargs["top_p"] = top_p
+
+    service_tier = _clean_optional_text(settings.vlm_service_tier)
+    if service_tier:
+        llm_kwargs["service_tier"] = service_tier
+
+    return llm_kwargs
+
+
+def _clean_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _optional_int(value: str | None) -> int | None:
+    cleaned = _clean_optional_text(value)
+    if cleaned is None:
+        return None
+    try:
+        return int(cleaned)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid integer VLM setting: {cleaned}") from exc
+
+
+def _optional_float(value: str | None) -> float | None:
+    cleaned = _clean_optional_text(value)
+    if cleaned is None:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid numeric VLM setting: {cleaned}") from exc
 
 
 def _json_schema_for_field(field: FieldDefinition) -> dict[str, Any]:

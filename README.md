@@ -1,6 +1,6 @@
 <div align="center">
   <h1>Digitize Your Document</h1>
-  <p><b>문서를 업로드하고, 원본 정보 추출과 스키마 기반 정보 추출을 한 화면에서 검증하는 React + FastAPI 워크스페이스</b></p>
+  <p><b>대용량 문서에서 사람이 반복해서 찾던 값을 업로드, 추출, 검토, 정렬 export까지 자동화하는 워크스페이스</b></p>
   <p>
     <code>React</code>
     <code>Vite</code>
@@ -13,16 +13,31 @@
   </p>
 </div>
 
-## 2026-05-20 변경 사항
+![Digitize Your Document Overview](assets/readme_overview.png)
 
-- KIE 업로드 화면에서 단일 문서 업로드와 배치 업로드를 함께 실행할 수 있도록 변경했습니다.
-- 배치 업로드 후 좌측 문서 영역에 batch file sidebar를 추가했습니다. 50장 이상의 이미지/문서도 thumbnail과 상태를 보며 항목별로 이동할 수 있고, 선택한 항목의 결과는 우측 review 영역에 바로 표시됩니다.
-- 배치 처리 진행률은 메인 화면에서 자동 갱신되며, CSV/JSON export는 기존처럼 batch 단위로 다운로드할 수 있습니다.
-- 실제 VLM structured output 흐름을 핵심만 담은 `vlm_runtime_overview.html`과 README용 캡처 이미지를 추가했습니다.
+## 2026-05-21 변경 사항
+
+- Batch 파일은 업로드 직후부터 이미지명 오름차순으로 정렬해 sidebar에 표시합니다.
+- Batch CSV/JSON export도 이미지명 오름차순으로 정렬해 내려받습니다.
+- VLM runtime 설정에 `reasoning_effort`, `verbosity`, `max_completion_tokens`, `top_p`, `service_tier`를 추가했습니다. Thinking 계열 모델도 기본값 `reasoning_effort=minimal`, `verbosity=low`로 빠른 추출을 우선합니다.
+- Batch progress polling은 active batch를 1초 간격으로 직접 조회하고, API cache를 끄도록 보강했습니다.
+- SQLite는 WAL과 busy timeout을 적용해 batch worker와 polling read가 겹칠 때의 잠금 대기를 줄였습니다.
+- README와 개발정의서를 “업무 자동화 가치 → 기술 세부사항” 흐름으로 재정리했습니다.
+
+## 할 수 있는 일
+
+Digitize Your Document를 사용하면 대량 문서에서 수작업으로 값을 확인하던 업무를 몇 분 단위의 자동 처리로 바꿀 수 있습니다.
+
+| 자동화 대상 | 처리 방식 | 결과 |
+| --- | --- | --- |
+| 대량 이미지/PDF에서 특정 값 추출 | 사용자 schema + 선택 region + VLM structured output | 파일명 기준 정렬 CSV/JSON |
+| DOCX/PPTX/PDF 원문 확인 | LibreOffice/PyMuPDF preview + Python parser | PDF preview + HTML 원문 |
+| 50장 이상 반복 검토 | Batch sidebar + progress polling + result review | 항목별 검토와 batch export |
+| 손글씨/복잡한 레이아웃 보조 | full page context + masked page + enlarged crop | region 기반 집중 추출 |
 
 ![KIE VLM 작동 원리](assets/vlm_runtime_overview.png)
 
-## 핵심 기능
+## 기능
 
 | 기능 | 상태 | 설명 |
 | --- | --- | --- |
@@ -31,7 +46,7 @@
 | OCR | 예정 | 단순 OCR 기능으로 확장 예정입니다. |
 | Intelligence Parse | 예정 | 문서를 지능적으로 파싱하는 기능으로 확장 예정입니다. |
 
-## 사용 도구
+## 기술 구성
 
 | 영역 | 도구 |
 | --- | --- |
@@ -47,7 +62,7 @@
 | HTML Safety | bleach sanitize, sandboxed iframe |
 | Dev/Test | uv, pytest, npm, Vite build |
 
-## 빠른 실행
+## 실행
 
 Python은 conda가 아니라 `uv` 기반 `.venv`를 사용합니다.
 
@@ -82,12 +97,14 @@ Backend와 frontend를 한 번에 실행합니다.
 
 ## 설정
 
-Home 화면 우측 상단 `Setting` 버튼에서 API key, model name, LibreOffice path를 저장합니다. Save를 누르면 프로젝트 root의 `.env`가 자동 생성 또는 갱신됩니다.
+Home 화면 우측 상단 `Setting` 버튼에서 API key, model name, LibreOffice path, VLM runtime parameter를 저장합니다. Save를 누르면 프로젝트 root의 `.env`가 자동 생성 또는 갱신됩니다.
 
 주요 값:
 
 ```env
 APP_ENV=local
+DATABASE_URL=sqlite:///backend/kie.db
+DOCUMENT_STORAGE_DIR=backend/storage/documents
 VLM_PROVIDER=openai
 VLM_API_KEY=
 VLM_MODEL_NAME=
@@ -95,9 +112,25 @@ VLM_BASE_URL=
 VLM_TEMPERATURE=0
 VLM_MAX_RETRIES=2
 VLM_TIMEOUT_SECONDS=120
-BATCH_MAX_WORKERS=4
+VLM_REASONING_EFFORT=minimal
+VLM_VERBOSITY=low
+VLM_MAX_COMPLETION_TOKENS=
+VLM_TOP_P=
+VLM_SERVICE_TIER=
+BATCH_MAX_WORKERS=8
 LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
 ```
+
+`VLM_API_KEY`와 `VLM_MODEL_NAME`이 있으면 이 값이 우선 사용됩니다. `OPENAI_API_KEY`, `OPENAI_MODEL_NAME`은 하위 호환 alias이며 `VLM_*`가 비어 있을 때만 fallback으로 사용합니다.
+
+Thinking 모델을 빠르게 쓰고 싶다면 기본값을 유지합니다.
+
+```env
+VLM_REASONING_EFFORT=minimal
+VLM_VERBOSITY=low
+```
+
+모델/provider가 해당 parameter를 지원하지 않으면 값을 비워서 비활성화할 수 있습니다.
 
 로컬 데모에서 실제 VLM 호출을 피하려면 root `.env`에 아래 값을 둘 수 있습니다.
 
@@ -188,10 +221,11 @@ KIE 결과 확인 후 다른 문서를 다시 로드하려면 좌측 Document to
 Batch extraction:
 
 - KIE 메인 업로드 화면에서 저장된 schema 하나를 선택하고 여러 파일 또는 폴더를 업로드해 같은 기준으로 KIE 추출을 실행합니다.
+- 업로드된 파일은 이미지명 기준 오름차순으로 정렬되어 batch sidebar에 표시됩니다.
 - Batch 실행 후 좌측 문서 영역의 batch file sidebar에서 각 파일을 이동할 수 있습니다. 선택한 파일의 문서 preview와 추출 결과가 같은 화면에서 갱신됩니다.
 - Batch 내부 파일들은 `BATCH_MAX_WORKERS` 개수까지 병렬로 VLM extraction을 실행합니다.
 - Batch worker는 VLM 호출 중 DB connection을 들고 있지 않으며, document/schema 준비와 결과 저장 시점에만 짧게 DB session을 사용합니다.
-- Batch sidebar 또는 batch 결과 목록에서 `CSV` 또는 `JSON`을 눌러 batch 전체 결과를 즉시 다운로드할 수 있습니다.
+- Batch sidebar 또는 batch 결과 목록에서 `CSV` 또는 `JSON`을 눌러 batch 전체 결과를 즉시 다운로드할 수 있습니다. Export row도 이미지명 기준 오름차순으로 정렬됩니다.
 - Running/queued batch는 `Stop`으로 중단 요청할 수 있습니다. 이미 VLM 호출 중인 파일은 현재 호출이 끝난 뒤 취소 상태로 정리됩니다.
 
 KIE API:

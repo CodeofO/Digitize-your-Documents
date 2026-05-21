@@ -18,6 +18,11 @@ DEFAULT_ENV_VALUES = {
     "VLM_TEMPERATURE": "0",
     "VLM_MAX_RETRIES": "2",
     "VLM_TIMEOUT_SECONDS": "120",
+    "VLM_REASONING_EFFORT": "minimal",
+    "VLM_VERBOSITY": "low",
+    "VLM_MAX_COMPLETION_TOKENS": "",
+    "VLM_TOP_P": "",
+    "VLM_SERVICE_TIER": "",
     "BATCH_MAX_WORKERS": "4",
     "LIBREOFFICE_PATH": DEFAULT_LIBREOFFICE_PATH,
 }
@@ -37,6 +42,11 @@ class Settings(BaseSettings):
     vlm_temperature: float = 0
     vlm_max_retries: int = 2
     vlm_timeout_seconds: int = 120
+    vlm_reasoning_effort: str | None = "minimal"
+    vlm_verbosity: str | None = "low"
+    vlm_max_completion_tokens: str | None = None
+    vlm_top_p: str | None = None
+    vlm_service_tier: str | None = None
     batch_max_workers: int = 4
 
     openai_api_key: str | None = None
@@ -87,7 +97,12 @@ def get_settings() -> Settings:
 def upsert_root_env(updates: Mapping[str, str], include_defaults: bool = False) -> Path:
     env_path = ROOT_ENV_PATH
     existing_lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-    values = {**(DEFAULT_ENV_VALUES if include_defaults or not env_path.exists() else {}), **updates}
+    if include_defaults:
+        existing_keys = {_env_key(line) for line in existing_lines}
+        defaults = {key: value for key, value in DEFAULT_ENV_VALUES.items() if key not in existing_keys}
+    else:
+        defaults = DEFAULT_ENV_VALUES if not env_path.exists() else {}
+    values = {**defaults, **updates}
     lines = _upsert_env_lines(existing_lines, values)
     env_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     get_settings.cache_clear()

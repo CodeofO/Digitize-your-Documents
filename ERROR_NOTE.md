@@ -1,5 +1,38 @@
 # 오류 기록
 
+## 2026-05-21 - 로컬 이동 후 Batch progress polling 지연
+
+### 증상
+
+- Batch extraction은 백엔드에서 병렬 worker로 진행되지만, UI progress bar가 즉시 갱신되지 않고 브라우저 새로고침 후에야 진행률이 올라간 것처럼 보였다.
+- Batch sidebar에서 파일 수가 많을 때 항목 높이가 흔들리거나 겹쳐 보일 수 있었다.
+
+### 영향
+
+- 실제 extraction은 진행 중이어도 사용자는 멈춘 것으로 판단할 수 있었다.
+- 파일이 많은 batch에서 sidebar 렌더링 비용과 레이아웃 흔들림이 체감 렉으로 보였다.
+
+### 원인
+
+- Frontend API helper가 동적 조회 API에 `cache: "no-store"`를 명시하지 않아 polling 요청이 stale response를 받을 여지가 있었다.
+- Batch polling이 최근 batch 목록 전체를 반복 조회해 active batch 하나만 필요한 상황에서도 불필요한 payload를 받았다.
+- Polling 실패 시 기존 batch 상태를 유지하지 않고 비울 수 있어, 일시적 fetch 실패가 polling 중단처럼 보일 수 있었다.
+- Virtualized batch file list는 고정 row height를 가정하지만, 긴 filename 줄바꿈으로 실제 row height가 커지면 항목이 겹칠 수 있었다.
+
+### 수정
+
+- Frontend API helper에 `cache: "no-store"`를 적용했다.
+- Active batch가 있을 때는 `/api/batches/{batch_id}`를 1초 간격으로 polling하고, 최근 목록 전체 조회를 줄였다.
+- Polling 실패 시 현재 batch UI 상태를 유지하도록 변경했다.
+- Batch file row를 고정 높이로 만들고 filename은 2줄까지만 보여 virtual list 높이 계산과 실제 DOM 높이를 맞췄다.
+- SQLite 연결에 `busy_timeout`, WAL, `synchronous=NORMAL`을 적용해 batch worker write와 polling read가 겹칠 때의 잠금 대기를 줄였다.
+
+### 검증
+
+- `.venv/bin/python -m pytest backend/tests` 통과
+- `npm run build` 통과
+- 로컬 경로에서 FastAPI import 약 0.36초, frontend build 약 2.6초로 iCloud 경로 병목이 사라진 것을 확인했다.
+
 ## 2026-05-21 - Frontend build 중 중복 type package 자동 포함
 
 ### 증상

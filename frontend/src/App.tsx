@@ -233,6 +233,12 @@ type VlmSettings = {
   provider: string;
   model_name: string | null;
   libreoffice_path: string | null;
+  reasoning_effort: string | null;
+  verbosity: string | null;
+  max_completion_tokens: string | null;
+  top_p: string | null;
+  service_tier: string | null;
+  batch_max_workers: number;
   has_api_key: boolean;
   env_path: string;
 };
@@ -574,6 +580,12 @@ export default function App() {
   const [vlmApiKey, setVlmApiKey] = useState("");
   const [vlmModelName, setVlmModelName] = useState("");
   const [libreOfficePath, setLibreOfficePath] = useState("/Applications/LibreOffice.app/Contents/MacOS/soffice");
+  const [vlmReasoningEffort, setVlmReasoningEffort] = useState("minimal");
+  const [vlmVerbosity, setVlmVerbosity] = useState("low");
+  const [vlmMaxCompletionTokens, setVlmMaxCompletionTokens] = useState("");
+  const [vlmTopP, setVlmTopP] = useState("");
+  const [vlmServiceTier, setVlmServiceTier] = useState("");
+  const [batchMaxWorkers, setBatchMaxWorkers] = useState("4");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingRecommendation, setPendingRecommendation] = useState<SchemaRecommendation | null>(null);
@@ -729,17 +741,27 @@ export default function App() {
       ),
     [batches]
   );
+  const shouldPollActiveBatch = Boolean(activeBatchId && (!activeBatch || batchCanCancel(activeBatch)));
+  const batchPollingActive = shouldPollActiveBatch || hasActiveBatch;
   const hasPreparedSchema =
     Boolean(document) || Boolean(schema) || batchFiles.length > 0 || schemaDirty || hasMeaningfulSchema(fields);
 
   useEffect(() => {
-    if (!hasActiveBatch) return;
-    const intervalId = window.setInterval(() => {
-      void refreshBatches();
+    if (!batchPollingActive) return;
+    const pollBatch = () => {
+      if (activeBatchId && shouldPollActiveBatch) {
+        void refreshBatch(activeBatchId);
+      } else {
+        void refreshBatches();
+      }
       void refreshActiveBatchItemJob();
-    }, 1500);
+    };
+    pollBatch();
+    const intervalId = window.setInterval(() => {
+      pollBatch();
+    }, 1000);
     return () => window.clearInterval(intervalId);
-  }, [hasActiveBatch, activeBatchId, activeBatchItemId, job?.job_id, job?.result_id]);
+  }, [batchPollingActive, shouldPollActiveBatch, activeBatchId, activeBatchItemId, job?.job_id, job?.result_id]);
 
   async function bootstrapWorkspace() {
     await refreshAll(false);
@@ -877,6 +899,12 @@ export default function App() {
       setVlmSettings(settings);
       setVlmModelName(settings.model_name ?? "");
       setLibreOfficePath(settings.libreoffice_path ?? "/Applications/LibreOffice.app/Contents/MacOS/soffice");
+      setVlmReasoningEffort(settings.reasoning_effort ?? "minimal");
+      setVlmVerbosity(settings.verbosity ?? "low");
+      setVlmMaxCompletionTokens(settings.max_completion_tokens ?? "");
+      setVlmTopP(settings.top_p ?? "");
+      setVlmServiceTier(settings.service_tier ?? "");
+      setBatchMaxWorkers(String(settings.batch_max_workers ?? 4));
     } catch {
       setVlmSettings(null);
     }
@@ -894,6 +922,12 @@ export default function App() {
           api_key: vlmApiKey,
           model_name: vlmModelName,
           libreoffice_path: libreOfficePath,
+          reasoning_effort: vlmReasoningEffort,
+          verbosity: vlmVerbosity,
+          max_completion_tokens: vlmMaxCompletionTokens,
+          top_p: vlmTopP,
+          service_tier: vlmServiceTier,
+          batch_max_workers: Number.parseInt(batchMaxWorkers, 10) || 4,
           provider: "openai"
         })
       });
@@ -923,7 +957,16 @@ export default function App() {
       }
       setBatches(items);
     } catch {
-      setBatches([]);
+      // Keep the current UI state. A transient polling failure should not stop the next polling tick.
+    }
+  }
+
+  async function refreshBatch(batchId: string) {
+    try {
+      const nextBatch = await api<Batch>(`/api/batches/${batchId}`);
+      setBatches((current) => [nextBatch, ...current.filter((item) => item.id !== nextBatch.id)].slice(0, 12));
+    } catch {
+      await refreshBatches();
     }
   }
 
@@ -1512,7 +1555,9 @@ export default function App() {
 
   function selectBatchFiles(files: FileList | null) {
     const selected = files ? Array.from(files) : [];
-    const supported = selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""));
+    const supported = sortFilesByDisplayName(
+      selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
+    );
     const ignoredCount = selected.length - supported.length;
     setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
     setBatchFiles(supported);
@@ -1537,7 +1582,9 @@ export default function App() {
 
   function selectKieUploadFiles(files: FileList | File[] | null) {
     const selected = files ? Array.from(files) : [];
-    const supported = selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""));
+    const supported = sortFilesByDisplayName(
+      selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
+    );
     const ignoredCount = selected.length - supported.length;
     if (!supported.length) {
       setBatchFiles([]);
@@ -2032,11 +2079,23 @@ export default function App() {
           vlmApiKey={vlmApiKey}
           vlmModelName={vlmModelName}
           libreOfficePath={libreOfficePath}
+          reasoningEffort={vlmReasoningEffort}
+          verbosity={vlmVerbosity}
+          maxCompletionTokens={vlmMaxCompletionTokens}
+          topP={vlmTopP}
+          serviceTier={vlmServiceTier}
+          batchMaxWorkers={batchMaxWorkers}
           settingsMessage={settingsMessage}
           busy={busy}
           onVlmApiKey={setVlmApiKey}
           onVlmModelName={setVlmModelName}
           onLibreOfficePath={setLibreOfficePath}
+          onReasoningEffort={setVlmReasoningEffort}
+          onVerbosity={setVlmVerbosity}
+          onMaxCompletionTokens={setVlmMaxCompletionTokens}
+          onTopP={setVlmTopP}
+          onServiceTier={setVlmServiceTier}
+          onBatchMaxWorkers={setBatchMaxWorkers}
           onSave={() => void saveVlmSettings()}
           onClose={() => setSettingsOpen(false)}
         />
@@ -2730,11 +2789,23 @@ function SettingsDialog(props: {
   vlmApiKey: string;
   vlmModelName: string;
   libreOfficePath: string;
+  reasoningEffort: string;
+  verbosity: string;
+  maxCompletionTokens: string;
+  topP: string;
+  serviceTier: string;
+  batchMaxWorkers: string;
   settingsMessage: string | null;
   busy: string | null;
   onVlmApiKey: (value: string) => void;
   onVlmModelName: (value: string) => void;
   onLibreOfficePath: (value: string) => void;
+  onReasoningEffort: (value: string) => void;
+  onVerbosity: (value: string) => void;
+  onMaxCompletionTokens: (value: string) => void;
+  onTopP: (value: string) => void;
+  onServiceTier: (value: string) => void;
+  onBatchMaxWorkers: (value: string) => void;
   onSave: () => void;
   onClose: () => void;
 }) {
@@ -2774,6 +2845,51 @@ function SettingsDialog(props: {
               value={props.libreOfficePath}
               placeholder="/Applications/LibreOffice.app/Contents/MacOS/soffice"
               onChange={(event) => props.onLibreOfficePath(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Reasoning effort</span>
+            <select value={props.reasoningEffort} onChange={(event) => props.onReasoningEffort(event.target.value)}>
+              <option value="">default</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label>
+            <span>Verbosity</span>
+            <select value={props.verbosity} onChange={(event) => props.onVerbosity(event.target.value)}>
+              <option value="">default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <label>
+            <span>Max tokens</span>
+            <input
+              inputMode="numeric"
+              value={props.maxCompletionTokens}
+              placeholder="blank"
+              onChange={(event) => props.onMaxCompletionTokens(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Top P</span>
+            <input value={props.topP} placeholder="blank" onChange={(event) => props.onTopP(event.target.value)} />
+          </label>
+          <label>
+            <span>Service tier</span>
+            <input value={props.serviceTier} placeholder="blank" onChange={(event) => props.onServiceTier(event.target.value)} />
+          </label>
+          <label>
+            <span>Batch workers</span>
+            <input
+              inputMode="numeric"
+              value={props.batchMaxWorkers}
+              placeholder="4"
+              onChange={(event) => props.onBatchMaxWorkers(event.target.value)}
             />
           </label>
           <button type="button" className="primary compact" disabled={Boolean(props.busy)} onClick={props.onSave}>
@@ -3982,7 +4098,10 @@ function ProviderPill({ status }: { status: SystemStatus | null }) {
 }
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, options);
+  const response = await fetch(`${API_BASE}${path}`, {
+    cache: "no-store",
+    ...options
+  });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
@@ -4224,6 +4343,15 @@ function formatDate(value: string) {
 
 function fileDisplayName(file: File) {
   return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+}
+
+function sortFilesByDisplayName(files: File[]) {
+  return [...files].sort((left, right) =>
+    fileDisplayName(left).localeCompare(fileDisplayName(right), undefined, {
+      numeric: true,
+      sensitivity: "base"
+    })
+  );
 }
 
 function isImageFile(file: File) {

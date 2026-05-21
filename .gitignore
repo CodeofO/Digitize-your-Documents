@@ -1,4 +1,5 @@
 .venv/
+.uv-cache/
 .env
 backend/.env
 frontend/.env
@@ -9,17 +10,29 @@ __pycache__/
 backend/kie.db
 backend/*.db
 backend/*.db-journal
+backend/*.db-shm
+backend/*.db-wal
 backend/*.sqlite
 backend/*.sqlite-journal
+backend/*.sqlite-shm
+backend/*.sqlite-wal
 backend/*.sqlite3
 backend/*.sqlite3-journal
+backend/*.sqlite3-shm
+backend/*.sqlite3-wal
 backend/storage/
 backend/backend/*.db
 backend/backend/*.db-journal
+backend/backend/*.db-shm
+backend/backend/*.db-wal
 backend/backend/*.sqlite
 backend/backend/*.sqlite-journal
+backend/backend/*.sqlite-shm
+backend/backend/*.sqlite-wal
 backend/backend/*.sqlite3
 backend/backend/*.sqlite3-journal
+backend/backend/*.sqlite3-shm
+backend/backend/*.sqlite3-wal
 backend/backend/storage/
 
 frontend/node_modules/

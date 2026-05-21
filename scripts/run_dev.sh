@@ -7,6 +7,7 @@ BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_HOST="${FRONTEND_HOST:-127.0.0.1}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 VITE_API_BASE_URL="${VITE_API_BASE_URL:-http://${BACKEND_HOST}:${BACKEND_PORT}}"
+BACKEND_RELOAD="${BACKEND_RELOAD:-true}"
 
 if [[ ! -x "${ROOT_DIR}/.venv/bin/python" ]]; then
   echo "Missing .venv. Create it first:"
@@ -17,12 +18,16 @@ fi
 
 if ! "${ROOT_DIR}/.venv/bin/python" - <<'PY' >/dev/null 2>&1
 import bleach
+import fastapi
 import pymupdf
+import uvicorn
+import uvicorn.middleware.asgi2
+import uvicorn.protocols.http.h11_impl
 PY
 then
   echo "Backend dependencies look incomplete. Refresh the uv environment:"
   echo "  uv pip install -e 'backend[dev]'"
-  echo "  uv pip install --reinstall pymupdf bleach"
+  echo "  uv pip install --reinstall 'uvicorn[standard]' fastapi pymupdf bleach"
   exit 1
 fi
 
@@ -90,17 +95,20 @@ trap cleanup EXIT INT TERM
 
 echo "Starting backend:  http://${BACKEND_HOST}:${BACKEND_PORT}"
 (
-  cd "${ROOT_DIR}/backend"
-  "${ROOT_DIR}/.venv/bin/python" -m uvicorn app.main:app \
-    --host "${BACKEND_HOST}" \
-    --port "${BACKEND_PORT}" \
-    --reload \
-    --reload-dir app \
-    --reload-include "*.py" \
-    --reload-exclude "../.venv/*" \
-    --reload-exclude "../frontend/*" \
-    --reload-exclude "storage/*" \
-    --reload-exclude "*.db"
+  backend_args=(
+    app.main:app
+    --app-dir "${ROOT_DIR}/backend"
+    --host "${BACKEND_HOST}"
+    --port "${BACKEND_PORT}"
+  )
+  if [[ "${BACKEND_RELOAD}" == "true" ]]; then
+    backend_args+=(
+      --reload
+      --reload-dir "${ROOT_DIR}/backend/app"
+      --reload-include "*.py"
+    )
+  fi
+  PYTHONDONTWRITEBYTECODE=1 "${ROOT_DIR}/.venv/bin/python" -m uvicorn "${backend_args[@]}"
 ) &
 BACKEND_PID=$!
 

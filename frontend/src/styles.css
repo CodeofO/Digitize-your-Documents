@@ -684,9 +684,11 @@ textarea {
   align-items: center;
   background: #ffffff;
   border-color: #d8e0da;
+  box-sizing: border-box;
   display: grid;
   gap: 8px;
   grid-template-columns: 52px minmax(0, 1fr);
+  height: 78px;
   justify-content: stretch;
   min-height: 78px;
   overflow: hidden;
@@ -761,9 +763,14 @@ textarea {
 }
 
 .batch-file-main strong {
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   display: block;
+  display: -webkit-box;
   font-size: 12px;
   line-height: 1.25;
+  max-height: 30px;
+  overflow: hidden;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -1768,7 +1775,7 @@ pre {
   align-items: end;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(180px, 1fr) minmax(160px, 0.75fr) auto auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .settings-grid .wide-field {

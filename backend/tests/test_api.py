@@ -86,6 +86,29 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
     assert 'LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"' in contents
 
 
+def test_vlm_runtime_kwargs_include_speed_controls(monkeypatch) -> None:
+    from app.vlm import _build_llm_kwargs
+
+    try:
+        monkeypatch.setenv("VLM_API_KEY", "test-secret")
+        monkeypatch.setenv("VLM_MODEL_NAME", "test-model")
+        monkeypatch.setenv("VLM_REASONING_EFFORT", "minimal")
+        monkeypatch.setenv("VLM_VERBOSITY", "low")
+        monkeypatch.setenv("VLM_MAX_COMPLETION_TOKENS", "1024")
+        monkeypatch.setenv("VLM_TOP_P", "0.8")
+        monkeypatch.setenv("VLM_SERVICE_TIER", "auto")
+        get_settings.cache_clear()
+
+        kwargs = _build_llm_kwargs()
+        assert kwargs["reasoning_effort"] == "minimal"
+        assert kwargs["verbosity"] == "low"
+        assert kwargs["max_completion_tokens"] == 1024
+        assert kwargs["top_p"] == 0.8
+        assert kwargs["service_tier"] == "auto"
+    finally:
+        get_settings.cache_clear()
+
+
 def test_schema_validation_and_creation() -> None:
     with get_client() as client:
         invalid = client.post(
@@ -513,12 +536,13 @@ def test_batch_export_csv_and_json_mock_mode() -> None:
                 "/api/batches",
                 data={"schema_id": schema["id"]},
                 files=[
-                    ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
-                    ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("z_last.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("a_first.png", ONE_BY_ONE_PNG, "image/png")),
                 ],
             )
             assert response.status_code == 200, response.text
             batch = response.json()
+            assert [item["filename"] for item in batch["items"]] == ["a_first.png", "z_last.png"]
 
             csv_response = client.get(f"/api/batches/{batch['id']}/export?format=csv")
             assert csv_response.status_code == 200, csv_response.text
@@ -526,14 +550,16 @@ def test_batch_export_csv_and_json_mock_mode() -> None:
             assert "charset=utf-8" in csv_response.headers["content-type"]
             csv_text = csv_response.text
             assert "filename,document_id,job_id,status,error_message,invoice_number,total_amount,warnings" in csv_text.splitlines()[0]
-            assert "first.png" in csv_text
+            assert "a_first.png" in csv_text
             assert "Sample invoice_number" in csv_text
+            assert csv_text.index("a_first.png") < csv_text.index("z_last.png")
 
             json_response = client.get(f"/api/batches/{batch['id']}/export?format=json")
             assert json_response.status_code == 200, json_response.text
             payload = json_response.json()
             assert payload["batch_id"] == batch["id"]
             assert len(payload["rows"]) == 2
+            assert [row["filename"] for row in payload["rows"]] == ["a_first.png", "z_last.png"]
             assert payload["rows"][0]["invoice_number"] == "Sample invoice_number"
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
