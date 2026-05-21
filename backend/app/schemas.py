@@ -236,6 +236,41 @@ class SchemaRecommendationRead(BaseModel):
     fields: list[FieldDefinition]
 
 
+class SchemaDescriptionRecommendationRequest(BaseModel):
+    document_id: str
+    name: str = Field(min_length=1, max_length=120)
+    current_description: str | None = None
+    regions: list[SchemaRegion] = Field(default_factory=list)
+    fields: list[FieldDefinition] = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_unique_fields(self) -> "SchemaDescriptionRecommendationRequest":
+        keys = [field.key_name for field in self.fields]
+        if len(keys) != len(set(keys)):
+            raise ValueError("schema field key_name values must be unique")
+        region_ids = [region.id for region in self.regions]
+        missing_region_ids = sorted(
+            {
+                field.region_id
+                for field in self.fields
+                if field.region_id and field.region_id not in set(region_ids)
+            }
+        )
+        if missing_region_ids:
+            raise ValueError(f"schema field region_id values are missing from regions: {', '.join(missing_region_ids)}")
+        return self
+
+
+class SchemaDescriptionRecommendationRead(BaseModel):
+    description: str
+    reasoning: str | None = None
+
+
 class ExtractionJobCreate(BaseModel):
     document_id: str
     schema_id: str

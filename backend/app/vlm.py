@@ -24,6 +24,12 @@ Do not add a separate field display label; key_name is what users will see in th
 Each field description must explain where or how to find the value in the document.
 Use only these output formats: string, float, date, bool."""
 
+SCHEMA_DESCRIPTION_PROMPT = """You are a document schema description editor.
+Look at the document images and the user's current extraction fields.
+Write a concise schema-level description that explains what this schema extracts from this document type.
+Do not invent fields. Do not rewrite field-level descriptions. Do not say it is an invoice unless the fields and document clearly indicate that.
+Use the document's primary language. One or two sentences are enough."""
+
 
 def build_structured_output_schema(fields: list[FieldDefinition]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
@@ -77,6 +83,30 @@ def recommend_schema_with_vlm(image_paths: list[str]) -> dict[str, Any]:
         prompt,
         _image_inputs_from_paths(image_paths),
         _schema_recommendation_output_schema(),
+        api_style,
+    )
+
+
+def recommend_schema_description_with_vlm(
+    image_paths: list[str],
+    *,
+    schema_name: str,
+    current_description: str | None,
+    fields: list[FieldDefinition],
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_schema_description_recommendation(schema_name, fields)
+
+    _ensure_vlm_credentials(settings)
+
+    prompt = _build_schema_description_prompt(schema_name, current_description, fields)
+    return _invoke_structured_llm(
+        SCHEMA_DESCRIPTION_PROMPT,
+        prompt,
+        _image_inputs_from_paths(image_paths),
+        _schema_description_output_schema(),
         api_style,
     )
 
@@ -350,6 +380,45 @@ def _schema_recommendation_output_schema() -> dict[str, Any]:
     }
 
 
+def _schema_description_output_schema() -> dict[str, Any]:
+    return {
+        "title": "KeyInformationSchemaDescriptionRecommendation",
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "Concise schema-level description aligned with the current fields and document image.",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "Brief reason for the description update.",
+            },
+        },
+        "required": ["description", "reasoning"],
+    }
+
+
+def _build_schema_description_prompt(
+    schema_name: str,
+    current_description: str | None,
+    fields: list[FieldDefinition],
+) -> str:
+    lines = [
+        f"Schema name: {schema_name}",
+        f"Current schema description: {current_description or '(empty)'}",
+        "Current fields:",
+    ]
+    for field in fields:
+        region = f", region_id={field.region_id}" if field.region_id else ""
+        lines.append(f"- {field.key_name} ({field.output_format}{region}): {field.description}")
+    lines.append(
+        "Return a schema description that matches only these fields and the visible document. "
+        "The description should help the user understand the extraction purpose at schema level."
+    )
+    return "\n".join(lines)
+
+
 def _build_user_prompt(fields: list[FieldDefinition]) -> str:
     has_regions = any(field.region_id or field.region is not None for field in fields)
     lines = ["Extract these fields from the document images:"]
@@ -460,4 +529,12 @@ def _mock_schema_recommendation() -> dict[str, Any]:
                 "output_format": "float",
             },
         ],
+    }
+
+
+def _mock_schema_description_recommendation(schema_name: str, fields: list[FieldDefinition]) -> dict[str, Any]:
+    field_names = ", ".join(field.key_name for field in fields[:6])
+    return {
+        "description": f"{schema_name} schema extracts these user-defined fields from the document: {field_names}.",
+        "reasoning": "Mock mode generated a deterministic description from the current field list.",
     }

@@ -165,6 +165,11 @@ type SchemaRecommendation = {
   fields: FieldDefinition[];
 };
 
+type SchemaDescriptionRecommendation = {
+  description: string;
+  reasoning: string | null;
+};
+
 type ExtractionValue = {
   value: unknown;
   normalized_value: unknown;
@@ -1145,6 +1150,39 @@ export default function App() {
     }
   }
 
+  async function recommendSchemaDescription() {
+    if (!document) {
+      setError("Upload a document before asking AI to revise the schema description.");
+      return;
+    }
+    const validationError = validateFields(schemaPayloadFields, schemaPayloadRegions);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    setBusy("스키마 설명 수정 중");
+    setError(null);
+    try {
+      const recommendation = await api<SchemaDescriptionRecommendation>("/api/schemas/description-recommendations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          document_id: document.document_id,
+          name: schemaName.trim() || "draft_schema",
+          current_description: schemaDescription || null,
+          regions: schemaPayloadRegions,
+          fields: schemaPayloadFields
+        })
+      });
+      setSchemaDescription(recommendation.description);
+      setSchemaDirty(true);
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function applyRecommendation(recommendation: SchemaRecommendation) {
     setSchema(null);
     setSchemaName(recommendation.name || "ai_recommended_schema");
@@ -2003,6 +2041,7 @@ export default function App() {
               onSaveSchema={saveSchema}
               onRunExtraction={runExtraction}
               onRecommendSchema={recommendSchema}
+              onRecommendSchemaDescription={recommendSchemaDescription}
               onSampleSchema={applySampleSchema}
               onLoadTemplate={(template) => {
                 applySchema(template);
@@ -3482,6 +3521,7 @@ function SchemaBuilder(props: {
   onSaveSchema: () => Promise<SavedSchema | null>;
   onRunExtraction: () => Promise<void>;
   onRecommendSchema: () => Promise<void>;
+  onRecommendSchemaDescription: () => Promise<void>;
   onSampleSchema: () => void;
   onLoadTemplate: (schema: SavedSchema) => void;
   onSaveTemplate: () => void;
@@ -3549,10 +3589,22 @@ function SchemaBuilder(props: {
             <strong>{props.schemaNameConflict.display_name || props.schemaNameConflict.name}</strong>을 불러오세요.
           </div>
         )}
-        <label className="field-stack">
-          <span>Schema description</span>
+        <div className="field-stack">
+          <div className="field-label-row">
+            <span>Schema description</span>
+            <button
+              type="button"
+              className="secondary compact mini-action"
+              disabled={!props.document || !props.fields.length}
+              title={props.document ? "현재 필드와 문서 이미지를 보고 schema description만 다시 작성합니다." : "문서 이미지가 있어야 사용할 수 있습니다."}
+              onClick={() => void props.onRecommendSchemaDescription()}
+            >
+              <Sparkles size={13} />
+              AI 수정
+            </button>
+          </div>
           <textarea value={props.schemaDescription} onChange={(event) => props.onSchemaDescription(event.target.value)} />
-        </label>
+        </div>
         <div className="region-manager-bar">
           <div>
             <strong>Extraction regions</strong>

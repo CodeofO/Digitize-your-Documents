@@ -1336,6 +1336,18 @@ progress {
   font-weight: 700;
 }
 
+.field-label-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.mini-action {
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
 .field-list {
   display: flex;
   flex-direction: column;

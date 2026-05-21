@@ -389,6 +389,42 @@ def test_schema_recommendation_mock_mode() -> None:
         get_settings.cache_clear()
 
 
+def test_schema_description_recommendation_mock_mode() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            document = upload_png(client)
+            response = client.post(
+                "/api/schemas/description-recommendations",
+                json={
+                    "document_id": document["document_id"],
+                    "name": "consent_schema",
+                    "current_description": "Old description",
+                    "fields": [
+                        {
+                            "key_name": "본인 성명",
+                            "description": "문서 하단 서명 영역의 본인 성명",
+                            "output_format": "string",
+                        },
+                        {
+                            "key_name": "동의 여부",
+                            "description": "체크박스 선택 상태를 기준으로 한 동의 여부",
+                            "output_format": "bool",
+                        },
+                    ],
+                },
+            )
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert "consent_schema" in payload["description"]
+            assert "본인 성명" in payload["description"]
+            assert payload["reasoning"]
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
 def test_extraction_mock_mode_returns_evidence_and_normalized_values() -> None:
     try:
         os.environ["VLM_PROVIDER"] = "mock"

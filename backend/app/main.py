@@ -57,6 +57,8 @@ from app.schemas import (
     ExtractionResultPatch,
     RawExtractionRead,
     SchemaCreate,
+    SchemaDescriptionRecommendationRead,
+    SchemaDescriptionRecommendationRequest,
     SchemaRecommendationRead,
     SchemaRecommendationRequest,
     SchemaRead,
@@ -65,7 +67,7 @@ from app.schemas import (
     VlmSettingsRead,
     VlmSettingsUpdate,
 )
-from app.vlm import recommend_schema_with_vlm, resolve_vlm_api_style
+from app.vlm import recommend_schema_description_with_vlm, recommend_schema_with_vlm, resolve_vlm_api_style
 
 
 @asynccontextmanager
@@ -410,6 +412,28 @@ def recommend_schema(
         return recommendation_read
     except ValidationError as exc:
         raise HTTPException(status_code=502, detail=f"VLM returned an invalid schema recommendation: {exc}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/schemas/description-recommendations", response_model=SchemaDescriptionRecommendationRead)
+def recommend_schema_description(
+    payload: SchemaDescriptionRecommendationRequest,
+    db: Session = Depends(get_db),
+) -> SchemaDescriptionRecommendationRead:
+    document = db.get(Document, payload.document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        recommendation = recommend_schema_description_with_vlm(
+            [page.image_path for page in document.pages],
+            schema_name=payload.name,
+            current_description=payload.current_description,
+            fields=payload.fields,
+        )
+        return SchemaDescriptionRecommendationRead(**recommendation)
+    except ValidationError as exc:
+        raise HTTPException(status_code=502, detail=f"VLM returned an invalid schema description recommendation: {exc}") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

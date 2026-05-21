@@ -18,6 +18,7 @@
 ## 2026-05-21 변경 사항
 
 - KIE 단일 문서 화면에서 저장된 schema를 Schema name 영역의 드롭다운으로 바로 불러올 수 있습니다.
+- 필드 수정 후 Schema description 옆의 `AI 수정` 버튼으로 현재 필드와 문서 이미지를 반영한 schema-level 설명을 다시 생성할 수 있습니다.
 - `Extract`는 더 이상 draft schema를 자동 저장하지 않습니다. 저장하지 않은 schema는 one-off 추출로 실행되고 schema 목록에는 남지 않습니다.
 - Setting 창에 파싱 기록 삭제 버튼을 추가했습니다. 저장된 schema는 유지하고 문서, batch, 추출 결과, raw extraction 기록만 비울 수 있습니다.
 - Batch 파일은 업로드 직후부터 이미지명 오름차순으로 정렬해 sidebar에 표시합니다.
