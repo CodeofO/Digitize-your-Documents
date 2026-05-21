@@ -114,7 +114,7 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 5. 필요 필드만 선택적으로 extraction region을 지정한다.
 6. 저장된 schema는 `Schema Library` drawer의 카드형 리스트에서 선택한다.
 7. schema는 version 없이 이름 단위로 현재 내용만 관리한다.
-8. 사용자가 field, schema description, region을 수정하면 debounce 후 자동 저장한다. `Save now`는 자동 저장 실패/지연 시 즉시 재시도용이다.
+8. 사용자가 field, schema description, region을 수정하면 debounce 후 자동 저장한다. 별도 저장 버튼을 찾지 않아도 현재 schema 내용이 유지되어야 한다.
 9. 사용자가 필드를 수정한 뒤 `AI 수정`으로 현재 필드만 기반으로 schema-level description을 다시 생성할 수 있다. 문서 이미지는 필요하지 않다.
 10. 결과 table에서 value, normalized value, status, page, confidence, warning을 검토한다.
 11. 사용자는 결과를 수정하고 JSON/CSV로 export한다.
@@ -353,12 +353,28 @@ GET /api/required-field-check-batches/{batch_id}/export?format=csv|json
 - Required Field Checker: enabled
 - Workflow Builder: disabled, coming soon
 
+### 6.1 디자인 원칙
+
+- 표로 표현 가능한 정보는 표 형태로 통일한다. KIE field table을 기준 스타일로 삼고, Document Classifier class 후보, Required Field Checker checklist item, 결과/review table도 같은 시각 문법을 따른다.
+- 표는 얇은 외곽선, 연한 header background, 셀 경계선, 좌측 정렬, 충분한 행 높이를 가진다.
+- 셀 안의 input, textarea, select는 반복적인 둥근 버블처럼 보이지 않게 하고, 표 안에서 자연스럽게 편집 가능한 형태로 둔다.
+- 긴 description, reason, evidence는 줄바꿈으로 전문을 볼 수 있게 한다. 말줄임 때문에 업무 판단 근거가 가려지면 안 된다.
+- 라이브러리 패널은 가능한 overlay가 아니라 push sidebar로 연다. 사용자가 문서 preview와 설정 table을 계속 클릭하고 조정할 수 있어야 한다.
+- 문서 preview와 설정/결과 영역은 기본 50:50 분할이며, 사용자가 조정한 비율은 유지한다.
+- 단일/배치 업로드는 사용자 입력 개수로 자동 판단한다. 1개 파일은 single, 2개 이상 또는 folder는 batch로 전환한다.
+- 배치 파일 목록은 파일명 오름차순으로 정렬하고, 선택 이동 중 전역 alert로 layout이 흔들리지 않게 한다.
+- 카드 UI는 Home 기능 선택, library item, modal성 도구처럼 경계가 필요한 곳에만 사용한다. field/class/checklist 같은 반복 편집 대상은 table을 우선한다.
+
+### 6.2 Home / 공통
+
 Home 우측 상단 Setting 버튼:
 
 - API key/model name 입력 popup 표시
 - LibreOffice path 입력. 기본값은 `/Applications/LibreOffice.app/Contents/MacOS/soffice`
 - Save 시 root `.env` 생성/갱신 후 popup 닫기
 - X 또는 Close 클릭 시 저장하지 않고 popup 닫기
+
+### 6.3 모듈별 화면
 
 Raw workspace:
 
@@ -521,3 +537,27 @@ Integration:
 - review 화면 bbox highlight overlay
 - 분산 queue 기반 대량 batch processing
 - Workflow Builder 실제 실행 엔진
+
+## 10. GitHub 문서와 저장소 정책
+
+GitHub에 올라가는 문서는 제품 사용자가 바로 읽는 내용과 개발자가 실행에 필요한 내용만 유지한다.
+
+추적 문서:
+
+- `README.md`: 제품 가치, 기능, 실행, 설정, API, 테스트 요약
+- `DEVELOPMENT_DEFINITION.md`: 현재 제품 정의, UX/API/data/test 기준
+- `ERROR_NOTE.md`: 중요 오류, 원인, 영향, 수정, 검증 기록
+
+추적 asset:
+
+- `assets/readme_overview.png`
+- `assets/vlm_runtime_overview.png`
+
+로컬 전용 artifact:
+
+- 실험/이해용 HTML 문서
+- 디자인 스타일 로컬 메모
+- sample 입력 파일
+- local DB, storage, `.env`, `.venv`, `node_modules`, frontend build output
+
+`.gitignore`는 default-deny allowlist 구조를 사용한다. 모든 파일을 먼저 무시하고, source/test/config/script/GitHub 문서/README asset만 `!` 패턴으로 추적한다. 새 파일을 Git에 올릴 때는 해당 파일이 제품 실행이나 GitHub 문서에 필요한지 먼저 판단하고, 필요할 때만 allowlist에 추가한다.

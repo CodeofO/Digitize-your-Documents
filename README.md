@@ -17,6 +17,10 @@
 
 ## 2026-05-21 변경 사항
 
+- GitHub에 올라가는 문서를 `README.md`, `DEVELOPMENT_DEFINITION.md`, `ERROR_NOTE.md` 중심으로 정리했습니다. 로컬 이해용 HTML과 디자인 기록은 저장소에 올리지 않습니다.
+- `.gitignore`를 default-deny 방식으로 바꿨습니다. 모든 파일을 먼저 무시하고, 제품 실행에 필요한 source/config/docs/assets만 `!` allowlist로 추적합니다.
+- 표로 표현 가능한 설정/결과 UI는 KIE field table 스타일로 통일합니다. Document Classifier의 class 후보, Required Field Checker의 checklist item, 결과/review table도 같은 문법을 따릅니다.
+- `Schema Library`와 모듈별 library는 overlay가 아니라 작업 화면을 밀어내는 push sidebar 방향으로 정리했습니다. 문서 preview와 field table을 계속 조작할 수 있는 작업형 UX를 우선합니다.
 - `Document Classifier`와 `Required Field Checker` 모듈을 추가했습니다. 두 모듈 모두 VLM structured output 기반이며 단일/배치 실행, 결과 검수, CSV/JSON export를 지원합니다.
 - Home 기능 카드를 `Raw Data Extractor`, `Key Information Extractor`, `Document Classifier`, `Required Field Checker`, `Workflow Builder`로 재정리했습니다. OCR/Intelligence Parse 예정 카드는 제거했습니다.
 - Schema version 개념을 제거했습니다. 같은 이름의 schema는 하나의 현재 내용만 가지며, 수정하면 새 버전이 아니라 기존 schema가 갱신됩니다.
@@ -375,10 +379,12 @@ API:
 | --- | --- |
 | `DEVELOPMENT_DEFINITION.md` | 제품 기준 개발정의서 |
 | `ERROR_NOTE.md` | 중요 오류와 수정 검증 기록 |
-| `architecture_overview.html` | 기능, 데이터 구조, 처리 흐름을 한눈에 보는 HTML 아키텍처 문서 |
-| `vlm_runtime_overview.html` | KIE에서 실제 VLM structured output이 작동하는 흐름을 요약한 HTML 문서 |
+| `README.md` | GitHub 첫 화면에서 보는 제품 소개, 실행, 설정, API 요약 |
+| `assets/readme_overview.png` | README 상단 제품 overview 이미지 |
 | `assets/vlm_runtime_overview.png` | README에 포함되는 VLM 작동 원리 캡처 이미지 |
 | `sync_raw_to_pdf.py` | LibreOffice PDF 변환 참고 스크립트 |
+
+로컬 이해용 HTML, 디자인 메모, 샘플 파일은 Git에 올리지 않습니다. 저장소는 실행 가능한 제품 코드와 GitHub에서 읽을 문서만 추적합니다.
 
 디렉터리:
 
@@ -389,9 +395,8 @@ API:
 ├── scripts/run_dev.sh        # backend/frontend 동시 실행
 ├── DEVELOPMENT_DEFINITION.md
 ├── ERROR_NOTE.md
-├── architecture_overview.html
-├── vlm_runtime_overview.html
 ├── assets/
+│   ├── readme_overview.png
 │   └── vlm_runtime_overview.png
 └── README.md
 ```
@@ -413,18 +418,20 @@ npm run build
 
 Backend 테스트는 Office 파일의 LibreOffice 변환을 mock 처리합니다. 실제 Office to PDF 변환은 로컬 smoke test로 확인합니다.
 
-## 아키텍처 변경 이력
+## 구조 변경 이력
 
-상세 시각화 문서는 `architecture_overview.html`, `kie_extraction_visualization.html`, `vlm_runtime_overview.html`을 확인합니다.
+GitHub에는 핵심 변경 이력만 문서화합니다. 로컬에서 만든 실험용 HTML 시각화 문서는 `.gitignore` 정책상 추적하지 않습니다.
 
-| Version | 구조 | 내용 |
+| 날짜 | 구조 | 내용 |
 | --- | --- | --- |
-| v0.1 | KIE MVP | 전체 page image와 schema fields를 한 번에 VLM structured output으로 추출했습니다. |
-| v0.2 | Field-owned region | 각 field가 optional `region` 좌표를 직접 소유하고, region field에 crop image를 추가했습니다. |
-| v0.3 | Schema-level region | `schema.regions`를 최상위에 두고 여러 field가 같은 `region_id`를 참조하도록 바꿨습니다. |
-| v0.4 | Masked context | region crop과 함께 region 외부를 흐리게 만든 원본 page context를 VLM 입력에 추가했습니다. |
-| v0.5 | Grouped extraction | `region_id` 없는 field는 full-page group 1회, region field는 사용 중인 region별 1회로 분리 호출하고 결과를 merge합니다. |
+| 2026-05-21 | KIE MVP | 전체 page image와 schema fields를 한 번에 VLM structured output으로 추출했습니다. |
+| 2026-05-21 | Field-owned region | 각 field가 optional `region` 좌표를 직접 소유하고, region field에 crop image를 추가했습니다. |
+| 2026-05-21 | Schema-level region | `schema.regions`를 최상위에 두고 여러 field가 같은 `region_id`를 참조하도록 바꿨습니다. |
+| 2026-05-21 | Masked context | region crop과 함께 region 외부를 흐리게 만든 원본 page context를 VLM 입력에 추가했습니다. |
+| 2026-05-21 | Grouped extraction | `region_id` 없는 field는 full-page group 1회, region field는 사용 중인 region별 1회로 분리 호출하고 결과를 merge합니다. |
 | 2026-05-21 | Module workspace | Document Classifier와 Required Field Checker를 추가하고, 향후 Workflow Builder를 위해 config/run/result/review/export 패턴을 맞췄습니다. |
+| 2026-05-21 | Table-first UX | 설정과 결과를 표 중심으로 통일하고, 라이브러리는 작업 화면을 밀어내는 sidebar로 정리했습니다. |
+| 2026-05-21 | Repository hygiene | `.gitignore`를 default-deny allowlist 방식으로 바꾸고, 로컬 HTML/디자인 메모/sample은 Git에서 제외했습니다. |
 
 현재 KIE 호출 수는 `full-page field가 있으면 1회 + 사용 중인 region 수`입니다.
 
@@ -433,4 +440,5 @@ Backend 테스트는 Office 파일의 LibreOffice 변환을 mock 처리합니다
 - SQLite DB 기본 파일명은 `backend/digitize_documents.db`입니다.
 - 업로드 문서와 raw extraction 결과는 `backend/storage/` 아래에 저장됩니다.
 - `.env`, `.venv`, local DB, storage output, `node_modules`, frontend build artifact는 git에서 제외됩니다.
+- `.gitignore`는 모든 파일을 먼저 무시한 뒤 필요한 source, test, 실행 스크립트, GitHub 문서, README asset만 allowlist로 포함합니다.
 - `.env.example` 복사는 필요하지 않습니다. Home Setting에서 `.env`를 생성합니다.
