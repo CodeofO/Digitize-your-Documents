@@ -1,4 +1,5 @@
 import {
+  CheckSquare,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -31,6 +32,7 @@ import {
 } from "lucide-react";
 import { ChangeEvent, DragEvent, PointerEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, UIEvent } from "react";
+import { ModuleWorkspace } from "./ModuleWorkspace";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const WORKSPACE_STATE_KEY = "digitize_workspace_state_v1";
@@ -69,7 +71,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 ];
 
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
-type AppMode = "home" | "raw" | "key-info";
+type AppMode = "home" | "raw" | "key-info" | "classifier" | "required-checker";
 type Step = "upload" | "schema" | "review";
 type ReviewFilter = "needs_review" | "all" | "warning" | "null" | "changed" | "low_confidence" | "unreviewed";
 type HistoryTab = "documents" | "schemas" | "jobs";
@@ -361,8 +363,12 @@ const initialFields: SchemaField[] = [
 
 function modeFromLocation(): AppMode {
   const hash = window.location.hash.replace("#", "");
-  if (hash === "raw" || hash === "key-info") return hash;
+  if (isAppMode(hash)) return hash;
   return "home";
+}
+
+function isAppMode(value: unknown): value is AppMode {
+  return value === "home" || value === "raw" || value === "key-info" || value === "classifier" || value === "required-checker";
 }
 
 function replaceModeHash(nextMode: AppMode) {
@@ -383,7 +389,7 @@ function readPersistedWorkspaceState(): PersistedWorkspaceState | null {
     const raw = window.localStorage.getItem(WORKSPACE_STATE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<PersistedWorkspaceState>;
-    const mode = parsed.mode === "raw" || parsed.mode === "key-info" || parsed.mode === "home" ? parsed.mode : "home";
+    const mode = isAppMode(parsed.mode) ? parsed.mode : "home";
     const step = parsed.step === "upload" || parsed.step === "schema" || parsed.step === "review" ? parsed.step : "upload";
     return {
       mode,
@@ -895,13 +901,17 @@ export default function App() {
   async function restoreWorkspaceState() {
     const saved = readPersistedWorkspaceState();
     if (!saved) return;
-    const savedMode = saved.mode === "raw" || saved.mode === "key-info" || saved.mode === "home" ? saved.mode : modeFromLocation();
+    const savedMode = isAppMode(saved.mode) ? saved.mode : modeFromLocation();
     replaceModeHash(savedMode);
     setMode(savedMode);
     try {
       if (savedMode === "raw" && saved.raw_id) {
         const loadedRaw = await api<RawExtraction>(`/api/raw-extractions/${saved.raw_id}`);
         setRawExtraction(loadedRaw);
+        return;
+      }
+
+      if (savedMode !== "key-info") {
         return;
       }
 
@@ -1927,6 +1937,14 @@ export default function App() {
     setMode(nextMode);
   }
 
+  function modeTitle(currentMode: AppMode) {
+    if (currentMode === "home") return "Digitize Your Document";
+    if (currentMode === "raw") return "Raw Data Extractor";
+    if (currentMode === "classifier") return "Document Classifier";
+    if (currentMode === "required-checker") return "Required Field Checker";
+    return "Key Information Workspace";
+  }
+
   function goToPage(page: number | null) {
     if (!document || !page) return;
     setActivePage(Math.min(document.page_count - 1, Math.max(0, page - 1)));
@@ -1971,7 +1989,7 @@ export default function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">Digitize Your Document</p>
-          <h1>{mode === "home" ? "Digitize Your Document" : mode === "raw" ? "Raw Data Extractor" : "Key Information Workspace"}</h1>
+          <h1>{modeTitle(mode)}</h1>
         </div>
         <div className="status-strip">
           <ProviderPill status={systemStatus} />
@@ -2029,7 +2047,12 @@ export default function App() {
       )}
 
       {mode === "home" ? (
-        <HomeScreen onRaw={() => navigateMode("raw")} onKie={() => navigateMode("key-info")} />
+        <HomeScreen
+          onRaw={() => navigateMode("raw")}
+          onKie={() => navigateMode("key-info")}
+          onClassifier={() => navigateMode("classifier")}
+          onRequiredChecker={() => navigateMode("required-checker")}
+        />
       ) : mode === "raw" ? (
         <RawWorkspace
           rawExtraction={rawExtraction}
@@ -2045,6 +2068,8 @@ export default function App() {
           onToggleHistory={() => setRawHistoryCollapsed((collapsed) => !collapsed)}
           onResize={startResize}
         />
+      ) : mode === "classifier" || mode === "required-checker" ? (
+        <ModuleWorkspace kind={mode} leftPanePercent={leftPanePercent} onResize={startResize} />
       ) : (
         <main
           className="workspace"
@@ -2420,13 +2445,13 @@ function UtilityModal(props: { title: string; eyebrow: string; children: ReactNo
   );
 }
 
-function HomeScreen(props: { onRaw: () => void; onKie: () => void }) {
+function HomeScreen(props: { onRaw: () => void; onKie: () => void; onClassifier: () => void; onRequiredChecker: () => void }) {
   return (
     <main className="home-screen">
       <section className="home-hero">
         <p className="eyebrow">Workspace</p>
         <h2>문서 처리 방식을 선택하세요</h2>
-        <p>원본 정보 추출, key information extraction, OCR, intelligence parsing을 하나의 workspace에서 확장합니다.</p>
+        <p>대량 문서의 원본 정보 추출, 핵심값 추출, 문서 분류, 필수 항목 확인을 하나의 workspace에서 자동화합니다.</p>
       </section>
       <section className="feature-grid">
         <button className="feature-card active-feature" onClick={props.onRaw}>
@@ -2439,15 +2464,20 @@ function HomeScreen(props: { onRaw: () => void; onKie: () => void }) {
           <strong>Key Information Extractor</strong>
           <span>PDF, 이미지, DOCX, PPTX에서 schema에 맞는 값만 추출합니다.</span>
         </button>
-        <button className="feature-card" disabled>
-          <FileJson size={24} />
-          <strong>OCR</strong>
-          <span>Coming soon</span>
+        <button className="feature-card active-feature" onClick={props.onClassifier}>
+          <ClipboardList size={24} />
+          <strong>Document Classifier</strong>
+          <span>사용자가 정의한 후보 class와 unknown 허용 규칙으로 문서를 자동 분류합니다.</span>
+        </button>
+        <button className="feature-card active-feature" onClick={props.onRequiredChecker}>
+          <CheckSquare size={24} />
+          <strong>Required Field Checker</strong>
+          <span>값의 정확성보다 필수 항목이 존재하는지 여부를 빠르게 확인합니다.</span>
         </button>
         <button className="feature-card" disabled>
-          <ClipboardList size={24} />
-          <strong>Intelligence Parse</strong>
-          <span>Coming soon</span>
+          <FileJson size={24} />
+          <strong>Workflow Builder</strong>
+          <span>Coming soon · 여러 모듈을 연결하는 파이프라인 빌더</span>
         </button>
       </section>
     </main>

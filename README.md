@@ -17,6 +17,8 @@
 
 ## 2026-05-21 변경 사항
 
+- `Document Classifier`와 `Required Field Checker` 모듈을 추가했습니다. 두 모듈 모두 VLM structured output 기반이며 단일/배치 실행, 결과 검수, CSV/JSON export를 지원합니다.
+- Home 기능 카드를 `Raw Data Extractor`, `Key Information Extractor`, `Document Classifier`, `Required Field Checker`, `Workflow Builder`로 재정리했습니다. OCR/Intelligence Parse 예정 카드는 제거했습니다.
 - Schema version 개념을 제거했습니다. 같은 이름의 schema는 하나의 현재 내용만 가지며, 수정하면 새 버전이 아니라 기존 schema가 갱신됩니다.
 - KIE 단일 문서 화면에서 저장된 schema를 `Schema Library`의 카드형 리스트로 선택하고, 필드/설명/region 수정 내용은 자동 저장됩니다.
 - Schema 추가, 선택, 이름 변경, 설명, 삭제, 템플릿, JSON import/export, region 관리는 `Schema Library` drawer로 분리하고, 메인 화면은 field table 중심으로 정리했습니다.
@@ -36,6 +38,8 @@ Digitize Your Document를 사용하면 대량 문서에서 수작업으로 값�
 | 자동화 대상 | 처리 방식 | 결과 |
 | --- | --- | --- |
 | 대량 이미지/PDF에서 특정 값 추출 | 사용자 schema + 선택 region + VLM structured output | 파일명 기준 정렬 CSV/JSON |
+| 문서 종류 분류 | 사용자가 정의한 class 후보 + unknown 허용 | 파일별 class, confidence, evidence |
+| 필수 항목 누락 확인 | checklist + evidence type + optional region | complete/incomplete/needs_review |
 | DOCX/PPTX/PDF 원문 확인 | LibreOffice/PyMuPDF preview + Python parser | PDF preview + HTML 원문 |
 | 50장 이상 반복 검토 | Batch sidebar + progress polling + result review | 항목별 검토와 batch export |
 | 손글씨/복잡한 레이아웃 보조 | full page context + masked page + enlarged crop | region 기반 집중 추출 |
@@ -48,8 +52,9 @@ Digitize Your Document를 사용하면 대량 문서에서 수작업으로 값�
 | --- | --- | --- |
 | Raw Data Extractor | 구현 | `.docx`, `.xlsx`, `.pptx`, `.pdf`를 업로드하면 PDF preview와 HTML 정보 추출 결과를 생성합니다. |
 | Key Information Extractor | 구현 | PDF/image/DOCX/PPTX 문서를 업로드하고 사용자가 정의한 schema 기준으로 VLM structured output 값을 추출합니다. |
-| OCR | 예정 | 단순 OCR 기능으로 확장 예정입니다. |
-| Intelligence Parse | 예정 | 문서를 지능적으로 파싱하는 기능으로 확장 예정입니다. |
+| Document Classifier | 구현 | 사용자가 직접 정의한 후보 class와 unknown 허용 규칙으로 문서를 분류합니다. |
+| Required Field Checker | 구현 | 값 추출보다 단순하게 필수 항목의 존재/누락/불확실 여부만 확인합니다. |
+| Workflow Builder | 예정 | 여러 모듈을 드래그 앤 드롭으로 연결하는 파이프라인 빌더입니다. |
 
 ## 기술 구성
 
@@ -283,6 +288,87 @@ KIE API:
 | `POST` | `/api/batches/{batch_id}/cancel` |
 | `GET` | `/api/batches/{batch_id}/export?format=csv\|json` |
 
+## Document Classifier
+
+문서가 계약서, 신청서, 동의서, 증빙서류 등 어떤 종류인지 빠르게 나누는 모듈입니다. 사용자가 class 후보를 직접 정의하고, 후보에 맞지 않으면 `unknown`으로 남길 수 있습니다. 대량 문서가 섞여 들어오는 업무에서 먼저 분류한 뒤 KIE나 필수 항목 확인으로 넘기는 전처리 단계로 쓸 수 있습니다.
+
+설정 구조:
+
+| 필드 | 설명 |
+| --- | --- |
+| `name` | classifier 설정 이름 |
+| `description` | 분류 목적과 적용 문서 범위 |
+| `allow_unknown` | 후보 class에 맞지 않는 문서를 unknown으로 허용 |
+| `classes` | `class_name`, `description`, `signals` 목록 |
+
+결과:
+
+| 값 | 설명 |
+| --- | --- |
+| `status` | `classified`, `unknown`, `needs_review` |
+| `class_name` | 선택된 class 이름 |
+| `confidence` | 0~1 confidence |
+| `reason` | 판단 이유 |
+| `evidence` | 문서에서 본 근거 |
+
+API:
+
+| Method | Path |
+| --- | --- |
+| `POST/GET/PATCH/DELETE` | `/api/document-classifiers` |
+| `POST` | `/api/classification-jobs` |
+| `GET` | `/api/classification-jobs/{job_id}` |
+| `PATCH` | `/api/classification-results/{result_id}` |
+| `POST` | `/api/classification-batches` |
+| `GET` | `/api/classification-batches?limit=20` |
+| `POST` | `/api/classification-batches/{batch_id}/cancel` |
+| `GET` | `/api/classification-batches/{batch_id}/export?format=csv\|json` |
+
+## Required Field Checker
+
+KIE처럼 값을 추출하지 않고, 필수 항목이 문서에 존재하는지만 확인하는 모듈입니다. 예를 들어 성명, 날짜, 서명, 체크박스, 도장 등이 비어 있는지 빠르게 거를 수 있습니다. 값의 정확성이나 외부 DB 일치 여부는 확인하지 않습니다.
+
+설정 구조:
+
+| 필드 | 설명 |
+| --- | --- |
+| `name` | checklist 설정 이름 |
+| `description` | 확인 목적 |
+| `regions` | optional 상대좌표 region 목록 |
+| `items` | `item_name`, `description`, `evidence_type`, `required`, optional `region_id` |
+
+`evidence_type`:
+
+- `text_or_handwriting`
+- `checkbox`
+- `signature_or_stamp`
+- `visual_mark`
+- `other`
+
+결과:
+
+| 값 | 설명 |
+| --- | --- |
+| `overall_status` | `complete`, `incomplete`, `needs_review` |
+| item `status` | `present`, `missing`, `uncertain`, `not_applicable` |
+| `evidence` | 존재/누락 판단 근거 |
+| `page` | 근거 page |
+
+API:
+
+| Method | Path |
+| --- | --- |
+| `POST/GET/PATCH/DELETE` | `/api/required-field-checklists` |
+| `POST` | `/api/required-field-check-jobs` |
+| `GET` | `/api/required-field-check-jobs/{job_id}` |
+| `PATCH` | `/api/required-field-check-results/{result_id}` |
+| `POST` | `/api/required-field-check-batches` |
+| `GET` | `/api/required-field-check-batches?limit=20` |
+| `POST` | `/api/required-field-check-batches/{batch_id}/cancel` |
+| `GET` | `/api/required-field-check-batches/{batch_id}/export?format=csv\|json` |
+
+두 모듈 모두 KIE와 같은 문서 업로드/rasterize 구조를 사용합니다. PDF/image/DOCX/PPTX를 page image로 만든 뒤 VLM에 전달하고, batch에서는 파일명 기준 오름차순으로 처리/export합니다.
+
 ## 문서와 구조
 
 | 파일 | 설명 |
@@ -338,6 +424,7 @@ Backend 테스트는 Office 파일의 LibreOffice 변환을 mock 처리합니다
 | v0.3 | Schema-level region | `schema.regions`를 최상위에 두고 여러 field가 같은 `region_id`를 참조하도록 바꿨습니다. |
 | v0.4 | Masked context | region crop과 함께 region 외부를 흐리게 만든 원본 page context를 VLM 입력에 추가했습니다. |
 | v0.5 | Grouped extraction | `region_id` 없는 field는 full-page group 1회, region field는 사용 중인 region별 1회로 분리 호출하고 결과를 merge합니다. |
+| 2026-05-21 | Module workspace | Document Classifier와 Required Field Checker를 추가하고, 향후 Workflow Builder를 위해 config/run/result/review/export 패턴을 맞췄습니다. |
 
 현재 KIE 호출 수는 `full-page field가 있으면 1회 + 사용 중인 region 수`입니다.
 

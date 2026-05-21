@@ -900,6 +900,205 @@ def test_batch_high_worker_count_does_not_exhaust_db_pool() -> None:
         get_settings.cache_clear()
 
 
+def test_document_classifier_config_single_job_and_patch() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            classifier = create_document_classifier(client)
+            updated = client.patch(
+                f"/api/document-classifiers/{classifier['id']}",
+                json={
+                    "description": "Updated classifier description",
+                    "allow_unknown": True,
+                },
+            )
+            assert updated.status_code == 200, updated.text
+            assert updated.json()["description"] == "Updated classifier description"
+
+            document = upload_png(client)
+            response = client.post(
+                "/api/classification-jobs",
+                json={"document_id": document["document_id"], "classifier_id": classifier["id"]},
+            )
+            assert response.status_code == 200, response.text
+            job = client.get(f"/api/classification-jobs/{response.json()['job_id']}").json()
+            assert job["status"] == "completed"
+            output = job["result"]["validated_output"]
+            assert output["status"] == "classified"
+            assert output["class_name"] == "contract"
+            assert output["confidence"] == 0.88
+
+            corrected = {**output, "status": "unknown", "class_name": None}
+            patch = client.patch(
+                f"/api/classification-results/{job['result_id']}",
+                json={"corrected_output": corrected, "reviewed": True},
+            )
+            assert patch.status_code == 200, patch.text
+            assert patch.json()["corrected_output"]["status"] == "unknown"
+
+            deleted = client.delete(f"/api/document-classifiers/{classifier['id']}")
+            assert deleted.status_code == 200
+            assert deleted.json()["archived"] is True
+            assert all(item["id"] != classifier["id"] for item in client.get("/api/document-classifiers").json())
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_document_classifier_batch_cancel_and_export(monkeypatch) -> None:
+    with monkeypatch.context() as patch_context:
+        patch_context.setattr("app.main.run_classification_batch", lambda batch_id, job_ids: None)
+
+        with get_client() as client:
+            classifier = create_document_classifier(client)
+            response = client.post(
+                "/api/classification-batches",
+                data={"classifier_id": classifier["id"]},
+                files=[
+                    ("files", ("z_last.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("a_first.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+            assert [item["filename"] for item in batch["items"]] == ["a_first.png", "z_last.png"]
+
+            canceled = client.post(f"/api/classification-batches/{batch['id']}/cancel")
+            assert canceled.status_code == 200, canceled.text
+            assert canceled.json()["status"] == "canceled"
+            assert canceled.json()["canceled_count"] == 2
+
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            classifier = create_document_classifier(client, name="batch_classifier")
+            response = client.post(
+                "/api/classification-batches",
+                data={"classifier_id": classifier["id"]},
+                files=[
+                    ("files", ("z_last.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("a_first.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+            loaded = client.get(f"/api/classification-batches/{batch['id']}").json()
+            assert loaded["status"] == "completed"
+            assert loaded["completed_count"] == 2
+
+            csv_response = client.get(f"/api/classification-batches/{batch['id']}/export?format=csv")
+            assert csv_response.status_code == 200, csv_response.text
+            assert "classification_status,class_name,confidence,reason,evidence" in csv_response.text.splitlines()[0]
+            assert csv_response.text.index("a_first.png") < csv_response.text.index("z_last.png")
+
+            json_response = client.get(f"/api/classification-batches/{batch['id']}/export?format=json")
+            assert json_response.status_code == 200
+            rows = json_response.json()["rows"]
+            assert [row["filename"] for row in rows] == ["a_first.png", "z_last.png"]
+            assert rows[0]["class_name"] == "contract"
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_required_field_checklist_single_job_and_region_validation() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            invalid = client.post(
+                "/api/required-field-checklists",
+                json={
+                    "name": "invalid_checklist",
+                    "regions": [],
+                    "items": [
+                        {
+                            "item_name": "서명",
+                            "description": "서명 존재 여부",
+                            "evidence_type": "signature_or_stamp",
+                            "required": True,
+                            "region_id": "missing_region",
+                        }
+                    ],
+                },
+            )
+            assert invalid.status_code == 422
+
+            checklist = create_required_field_checklist(client)
+            document = upload_png(client)
+            response = client.post(
+                "/api/required-field-check-jobs",
+                json={"document_id": document["document_id"], "checklist_id": checklist["id"]},
+            )
+            assert response.status_code == 200, response.text
+            job = client.get(f"/api/required-field-check-jobs/{response.json()['job_id']}").json()
+            assert job["status"] == "needs_review"
+            output = job["result"]["validated_output"]
+            assert output["overall_status"] == "needs_review"
+            assert [item["item_name"] for item in output["items"]] == ["성명", "서명", "체크박스"]
+            assert output["items"][0]["status"] == "present"
+            assert output["items"][2]["status"] == "uncertain"
+
+            corrected = {
+                **output,
+                "overall_status": "complete",
+                "items": [{**item, "status": "present"} for item in output["items"]],
+            }
+            patch = client.patch(
+                f"/api/required-field-check-results/{job['result_id']}",
+                json={"corrected_output": corrected, "reviewed": True},
+            )
+            assert patch.status_code == 200, patch.text
+            assert patch.json()["corrected_output"]["overall_status"] == "complete"
+
+            deleted = client.delete(f"/api/required-field-checklists/{checklist['id']}")
+            assert deleted.status_code == 200
+            assert deleted.json()["archived"] is True
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_required_field_check_batch_export_mock_mode() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            checklist = create_required_field_checklist(client, name="batch_checklist")
+            response = client.post(
+                "/api/required-field-check-batches",
+                data={"checklist_id": checklist["id"]},
+                files=[
+                    ("files", ("z_last.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("a_first.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+            assert [item["filename"] for item in batch["items"]] == ["a_first.png", "z_last.png"]
+
+            loaded = client.get(f"/api/required-field-check-batches/{batch['id']}").json()
+            assert loaded["status"] == "completed"
+            assert loaded["completed_count"] == 2
+
+            csv_response = client.get(f"/api/required-field-check-batches/{batch['id']}/export?format=csv")
+            assert csv_response.status_code == 200, csv_response.text
+            header = csv_response.text.splitlines()[0]
+            assert "overall_status" in header
+            assert "성명_status" in header
+            assert csv_response.text.index("a_first.png") < csv_response.text.index("z_last.png")
+
+            json_response = client.get(f"/api/required-field-check-batches/{batch['id']}/export?format=json")
+            assert json_response.status_code == 200
+            rows = json_response.json()["rows"]
+            assert rows[0]["성명_status"] == "present"
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
 def test_batch_worker_exception_does_not_leave_batch_running(monkeypatch) -> None:
     from app import extraction as extraction_module
 
@@ -1127,6 +1326,67 @@ def create_schema(client, name: str | None = None):
                     "key_name": "total_amount",
                     "description": "Final total amount including tax.",
                     "output_format": "float",
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def create_document_classifier(client, name: str = "document_classifier"):
+    response = client.post(
+        "/api/document-classifiers",
+        json={
+            "name": name,
+            "description": "문서를 사용자가 정의한 class 후보 중 하나로 분류합니다.",
+            "allow_unknown": True,
+            "classes": [
+                {
+                    "class_name": "contract",
+                    "description": "계약 조건과 서명 또는 날인이 있는 문서",
+                    "signals": ["계약", "서명", "날인"],
+                },
+                {
+                    "class_name": "consent_form",
+                    "description": "개인정보 또는 금융정보 조회 동의 여부가 있는 문서",
+                    "signals": ["동의", "개인정보", "조회"],
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def create_required_field_checklist(client, name: str = "required_checklist"):
+    response = client.post(
+        "/api/required-field-checklists",
+        json={
+            "name": name,
+            "description": "필수 항목의 존재 여부만 확인합니다.",
+            "regions": [
+                {"id": "signature_region", "name": "서명 영역", "page": 1, "x": 0.55, "y": 0.55, "width": 0.35, "height": 0.25}
+            ],
+            "items": [
+                {
+                    "item_name": "성명",
+                    "description": "성명이 문서에 존재하는지 확인합니다.",
+                    "evidence_type": "text_or_handwriting",
+                    "required": True,
+                },
+                {
+                    "item_name": "서명",
+                    "description": "서명 또는 날인이 존재하는지 확인합니다.",
+                    "evidence_type": "signature_or_stamp",
+                    "required": True,
+                    "region_id": "signature_region",
+                },
+                {
+                    "item_name": "체크박스",
+                    "description": "필수 체크박스 표시가 존재하는지 확인합니다.",
+                    "evidence_type": "checkbox",
+                    "required": True,
                 },
             ],
         },

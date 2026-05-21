@@ -1,46 +1,75 @@
+# Ignore everything by default.
+*
+
+# Local/runtime/generated files remain ignored by default.
+*.html
+*.env
+.env
 .venv/
 .uv-cache/
-.env
-backend/.env
-frontend/.env
 __pycache__/
 .pytest_cache/
 *.pyc
-
+.DS_Store
 api_key_memo.txt
+sample/
+docs/
+DESIGN_STYLE.local.md
 
-backend/kie.db
-backend/*.db
-backend/*.db-journal
-backend/*.db-shm
-backend/*.db-wal
-backend/*.sqlite
-backend/*.sqlite-journal
-backend/*.sqlite-shm
-backend/*.sqlite-wal
-backend/*.sqlite3
-backend/*.sqlite3-journal
-backend/*.sqlite3-shm
-backend/*.sqlite3-wal
+# Python/runtime data.
+backend/*.db*
+backend/*.sqlite*
+backend/*.sqlite3*
 backend/storage/
-backend/backend/*.db
-backend/backend/*.db-journal
-backend/backend/*.db-shm
-backend/backend/*.db-wal
-backend/backend/*.sqlite
-backend/backend/*.sqlite-journal
-backend/backend/*.sqlite-shm
-backend/backend/*.sqlite-wal
-backend/backend/*.sqlite3
-backend/backend/*.sqlite3-journal
-backend/backend/*.sqlite3-shm
-backend/backend/*.sqlite3-wal
-backend/backend/storage/
+backend/backend/
 
+# Frontend build/dependency outputs.
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.d.ts
 frontend/vite.config.js
 
-.DS_Store
+# Keep only project essentials.
+!.gitignore
+!README.md
+!DEVELOPMENT_DEFINITION.md
+!ERROR_NOTE.md
+!sync_raw_to_pdf.py
+
+# Keep selected README assets.
+!assets/
+assets/*
+!assets/readme_overview.png
+!assets/vlm_runtime_overview.png
+
+# Keep scripts.
+!scripts/
+scripts/*
+!scripts/run_dev.sh
+
+# Keep backend package, app, and tests.
+!backend/
+backend/*
+!backend/pyproject.toml
+!backend/app/
+backend/app/*
+!backend/app/*.py
+!backend/tests/
+backend/tests/*
+!backend/tests/*.py
+
+# Keep frontend source and build config.
+!frontend/
+frontend/*
+!frontend/index.html
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
+!frontend/tsconfig.node.json
+!frontend/vite.config.ts
+!frontend/src/
+frontend/src/*
+!frontend/src/*.tsx
+!frontend/src/*.ts
+!frontend/src/*.css

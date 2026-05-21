@@ -138,6 +138,193 @@ class RawExtraction(Base):
     )
 
 
+class DocumentClassifier(Base):
+    __tablename__ = "document_classifiers"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classifier"))
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    allow_unknown: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    config_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ClassificationJob(Base):
+    __tablename__ = "classification_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classification_job"))
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    classifier_id: Mapped[str] = mapped_column(ForeignKey("document_classifiers.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    document: Mapped[Document] = relationship()
+    classifier: Mapped[DocumentClassifier] = relationship()
+    result: Mapped["ClassificationResult | None"] = relationship(
+        back_populates="job",
+        uselist=False,
+        cascade="all, delete-orphan",
+        primaryjoin="ClassificationJob.id == ClassificationResult.job_id",
+    )
+
+
+class ClassificationResult(Base):
+    __tablename__ = "classification_results"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classification_result"))
+    job_id: Mapped[str] = mapped_column(ForeignKey("classification_jobs.id"), nullable=False, unique=True)
+    raw_model_output: Mapped[str] = mapped_column(Text, nullable=False)
+    validated_output: Mapped[str] = mapped_column(Text, nullable=False)
+    corrected_output: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    job: Mapped[ClassificationJob] = relationship(back_populates="result")
+
+
+class ClassificationBatch(Base):
+    __tablename__ = "classification_batches"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classification_batch"))
+    classifier_id: Mapped[str] = mapped_column(ForeignKey("document_classifiers.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    classifier: Mapped[DocumentClassifier] = relationship()
+    items: Mapped[list["ClassificationBatchItem"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="ClassificationBatchItem.created_at",
+    )
+
+
+class ClassificationBatchItem(Base):
+    __tablename__ = "classification_batch_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classification_batch_item"))
+    batch_id: Mapped[str] = mapped_column(ForeignKey("classification_batches.id"), nullable=False)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    job_id: Mapped[str] = mapped_column(ForeignKey("classification_jobs.id"), nullable=False)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    batch: Mapped[ClassificationBatch] = relationship(back_populates="items")
+    document: Mapped[Document] = relationship()
+    job: Mapped[ClassificationJob] = relationship()
+
+
+class RequiredFieldChecklist(Base):
+    __tablename__ = "required_field_checklists"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("checklist"))
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class RequiredFieldCheckJob(Base):
+    __tablename__ = "required_field_check_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("required_check_job"))
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    checklist_id: Mapped[str] = mapped_column(ForeignKey("required_field_checklists.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    document: Mapped[Document] = relationship()
+    checklist: Mapped[RequiredFieldChecklist] = relationship()
+    result: Mapped["RequiredFieldCheckResult | None"] = relationship(
+        back_populates="job",
+        uselist=False,
+        cascade="all, delete-orphan",
+        primaryjoin="RequiredFieldCheckJob.id == RequiredFieldCheckResult.job_id",
+    )
+
+
+class RequiredFieldCheckResult(Base):
+    __tablename__ = "required_field_check_results"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("required_check_result"))
+    job_id: Mapped[str] = mapped_column(ForeignKey("required_field_check_jobs.id"), nullable=False, unique=True)
+    raw_model_output: Mapped[str] = mapped_column(Text, nullable=False)
+    validated_output: Mapped[str] = mapped_column(Text, nullable=False)
+    corrected_output: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    job: Mapped[RequiredFieldCheckJob] = relationship(back_populates="result")
+
+
+class RequiredFieldCheckBatch(Base):
+    __tablename__ = "required_field_check_batches"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("required_check_batch"))
+    checklist_id: Mapped[str] = mapped_column(ForeignKey("required_field_checklists.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    checklist: Mapped[RequiredFieldChecklist] = relationship()
+    items: Mapped[list["RequiredFieldCheckBatchItem"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="RequiredFieldCheckBatchItem.created_at",
+    )
+
+
+class RequiredFieldCheckBatchItem(Base):
+    __tablename__ = "required_field_check_batch_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("required_check_batch_item"))
+    batch_id: Mapped[str] = mapped_column(ForeignKey("required_field_check_batches.id"), nullable=False)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    job_id: Mapped[str] = mapped_column(ForeignKey("required_field_check_jobs.id"), nullable=False)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    batch: Mapped[RequiredFieldCheckBatch] = relationship(back_populates="items")
+    document: Mapped[Document] = relationship()
+    job: Mapped[RequiredFieldCheckJob] = relationship()
+
+
 class Batch(Base):
     __tablename__ = "batches"
 

@@ -16,11 +16,12 @@ Digitize Your Document는 사람이 대량 문서에서 반복적으로 확인�
 
 - **Raw Data Extractor**: Office/PDF 문서를 PDF preview와 HTML 정보 추출 결과로 변환
 - **Key Information Extractor**: 사용자가 정의한 schema 기준으로 PDF/image/DOCX/PPTX에서 key information 추출
+- **Document Classifier**: 사용자가 정의한 후보 class와 unknown 허용 규칙으로 문서 종류 분류
+- **Required Field Checker**: 값의 정확성이 아니라 필수 항목 존재/누락/불확실 여부 확인
 
 예정 기능:
 
-- **OCR**: 단순 텍스트 OCR
-- **Intelligence Parse**: 문서를 구조와 의미 기준으로 지능형 파싱
+- **Workflow Builder**: 모듈을 드래그 앤 드롭으로 연결하는 문서 처리 파이프라인
 
 설계 원칙:
 
@@ -186,7 +187,161 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 
 DOCX/PPTX는 LibreOffice로 PDF 변환 후 page image로 rasterize한다. 이후 VLM에는 기존과 동일하게 page image data URL을 전달한다.
 
-## 4. Frontend
+## 4. Document Classifier
+
+### 4.1 목적
+
+업로드된 문서가 어떤 종류인지 먼저 나누는 모듈이다. 사용자가 class 후보를 직접 정의하며, 후보에 맞지 않는 문서는 `unknown`으로 남길 수 있다. 이 모듈은 대량 문서가 섞여 들어오는 업무에서 downstream KIE/checklist 설정을 고르는 전처리 단계가 된다.
+
+### 4.2 Config
+
+```json
+{
+  "name": "loan_document_classifier",
+  "description": "금융 업무 접수 문서를 종류별로 분류한다.",
+  "allow_unknown": true,
+  "classes": [
+    {
+      "class_name": "credit_information_inquiry_consent",
+      "description": "개인신용정보 조회 동의서",
+      "signals": ["고유식별정보", "개인신용정보", "동의함"]
+    }
+  ]
+}
+```
+
+### 4.3 Result
+
+```json
+{
+  "status": "classified",
+  "class_name": "credit_information_inquiry_consent",
+  "confidence": 0.91,
+  "reason": "문서 제목과 동의 체크박스 영역이 후보 class signal과 일치한다.",
+  "evidence": ["고유식별정보", "개인신용정보 조회 동의"]
+}
+```
+
+상태:
+
+- `classified`: 후보 class 중 하나로 판단됨
+- `unknown`: 후보 class에 맞지 않고 unknown 허용
+- `needs_review`: 판단 불확실 또는 unknown 미허용 상황
+
+### 4.4 API
+
+```http
+POST /api/document-classifiers
+GET /api/document-classifiers
+GET /api/document-classifiers/{classifier_id}
+PATCH /api/document-classifiers/{classifier_id}
+DELETE /api/document-classifiers/{classifier_id}
+POST /api/classification-jobs
+GET /api/classification-jobs/{job_id}
+PATCH /api/classification-results/{result_id}
+POST /api/classification-batches
+GET /api/classification-batches
+GET /api/classification-batches/{batch_id}
+POST /api/classification-batches/{batch_id}/cancel
+GET /api/classification-batches/{batch_id}/export?format=csv|json
+```
+
+## 5. Required Field Checker
+
+### 5.1 목적
+
+KIE보다 단순하게 필수 항목이 존재하는지만 확인한다. 값의 정확성은 보지 않는다. 예를 들어 성명, 작성일, 서명, 도장, 동의 체크박스가 비어 있는지 빠르게 거른다.
+
+### 5.2 Config
+
+```json
+{
+  "name": "consent_required_fields",
+  "description": "동의서 접수 전 필수 표시 여부를 확인한다.",
+  "regions": [
+    {
+      "id": "signature_region",
+      "name": "서명 영역",
+      "page": 1,
+      "x": 0.55,
+      "y": 0.75,
+      "width": 0.35,
+      "height": 0.12
+    }
+  ],
+  "items": [
+    {
+      "item_name": "서명",
+      "description": "서명 또는 날인이 존재하는지 확인한다.",
+      "evidence_type": "signature_or_stamp",
+      "required": true,
+      "region_id": "signature_region"
+    }
+  ]
+}
+```
+
+`evidence_type`:
+
+- `text_or_handwriting`
+- `checkbox`
+- `signature_or_stamp`
+- `visual_mark`
+- `other`
+
+### 5.3 Result
+
+```json
+{
+  "overall_status": "incomplete",
+  "items": [
+    {
+      "item_name": "서명",
+      "status": "missing",
+      "required": true,
+      "evidence_type": "signature_or_stamp",
+      "confidence": 0.72,
+      "evidence": "서명 영역에 필기 또는 날인이 보이지 않음",
+      "page": 1
+    }
+  ]
+}
+```
+
+overall status:
+
+- `complete`
+- `incomplete`
+- `needs_review`
+
+item status:
+
+- `present`
+- `missing`
+- `uncertain`
+- `not_applicable`
+
+### 5.4 API
+
+```http
+POST /api/required-field-checklists
+GET /api/required-field-checklists
+GET /api/required-field-checklists/{checklist_id}
+PATCH /api/required-field-checklists/{checklist_id}
+DELETE /api/required-field-checklists/{checklist_id}
+POST /api/required-field-check-jobs
+GET /api/required-field-check-jobs/{job_id}
+PATCH /api/required-field-check-results/{result_id}
+POST /api/required-field-check-batches
+GET /api/required-field-check-batches
+GET /api/required-field-check-batches/{batch_id}
+POST /api/required-field-check-batches/{batch_id}/cancel
+GET /api/required-field-check-batches/{batch_id}/export?format=csv|json
+```
+
+두 모듈의 config 삭제는 KIE schema와 동일하게 archive 처리한다. 과거 결과는 유지한다.
+
+## 6. Frontend
 
 첫 화면은 `Digitize Your Document` Home이다.
 
@@ -194,8 +349,9 @@ DOCX/PPTX는 LibreOffice로 PDF 변환 후 page image로 rasterize한다. 이후
 
 - Raw Data Extractor: enabled
 - Key Information Extractor: enabled
-- OCR: disabled, coming soon
-- Intelligence Parse: disabled, coming soon
+- Document Classifier: enabled
+- Required Field Checker: enabled
+- Workflow Builder: disabled, coming soon
 
 Home 우측 상단 Setting 버튼:
 
@@ -221,6 +377,28 @@ Key Information workspace:
 - Batch draft와 batch result sidebar는 파일명 기준 오름차순으로 표시한다.
 - Batch export CSV/JSON도 파일명 기준 오름차순으로 row를 정렬한다.
 
+Document Classifier workspace:
+
+- 좌측은 단일/배치 업로드, 문서 preview, batch file rail을 제공한다.
+- 우측은 classifier config table, 실행 버튼, 결과 table을 제공한다.
+- classifier library는 schema library와 같은 push sidebar 방식으로 열리며 기존 작업 영역을 덮지 않는다.
+- class 후보는 `class_name`, `description`, `signals`로 구성한다.
+- `allow_unknown` toggle을 제공한다.
+- 결과는 `classified`, `unknown`, `needs_review` 상태와 class, confidence, reason, evidence를 보여준다.
+- 사용자는 결과 class를 수정하고 reviewed 상태로 저장할 수 있다.
+- 1개 파일은 single job, 2개 이상은 batch job으로 자동 실행한다.
+
+Required Field Checker workspace:
+
+- 좌측은 단일/배치 업로드, 문서 preview, batch file rail을 제공한다.
+- 우측은 checklist item table, 실행 버튼, 결과 table을 제공한다.
+- checklist library는 push sidebar 방식으로 제공한다.
+- item은 `item_name`, `description`, `evidence_type`, `required`, optional `region_id`로 구성한다.
+- region은 KIE와 동일하게 0~1 상대 좌표로 저장하며 여러 item이 같은 region을 공유할 수 있다.
+- 결과는 overall `complete`, `incomplete`, `needs_review`와 item별 `present`, `missing`, `uncertain`, `not_applicable`을 표시한다.
+- 값의 정확성, 날짜/금액 형식, 외부 DB 일치 여부는 확인하지 않는다.
+- 1개 파일은 single job, 2개 이상은 batch job으로 자동 실행한다.
+
 Maintenance:
 
 - Setting popup에서 파싱 기록 삭제 버튼을 제공한다.
@@ -229,10 +407,10 @@ Maintenance:
 
 브라우저 Back:
 
-- Home에서 기능 진입 시 URL hash를 `#raw`, `#key-info`로 갱신한다.
+- Home에서 기능 진입 시 URL hash를 `#raw`, `#key-info`, `#classifier`, `#required-checker`로 갱신한다.
 - 브라우저 Back을 누르면 browser 초기 화면이 아니라 app Home으로 돌아온다.
 
-## 5. 환경
+## 7. 환경
 
 Python은 conda가 아니라 `uv` 기반 `.venv`를 사용한다.
 
@@ -286,7 +464,7 @@ soffice --version
 LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
 ```
 
-## 6. 테스트 기준
+## 8. 테스트 기준
 
 Backend:
 
@@ -302,6 +480,13 @@ Backend:
 - raw Office upload with LibreOffice conversion mocked
 - raw XLSX formula extraction option
 - result correction/export
+- document classifier config CRUD/archive
+- classification single job structured output 저장
+- classification batch progress/cancel/export
+- required field checklist config CRUD/archive
+- required field checklist region validation
+- required field check single job structured output 저장
+- required field check batch progress/cancel/export
 
 Frontend:
 
@@ -317,6 +502,9 @@ Frontend:
 - 이미지/수식 추출 옵션 toggle
 - Key Information Extractor 진입 및 schema/review flow 유지
 - KIE schema-level extraction region 지정/저장 및 field별 region 할당
+- Document Classifier 진입, class 후보 편집, unknown toggle, 단일/batch 실행, 결과 수정, export
+- Required Field Checker 진입, checklist item 편집, region 표시, 단일/batch 실행, 결과 수정, export
+- Workflow Builder disabled 카드 표시
 - 모바일 폭에서 layout overlap 없음
 
 Integration:
@@ -325,12 +513,11 @@ Integration:
 - `.docx`, `.xlsx`, `.pptx`, `.pdf` raw extraction smoke test
 - LibreOffice 누락/실패 시 UI error 확인
 
-## 7. 제외 범위
+## 9. 제외 범위
 
 - 사용자 인증/권한
 - PostgreSQL 운영 DB
 - 분산 queue
 - review 화면 bbox highlight overlay
 - 분산 queue 기반 대량 batch processing
-- OCR 실제 구현
-- Intelligence Parse 실제 구현
+- Workflow Builder 실제 실행 엔진

@@ -26,17 +26,35 @@ from app.document_processor import (
     read_image_size,
     save_upload_file,
 )
+from app.document_modules import (
+    classification_result_to_dict,
+    required_field_result_to_dict,
+    run_classification_batch,
+    run_classification_job,
+    run_required_field_check_batch,
+    run_required_field_check_job,
+)
 from app.extraction import result_to_dict, run_batch_jobs, run_extraction_job
 from app.models import (
     AuditEvent,
     Batch,
     BatchItem,
+    ClassificationBatch,
+    ClassificationBatchItem,
+    ClassificationJob,
+    ClassificationResult,
     Document,
+    DocumentClassifier,
     DocumentPage,
     ExportPreset,
     ExtractionJob,
     ExtractionResult,
     RawExtraction,
+    RequiredFieldCheckBatch,
+    RequiredFieldCheckBatchItem,
+    RequiredFieldCheckJob,
+    RequiredFieldCheckResult,
+    RequiredFieldChecklist,
     Schema,
 )
 from app.raw_extractor import RawExtractionError, RawExtractionOptions, create_raw_outputs, save_raw_upload, validate_raw_upload
@@ -45,8 +63,17 @@ from app.schemas import (
     AuditEventRead,
     BatchItemRead,
     BatchRead,
+    ClassificationBatchItemRead,
+    ClassificationBatchRead,
+    ClassificationJobCreate,
+    ClassificationJobRead,
+    ClassificationResultPatch,
+    ClassificationResultRead,
     DocumentPageRead,
     DocumentRead,
+    DocumentClassifierCreate,
+    DocumentClassifierRead,
+    DocumentClassifierUpdate,
     DraftExtractionJobCreate,
     ExportPresetCreate,
     ExportPresetRead,
@@ -55,6 +82,15 @@ from app.schemas import (
     ExtractionJobRead,
     ExtractionResultPatch,
     RawExtractionRead,
+    RequiredFieldCheckBatchItemRead,
+    RequiredFieldCheckBatchRead,
+    RequiredFieldCheckJobCreate,
+    RequiredFieldCheckJobRead,
+    RequiredFieldCheckResultPatch,
+    RequiredFieldCheckResultRead,
+    RequiredFieldChecklistCreate,
+    RequiredFieldChecklistRead,
+    RequiredFieldChecklistUpdate,
     SchemaCreate,
     SchemaDescriptionRecommendationRead,
     SchemaDescriptionRecommendationRequest,
@@ -520,6 +556,313 @@ def delete_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRead:
     return _schema_read(schema)
 
 
+@app.post("/api/document-classifiers", response_model=DocumentClassifierRead)
+def create_document_classifier(payload: DocumentClassifierCreate, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+    classifier = DocumentClassifier(
+        name=payload.name,
+        description=payload.description,
+        allow_unknown=payload.allow_unknown,
+        config_json=json.dumps(payload.model_dump(), ensure_ascii=False),
+        archived=False,
+    )
+    db.add(classifier)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="document_classifier",
+        entity_id=classifier.id,
+        action="created",
+        message=f"Created document classifier {classifier.name}",
+        metadata={"class_count": len(payload.classes)},
+    )
+    db.commit()
+    db.refresh(classifier)
+    return _classifier_read(classifier)
+
+
+@app.get("/api/document-classifiers", response_model=list[DocumentClassifierRead])
+def list_document_classifiers(
+    include_archived: bool = False,
+    db: Session = Depends(get_db),
+) -> list[DocumentClassifierRead]:
+    query = db.query(DocumentClassifier)
+    if not include_archived:
+        query = query.filter(DocumentClassifier.archived == False)  # noqa: E712
+    rows = query.order_by(DocumentClassifier.created_at.desc()).all()
+    return [_classifier_read(row) for row in rows]
+
+
+@app.get("/api/document-classifiers/{classifier_id}", response_model=DocumentClassifierRead)
+def get_document_classifier(classifier_id: str, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+    classifier = db.get(DocumentClassifier, classifier_id)
+    if not classifier:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
+    return _classifier_read(classifier)
+
+
+@app.patch("/api/document-classifiers/{classifier_id}", response_model=DocumentClassifierRead)
+def update_document_classifier(
+    classifier_id: str,
+    payload: DocumentClassifierUpdate,
+    db: Session = Depends(get_db),
+) -> DocumentClassifierRead:
+    classifier = db.get(DocumentClassifier, classifier_id)
+    if not classifier:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
+    current = _classifier_data(classifier)
+    next_config = {
+        "name": payload.name if payload.name is not None else classifier.name,
+        "description": payload.description if "description" in payload.model_fields_set else classifier.description,
+        "allow_unknown": payload.allow_unknown if payload.allow_unknown is not None else classifier.allow_unknown,
+        "classes": [item.model_dump() for item in payload.classes] if payload.classes is not None else current["classes"],
+    }
+    classifier.name = next_config["name"]
+    classifier.description = next_config["description"]
+    classifier.allow_unknown = bool(next_config["allow_unknown"])
+    classifier.config_json = json.dumps(next_config, ensure_ascii=False)
+    log_audit_event(
+        db,
+        entity_type="document_classifier",
+        entity_id=classifier.id,
+        action="updated",
+        message=f"Updated document classifier {classifier.name}",
+        metadata={"class_count": len(next_config["classes"])},
+    )
+    db.commit()
+    db.refresh(classifier)
+    return _classifier_read(classifier)
+
+
+@app.delete("/api/document-classifiers/{classifier_id}", response_model=DocumentClassifierRead)
+def delete_document_classifier(classifier_id: str, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+    classifier = db.get(DocumentClassifier, classifier_id)
+    if not classifier:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
+    classifier.archived = True
+    log_audit_event(
+        db,
+        entity_type="document_classifier",
+        entity_id=classifier.id,
+        action="archived",
+        message=f"Archived document classifier {classifier.name}",
+        metadata={"name": classifier.name},
+    )
+    db.commit()
+    db.refresh(classifier)
+    return _classifier_read(classifier)
+
+
+@app.post("/api/classification-jobs", response_model=ClassificationJobRead)
+def create_classification_job(
+    payload: ClassificationJobCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> ClassificationJobRead:
+    document = db.get(Document, payload.document_id)
+    classifier = db.get(DocumentClassifier, payload.classifier_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not classifier or classifier.archived:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
+    _repair_image_document_if_needed(document, db)
+    job = ClassificationJob(document_id=document.id, classifier_id=classifier.id, status="queued")
+    db.add(job)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="classification_job",
+        entity_id=job.id,
+        action="created",
+        message="Classification job created",
+        metadata={"document_id": document.id, "classifier_id": classifier.id},
+    )
+    db.commit()
+    db.refresh(job)
+    response = _classification_job_read(job)
+    db.close()
+    background_tasks.add_task(run_classification_job, job.id)
+    return response
+
+
+@app.get("/api/classification-jobs/{job_id}", response_model=ClassificationJobRead)
+def get_classification_job(job_id: str, db: Session = Depends(get_db)) -> ClassificationJobRead:
+    job = db.get(ClassificationJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Classification job not found")
+    return _classification_job_read(job)
+
+
+@app.patch("/api/classification-results/{result_id}", response_model=ClassificationResultRead)
+def patch_classification_result(
+    result_id: str,
+    payload: ClassificationResultPatch,
+    db: Session = Depends(get_db),
+) -> ClassificationResultRead:
+    result = db.get(ClassificationResult, result_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Classification result not found")
+    if payload.corrected_output is not None:
+        result.corrected_output = json.dumps(payload.corrected_output, ensure_ascii=False)
+    if payload.reviewed is not None:
+        result.reviewed = payload.reviewed
+    db.commit()
+    db.refresh(result)
+    return ClassificationResultRead(**classification_result_to_dict(result))
+
+
+@app.post("/api/required-field-checklists", response_model=RequiredFieldChecklistRead)
+def create_required_field_checklist(payload: RequiredFieldChecklistCreate, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+    checklist = RequiredFieldChecklist(
+        name=payload.name,
+        description=payload.description,
+        config_json=json.dumps(payload.model_dump(), ensure_ascii=False),
+        archived=False,
+    )
+    db.add(checklist)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="required_field_checklist",
+        entity_id=checklist.id,
+        action="created",
+        message=f"Created required field checklist {checklist.name}",
+        metadata={"item_count": len(payload.items)},
+    )
+    db.commit()
+    db.refresh(checklist)
+    return _checklist_read(checklist)
+
+
+@app.get("/api/required-field-checklists", response_model=list[RequiredFieldChecklistRead])
+def list_required_field_checklists(
+    include_archived: bool = False,
+    db: Session = Depends(get_db),
+) -> list[RequiredFieldChecklistRead]:
+    query = db.query(RequiredFieldChecklist)
+    if not include_archived:
+        query = query.filter(RequiredFieldChecklist.archived == False)  # noqa: E712
+    rows = query.order_by(RequiredFieldChecklist.created_at.desc()).all()
+    return [_checklist_read(row) for row in rows]
+
+
+@app.get("/api/required-field-checklists/{checklist_id}", response_model=RequiredFieldChecklistRead)
+def get_required_field_checklist(checklist_id: str, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+    checklist = db.get(RequiredFieldChecklist, checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    return _checklist_read(checklist)
+
+
+@app.patch("/api/required-field-checklists/{checklist_id}", response_model=RequiredFieldChecklistRead)
+def update_required_field_checklist(
+    checklist_id: str,
+    payload: RequiredFieldChecklistUpdate,
+    db: Session = Depends(get_db),
+) -> RequiredFieldChecklistRead:
+    checklist = db.get(RequiredFieldChecklist, checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    current = _checklist_data(checklist)
+    next_config = {
+        "name": payload.name if payload.name is not None else checklist.name,
+        "description": payload.description if "description" in payload.model_fields_set else checklist.description,
+        "regions": [region.model_dump() for region in payload.regions] if payload.regions is not None else current.get("regions", []),
+        "items": [item.model_dump() for item in payload.items] if payload.items is not None else current["items"],
+    }
+    _validate_checklist_region_references(next_config)
+    checklist.name = next_config["name"]
+    checklist.description = next_config["description"]
+    checklist.config_json = json.dumps(next_config, ensure_ascii=False)
+    log_audit_event(
+        db,
+        entity_type="required_field_checklist",
+        entity_id=checklist.id,
+        action="updated",
+        message=f"Updated required field checklist {checklist.name}",
+        metadata={"item_count": len(next_config["items"])},
+    )
+    db.commit()
+    db.refresh(checklist)
+    return _checklist_read(checklist)
+
+
+@app.delete("/api/required-field-checklists/{checklist_id}", response_model=RequiredFieldChecklistRead)
+def delete_required_field_checklist(checklist_id: str, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+    checklist = db.get(RequiredFieldChecklist, checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    checklist.archived = True
+    log_audit_event(
+        db,
+        entity_type="required_field_checklist",
+        entity_id=checklist.id,
+        action="archived",
+        message=f"Archived required field checklist {checklist.name}",
+        metadata={"name": checklist.name},
+    )
+    db.commit()
+    db.refresh(checklist)
+    return _checklist_read(checklist)
+
+
+@app.post("/api/required-field-check-jobs", response_model=RequiredFieldCheckJobRead)
+def create_required_field_check_job(
+    payload: RequiredFieldCheckJobCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> RequiredFieldCheckJobRead:
+    document = db.get(Document, payload.document_id)
+    checklist = db.get(RequiredFieldChecklist, payload.checklist_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not checklist or checklist.archived:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    _repair_image_document_if_needed(document, db)
+    job = RequiredFieldCheckJob(document_id=document.id, checklist_id=checklist.id, status="queued")
+    db.add(job)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="required_field_check_job",
+        entity_id=job.id,
+        action="created",
+        message="Required field check job created",
+        metadata={"document_id": document.id, "checklist_id": checklist.id},
+    )
+    db.commit()
+    db.refresh(job)
+    response = _required_field_job_read(job)
+    db.close()
+    background_tasks.add_task(run_required_field_check_job, job.id)
+    return response
+
+
+@app.get("/api/required-field-check-jobs/{job_id}", response_model=RequiredFieldCheckJobRead)
+def get_required_field_check_job(job_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckJobRead:
+    job = db.get(RequiredFieldCheckJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Required field check job not found")
+    return _required_field_job_read(job)
+
+
+@app.patch("/api/required-field-check-results/{result_id}", response_model=RequiredFieldCheckResultRead)
+def patch_required_field_check_result(
+    result_id: str,
+    payload: RequiredFieldCheckResultPatch,
+    db: Session = Depends(get_db),
+) -> RequiredFieldCheckResultRead:
+    result = db.get(RequiredFieldCheckResult, result_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Required field check result not found")
+    if payload.corrected_output is not None:
+        result.corrected_output = json.dumps(payload.corrected_output, ensure_ascii=False)
+    if payload.reviewed is not None:
+        result.reviewed = payload.reviewed
+    db.commit()
+    db.refresh(result)
+    return RequiredFieldCheckResultRead(**required_field_result_to_dict(result))
+
+
 @app.post("/api/extraction-jobs", response_model=ExtractionJobRead)
 def create_extraction_job(
     payload: ExtractionJobCreate,
@@ -968,6 +1311,276 @@ def export_batch(
     return _csv_download_response(output.getvalue(), f"{batch.id}.csv")
 
 
+@app.post("/api/classification-batches", response_model=ClassificationBatchRead)
+def create_classification_batch(
+    background_tasks: BackgroundTasks,
+    classifier_id: str = Form(...),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+) -> ClassificationBatchRead:
+    classifier = db.get(DocumentClassifier, classifier_id)
+    if not classifier or classifier.archived:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    batch = ClassificationBatch(classifier_id=classifier.id, status="running", total_count=len(files))
+    db.add(batch)
+    db.flush()
+    job_ids: list[str] = []
+    for file in sorted(files, key=_upload_file_sort_key):
+        document = _create_document_from_upload(file, db)
+        db.flush()
+        job = ClassificationJob(document_id=document.id, classifier_id=classifier.id, status="queued")
+        db.add(job)
+        db.flush()
+        db.add(
+            ClassificationBatchItem(
+                batch_id=batch.id,
+                document_id=document.id,
+                job_id=job.id,
+                filename=document.filename,
+            )
+        )
+        log_audit_event(
+            db,
+            entity_type="classification_job",
+            entity_id=job.id,
+            action="queued",
+            message="Queued classification batch job",
+            metadata={"batch_id": batch.id, "document_id": document.id, "classifier_id": classifier.id},
+        )
+        job_ids.append(job.id)
+
+    log_audit_event(
+        db,
+        entity_type="classification_batch",
+        entity_id=batch.id,
+        action="created",
+        message=f"Created classification batch with {len(files)} file(s)",
+        metadata={"classifier_id": classifier.id, "file_count": len(files)},
+    )
+    db.commit()
+    db.refresh(batch)
+    response = _classification_batch_read(batch)
+    db.close()
+    background_tasks.add_task(run_classification_batch, batch.id, job_ids)
+    return response
+
+
+@app.get("/api/classification-batches", response_model=list[ClassificationBatchRead])
+def list_classification_batches(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[ClassificationBatchRead]:
+    batches = db.query(ClassificationBatch).order_by(ClassificationBatch.created_at.desc()).limit(limit).all()
+    return [_classification_batch_read(batch) for batch in batches]
+
+
+@app.get("/api/classification-batches/{batch_id}", response_model=ClassificationBatchRead)
+def get_classification_batch(batch_id: str, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    batch = db.get(ClassificationBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Classification batch not found")
+    return _classification_batch_read(batch)
+
+
+@app.post("/api/classification-batches/{batch_id}/cancel", response_model=ClassificationBatchRead)
+def cancel_classification_batch(batch_id: str, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    batch = db.get(ClassificationBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Classification batch not found")
+    _cancel_module_batch(batch, "classification_batch", db)
+    db.commit()
+    db.refresh(batch)
+    return _classification_batch_read(batch)
+
+
+@app.get("/api/classification-batches/{batch_id}/export")
+def export_classification_batch(
+    batch_id: str,
+    format: str = Query(default="csv", pattern="^(json|csv)$"),
+    db: Session = Depends(get_db),
+) -> Response:
+    batch = db.get(ClassificationBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Classification batch not found")
+    rows = [_classification_batch_export_row(item) for item in _sorted_module_items(batch.items)]
+    payload = {
+        "batch_id": batch.id,
+        "classifier_id": batch.classifier_id,
+        "status": _classification_batch_read(batch).status,
+        "total_count": batch.total_count,
+        "rows": rows,
+    }
+    log_audit_event(
+        db,
+        entity_type="classification_batch",
+        entity_id=batch.id,
+        action="exported",
+        message=f"Exported classification batch {format.upper()}",
+        metadata={"format": format},
+    )
+    db.commit()
+    if format == "json":
+        return JSONResponse(payload, headers={"Content-Disposition": f'attachment; filename="{batch.id}.json"'})
+
+    output = io.StringIO()
+    fieldnames = [
+        "filename",
+        "document_id",
+        "job_id",
+        "status",
+        "error_message",
+        "classification_status",
+        "class_name",
+        "confidence",
+        "reason",
+        "evidence",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
+    return _csv_download_response(output.getvalue(), f"{batch.id}.csv")
+
+
+@app.post("/api/required-field-check-batches", response_model=RequiredFieldCheckBatchRead)
+def create_required_field_check_batch(
+    background_tasks: BackgroundTasks,
+    checklist_id: str = Form(...),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+) -> RequiredFieldCheckBatchRead:
+    checklist = db.get(RequiredFieldChecklist, checklist_id)
+    if not checklist or checklist.archived:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    batch = RequiredFieldCheckBatch(checklist_id=checklist.id, status="running", total_count=len(files))
+    db.add(batch)
+    db.flush()
+    job_ids: list[str] = []
+    for file in sorted(files, key=_upload_file_sort_key):
+        document = _create_document_from_upload(file, db)
+        db.flush()
+        job = RequiredFieldCheckJob(document_id=document.id, checklist_id=checklist.id, status="queued")
+        db.add(job)
+        db.flush()
+        db.add(
+            RequiredFieldCheckBatchItem(
+                batch_id=batch.id,
+                document_id=document.id,
+                job_id=job.id,
+                filename=document.filename,
+            )
+        )
+        log_audit_event(
+            db,
+            entity_type="required_field_check_job",
+            entity_id=job.id,
+            action="queued",
+            message="Queued required field check batch job",
+            metadata={"batch_id": batch.id, "document_id": document.id, "checklist_id": checklist.id},
+        )
+        job_ids.append(job.id)
+
+    log_audit_event(
+        db,
+        entity_type="required_field_check_batch",
+        entity_id=batch.id,
+        action="created",
+        message=f"Created required field check batch with {len(files)} file(s)",
+        metadata={"checklist_id": checklist.id, "file_count": len(files)},
+    )
+    db.commit()
+    db.refresh(batch)
+    response = _required_field_batch_read(batch)
+    db.close()
+    background_tasks.add_task(run_required_field_check_batch, batch.id, job_ids)
+    return response
+
+
+@app.get("/api/required-field-check-batches", response_model=list[RequiredFieldCheckBatchRead])
+def list_required_field_check_batches(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[RequiredFieldCheckBatchRead]:
+    batches = db.query(RequiredFieldCheckBatch).order_by(RequiredFieldCheckBatch.created_at.desc()).limit(limit).all()
+    return [_required_field_batch_read(batch) for batch in batches]
+
+
+@app.get("/api/required-field-check-batches/{batch_id}", response_model=RequiredFieldCheckBatchRead)
+def get_required_field_check_batch(batch_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+    batch = db.get(RequiredFieldCheckBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    return _required_field_batch_read(batch)
+
+
+@app.post("/api/required-field-check-batches/{batch_id}/cancel", response_model=RequiredFieldCheckBatchRead)
+def cancel_required_field_check_batch(batch_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+    batch = db.get(RequiredFieldCheckBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    _cancel_module_batch(batch, "required_field_check_batch", db)
+    db.commit()
+    db.refresh(batch)
+    return _required_field_batch_read(batch)
+
+
+@app.get("/api/required-field-check-batches/{batch_id}/export")
+def export_required_field_check_batch(
+    batch_id: str,
+    format: str = Query(default="csv", pattern="^(json|csv)$"),
+    db: Session = Depends(get_db),
+) -> Response:
+    batch = db.get(RequiredFieldCheckBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    checklist = db.get(RequiredFieldChecklist, batch.checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    item_names = [item.get("item_name") for item in _checklist_data(checklist).get("items", []) if item.get("item_name")]
+    rows = [_required_field_batch_export_row(item, item_names) for item in _sorted_module_items(batch.items)]
+    payload = {
+        "batch_id": batch.id,
+        "checklist_id": batch.checklist_id,
+        "status": _required_field_batch_read(batch).status,
+        "total_count": batch.total_count,
+        "rows": rows,
+    }
+    log_audit_event(
+        db,
+        entity_type="required_field_check_batch",
+        entity_id=batch.id,
+        action="exported",
+        message=f"Exported required field check batch {format.upper()}",
+        metadata={"format": format},
+    )
+    db.commit()
+    if format == "json":
+        return JSONResponse(payload, headers={"Content-Disposition": f'attachment; filename="{batch.id}.json"'})
+
+    output = io.StringIO()
+    item_columns = [f"{name}_status" for name in item_names] + [f"{name}_evidence" for name in item_names]
+    fieldnames = [
+        "filename",
+        "document_id",
+        "job_id",
+        "status",
+        "error_message",
+        "overall_status",
+        *item_columns,
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
+    return _csv_download_response(output.getvalue(), f"{batch.id}.csv")
+
+
 @app.get("/api/archive/search", response_model=list[ArchiveSearchResult])
 def archive_search(
     q: str | None = None,
@@ -986,6 +1599,14 @@ def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
     counts = {
         "batches": db.query(Batch).count(),
         "batch_items": db.query(BatchItem).count(),
+        "classification_batches": db.query(ClassificationBatch).count(),
+        "classification_batch_items": db.query(ClassificationBatchItem).count(),
+        "classification_jobs": db.query(ClassificationJob).count(),
+        "classification_results": db.query(ClassificationResult).count(),
+        "required_field_check_batches": db.query(RequiredFieldCheckBatch).count(),
+        "required_field_check_batch_items": db.query(RequiredFieldCheckBatchItem).count(),
+        "required_field_check_jobs": db.query(RequiredFieldCheckJob).count(),
+        "required_field_check_results": db.query(RequiredFieldCheckResult).count(),
         "documents": db.query(Document).count(),
         "document_pages": db.query(DocumentPage).count(),
         "extraction_jobs": db.query(ExtractionJob).count(),
@@ -996,6 +1617,14 @@ def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
     ephemeral_schema_ids = [row[0] for row in db.query(Schema.id).filter(Schema.ephemeral == True).all()]  # noqa: E712
+    db.query(ClassificationBatchItem).delete(synchronize_session=False)
+    db.query(ClassificationBatch).delete(synchronize_session=False)
+    db.query(ClassificationResult).delete(synchronize_session=False)
+    db.query(ClassificationJob).delete(synchronize_session=False)
+    db.query(RequiredFieldCheckBatchItem).delete(synchronize_session=False)
+    db.query(RequiredFieldCheckBatch).delete(synchronize_session=False)
+    db.query(RequiredFieldCheckResult).delete(synchronize_session=False)
+    db.query(RequiredFieldCheckJob).delete(synchronize_session=False)
     db.query(BatchItem).delete(synchronize_session=False)
     db.query(Batch).delete(synchronize_session=False)
     db.query(ExtractionResult).delete(synchronize_session=False)
@@ -1164,6 +1793,98 @@ def _schema_data(schema: Schema) -> dict[str, Any]:
     return json.loads(schema.schema_json)
 
 
+def _classifier_read(classifier: DocumentClassifier) -> DocumentClassifierRead:
+    data = _classifier_data(classifier)
+    return DocumentClassifierRead(
+        id=classifier.id,
+        name=classifier.name,
+        description=classifier.description,
+        allow_unknown=classifier.allow_unknown,
+        archived=classifier.archived,
+        classes=data["classes"],
+        created_at=classifier.created_at,
+        updated_at=classifier.updated_at,
+    )
+
+
+def _classifier_data(classifier: DocumentClassifier) -> dict[str, Any]:
+    if not classifier.config_json or classifier.config_json == "{}":
+        raise HTTPException(status_code=500, detail="Document classifier data is missing")
+    return json.loads(classifier.config_json)
+
+
+def _classification_job_read(job: ClassificationJob) -> ClassificationJobRead:
+    return ClassificationJobRead(
+        job_id=job.id,
+        document_id=job.document_id,
+        classifier_id=job.classifier_id,
+        status=job.status,
+        error_message=job.error_message,
+        result_id=job.result_id,
+        result=ClassificationResultRead(**classification_result_to_dict(job.result)) if job.result else None,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+    )
+
+
+def _checklist_read(checklist: RequiredFieldChecklist) -> RequiredFieldChecklistRead:
+    data = _checklist_data(checklist)
+    return RequiredFieldChecklistRead(
+        id=checklist.id,
+        name=checklist.name,
+        description=checklist.description,
+        archived=checklist.archived,
+        regions=data.get("regions", []),
+        items=data["items"],
+        created_at=checklist.created_at,
+        updated_at=checklist.updated_at,
+    )
+
+
+def _checklist_data(checklist: RequiredFieldChecklist) -> dict[str, Any]:
+    if not checklist.config_json or checklist.config_json == "{}":
+        raise HTTPException(status_code=500, detail="Required field checklist data is missing")
+    return json.loads(checklist.config_json)
+
+
+def _validate_checklist_region_references(checklist_data: dict[str, Any]) -> None:
+    item_names = [item.get("item_name") for item in checklist_data.get("items", []) if isinstance(item, dict)]
+    if len(item_names) != len(set(item_names)):
+        raise HTTPException(status_code=422, detail="required field item_name values must be unique")
+    region_ids = [region.get("id") for region in checklist_data.get("regions", []) if isinstance(region, dict)]
+    if len(region_ids) != len(set(region_ids)):
+        raise HTTPException(status_code=422, detail="required field region ids must be unique")
+    region_id_set = set(region_ids)
+    missing_region_ids = sorted(
+        {
+            item.get("region_id")
+            for item in checklist_data.get("items", [])
+            if isinstance(item, dict) and item.get("region_id") and item.get("region_id") not in region_id_set
+        }
+    )
+    if missing_region_ids:
+        raise HTTPException(
+            status_code=422,
+            detail=f"required field item region_id values are missing from regions: {', '.join(missing_region_ids)}",
+        )
+
+
+def _required_field_job_read(job: RequiredFieldCheckJob) -> RequiredFieldCheckJobRead:
+    return RequiredFieldCheckJobRead(
+        job_id=job.id,
+        document_id=job.document_id,
+        checklist_id=job.checklist_id,
+        status=job.status,
+        error_message=job.error_message,
+        result_id=job.result_id,
+        result=RequiredFieldCheckResultRead(**required_field_result_to_dict(job.result)) if job.result else None,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+    )
+
+
 def _validate_schema_region_references(schema_data: dict[str, Any]) -> None:
     region_ids = {region.get("id") for region in schema_data.get("regions", []) if isinstance(region, dict)}
     missing_region_ids = sorted(
@@ -1306,11 +2027,123 @@ def _batch_item_read(item: BatchItem) -> BatchItemRead:
     )
 
 
+def _classification_batch_read(batch: ClassificationBatch) -> ClassificationBatchRead:
+    items = [_classification_batch_item_read(item) for item in _sorted_module_items(batch.items)]
+    status, completed_count, failed_count, canceled_count, progress = _module_batch_status(batch.total_count, items)
+    return ClassificationBatchRead(
+        id=batch.id,
+        classifier_id=batch.classifier_id,
+        status=status,
+        total_count=batch.total_count,
+        completed_count=completed_count,
+        failed_count=failed_count,
+        canceled_count=canceled_count,
+        progress=progress,
+        items=items,
+        created_at=batch.created_at,
+        completed_at=batch.completed_at,
+    )
+
+
+def _classification_batch_item_read(item: ClassificationBatchItem) -> ClassificationBatchItemRead:
+    return ClassificationBatchItemRead(
+        id=item.id,
+        document_id=item.document_id,
+        job_id=item.job_id,
+        filename=item.filename,
+        status=item.job.status if item.job else "unknown",
+        result_id=item.job.result_id if item.job else None,
+        error_message=item.job.error_message if item.job else None,
+        created_at=item.created_at,
+    )
+
+
+def _required_field_batch_read(batch: RequiredFieldCheckBatch) -> RequiredFieldCheckBatchRead:
+    items = [_required_field_batch_item_read(item) for item in _sorted_module_items(batch.items)]
+    status, completed_count, failed_count, canceled_count, progress = _module_batch_status(batch.total_count, items)
+    return RequiredFieldCheckBatchRead(
+        id=batch.id,
+        checklist_id=batch.checklist_id,
+        status=status,
+        total_count=batch.total_count,
+        completed_count=completed_count,
+        failed_count=failed_count,
+        canceled_count=canceled_count,
+        progress=progress,
+        items=items,
+        created_at=batch.created_at,
+        completed_at=batch.completed_at,
+    )
+
+
+def _required_field_batch_item_read(item: RequiredFieldCheckBatchItem) -> RequiredFieldCheckBatchItemRead:
+    return RequiredFieldCheckBatchItemRead(
+        id=item.id,
+        document_id=item.document_id,
+        job_id=item.job_id,
+        filename=item.filename,
+        status=item.job.status if item.job else "unknown",
+        result_id=item.job.result_id if item.job else None,
+        error_message=item.job.error_message if item.job else None,
+        created_at=item.created_at,
+    )
+
+
+def _module_batch_status(total_count: int, items: list[Any]) -> tuple[str, int, int, int, float]:
+    completed_statuses = {"completed", "needs_review"}
+    completed_count = sum(1 for item in items if item.status in completed_statuses)
+    failed_count = sum(1 for item in items if item.status == "failed")
+    canceled_count = sum(1 for item in items if item.status == "canceled")
+    finished_count = completed_count + failed_count + canceled_count
+    if total_count and finished_count >= total_count:
+        if canceled_count == total_count:
+            status = "canceled"
+        elif failed_count or canceled_count:
+            status = "completed_with_errors"
+        else:
+            status = "completed"
+    elif canceled_count:
+        status = "canceling"
+    else:
+        status = "running"
+    progress = finished_count / total_count if total_count else 0
+    return status, completed_count, failed_count, canceled_count, progress
+
+
+def _cancel_module_batch(batch: Any, entity_type: str, db: Session) -> None:
+    canceled_count = 0
+    now = datetime.utcnow()
+    for item in batch.items:
+        if item.job and item.job.status in {"queued", "running"}:
+            item.job.status = "canceled"
+            item.job.error_message = "Canceled by user"
+            item.job.completed_at = now
+            canceled_count += 1
+    if canceled_count:
+        batch.status = "cancel_requested"
+        action = "cancel_requested"
+        message = f"Cancel requested for {canceled_count} running or queued job(s)"
+        metadata = {"canceled_count": canceled_count}
+    else:
+        action = "cancel_skipped"
+        message = "No running or queued batch jobs to cancel"
+        metadata = {}
+    log_audit_event(db, entity_type=entity_type, entity_id=batch.id, action=action, message=message, metadata=metadata)
+
+
 def _sorted_batch_items(items) -> list[BatchItem]:
     return sorted(items, key=_batch_item_sort_key)
 
 
 def _batch_item_sort_key(item: BatchItem) -> tuple[str, str]:
+    return (item.filename.casefold(), item.id)
+
+
+def _sorted_module_items(items) -> list[Any]:
+    return sorted(items, key=_module_item_sort_key)
+
+
+def _module_item_sort_key(item: Any) -> tuple[str, str]:
     return (item.filename.casefold(), item.id)
 
 
@@ -1345,6 +2178,57 @@ def _batch_export_row(item: BatchItem, field_names: list[str]) -> dict[str, Any]
         else:
             row[field_name] = value
     row["warnings"] = warnings
+    return row
+
+
+def _classification_batch_export_row(item: ClassificationBatchItem) -> dict[str, Any]:
+    job = item.job
+    row: dict[str, Any] = {
+        "filename": item.filename,
+        "document_id": item.document_id,
+        "job_id": item.job_id,
+        "status": job.status if job else "unknown",
+        "error_message": job.error_message if job else None,
+        "classification_status": None,
+        "class_name": None,
+        "confidence": None,
+        "reason": None,
+        "evidence": [],
+    }
+    if not job or not job.result:
+        return row
+    output = json.loads(job.result.corrected_output) if job.result.corrected_output else json.loads(job.result.validated_output)
+    row["classification_status"] = output.get("status")
+    row["class_name"] = output.get("class_name")
+    row["confidence"] = output.get("confidence")
+    row["reason"] = output.get("reason")
+    row["evidence"] = output.get("evidence") if isinstance(output.get("evidence"), list) else []
+    return row
+
+
+def _required_field_batch_export_row(item: RequiredFieldCheckBatchItem, item_names: list[str]) -> dict[str, Any]:
+    job = item.job
+    row: dict[str, Any] = {
+        "filename": item.filename,
+        "document_id": item.document_id,
+        "job_id": item.job_id,
+        "status": job.status if job else "unknown",
+        "error_message": job.error_message if job else None,
+        "overall_status": None,
+    }
+    for item_name in item_names:
+        row[f"{item_name}_status"] = None
+        row[f"{item_name}_evidence"] = None
+    if not job or not job.result:
+        return row
+    output = json.loads(job.result.corrected_output) if job.result.corrected_output else json.loads(job.result.validated_output)
+    row["overall_status"] = output.get("overall_status")
+    output_items = output.get("items") if isinstance(output.get("items"), list) else []
+    by_name = {entry.get("item_name"): entry for entry in output_items if isinstance(entry, dict)}
+    for item_name in item_names:
+        entry = by_name.get(item_name, {})
+        row[f"{item_name}_status"] = entry.get("status")
+        row[f"{item_name}_evidence"] = entry.get("evidence")
     return row
 
 

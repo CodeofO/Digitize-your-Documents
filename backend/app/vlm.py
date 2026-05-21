@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
-from app.schemas import FieldDefinition
+from app.schemas import ClassCandidate, FieldDefinition, RequiredFieldItem, SchemaRegion
 
 
 SYSTEM_PROMPT = """You are a key information extraction engine.
@@ -29,6 +29,19 @@ Look only at the user's current extraction fields.
 Write a concise schema-level description that explains what this schema extracts.
 Do not invent fields. Do not rewrite field-level descriptions. Do not say it is an invoice unless the fields clearly indicate that.
 Use the document's primary language. One or two sentences are enough."""
+
+DOCUMENT_CLASSIFIER_PROMPT = """You are a document classification engine.
+Choose only from the user-defined candidate classes.
+If none of the classes fit and unknown is allowed, return status unknown with class_name null.
+If the document is ambiguous, return needs_review.
+Use visual evidence and visible text only.
+Return data that matches the requested structured output schema."""
+
+REQUIRED_FIELD_CHECKER_PROMPT = """You are a required field presence checker.
+Check whether each user-defined item is visibly present, missing, uncertain, or not applicable.
+Do not validate whether a value is correct. Only decide whether the required mark, handwriting, text, signature, stamp, checkbox, or visual evidence exists.
+Use optional region crops only for their matching items.
+Return data that matches the requested structured output schema."""
 
 
 def build_structured_output_schema(fields: list[FieldDefinition]) -> dict[str, Any]:
@@ -107,6 +120,50 @@ def recommend_schema_description_with_vlm(
         prompt,
         [],
         _schema_description_output_schema(),
+        api_style,
+    )
+
+
+def classify_document_with_vlm(
+    classes: list[ClassCandidate],
+    allow_unknown: bool,
+    image_paths: list[str],
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_classification(classes, allow_unknown)
+
+    _ensure_vlm_credentials(settings)
+    prompt = _build_classification_prompt(classes, allow_unknown)
+    return _invoke_structured_llm(
+        DOCUMENT_CLASSIFIER_PROMPT,
+        prompt,
+        _image_inputs_from_paths(image_paths),
+        _classification_output_schema(classes, allow_unknown),
+        api_style,
+    )
+
+
+def check_required_fields_with_vlm(
+    items: list[RequiredFieldItem],
+    regions: list[SchemaRegion],
+    image_paths: list[str] | None = None,
+    image_inputs: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_required_field_check(items)
+
+    _ensure_vlm_credentials(settings)
+    prompt = _build_required_field_prompt(items, regions)
+    inputs = image_inputs or _image_inputs_from_paths(image_paths or [])
+    return _invoke_structured_llm(
+        REQUIRED_FIELD_CHECKER_PROMPT,
+        prompt,
+        inputs,
+        _required_field_output_schema(items),
         api_style,
     )
 
@@ -399,6 +456,82 @@ def _schema_description_output_schema() -> dict[str, Any]:
     }
 
 
+def _classification_output_schema(classes: list[ClassCandidate], allow_unknown: bool) -> dict[str, Any]:
+    class_names = [item.class_name for item in classes]
+    class_schema: dict[str, Any] = {"type": "string", "enum": class_names}
+    if allow_unknown:
+        class_schema = {"anyOf": [class_schema, {"type": "null"}]}
+    return {
+        "title": "DocumentClassificationResult",
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "status": {"type": "string", "enum": ["classified", "unknown", "needs_review"]},
+            "class_name": class_schema,
+            "confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
+            "reason": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["status", "class_name", "confidence", "reason", "evidence"],
+    }
+
+
+def _required_field_output_schema(items: list[RequiredFieldItem]) -> dict[str, Any]:
+    return {
+        "title": "RequiredFieldCheckResult",
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "overall_status": {"type": "string", "enum": ["complete", "incomplete", "needs_review"]},
+            "items": {
+                "type": "array",
+                "minItems": len(items),
+                "maxItems": len(items),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "item_name": {"type": "string", "enum": [item.item_name for item in items]},
+                        "status": {"type": "string", "enum": ["present", "missing", "uncertain", "not_applicable"]},
+                        "confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
+                        "evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "page": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+                    },
+                    "required": ["item_name", "status", "confidence", "evidence", "page"],
+                },
+            },
+        },
+        "required": ["overall_status", "items"],
+    }
+
+
+def _build_classification_prompt(classes: list[ClassCandidate], allow_unknown: bool) -> str:
+    lines = [
+        "Classify the document into one of these user-defined classes:",
+    ]
+    for item in classes:
+        signals = ", ".join(item.signals) if item.signals else "(no explicit signals)"
+        lines.append(f"- {item.class_name}: {item.description}. Signals: {signals}")
+    lines.append(f"Unknown allowed: {'yes' if allow_unknown else 'no'}")
+    lines.append("Return classified only when visible evidence supports one candidate class.")
+    return "\n".join(lines)
+
+
+def _build_required_field_prompt(items: list[RequiredFieldItem], regions: list[SchemaRegion]) -> str:
+    region_names = {region.id: region.name for region in regions}
+    lines = ["Check whether these required field items are visibly present:"]
+    for item in items:
+        region_text = f", region_id={item.region_id} ({region_names.get(item.region_id, 'unknown region')})" if item.region_id else ""
+        required_text = "required" if item.required else "optional"
+        lines.append(
+            f"- {item.item_name} ({item.evidence_type}, {required_text}{region_text}): {item.description}"
+        )
+    lines.append(
+        "Only judge presence. Do not validate date validity, amount correctness, ID format, external database match, or signer identity."
+    )
+    return "\n".join(lines)
+
+
 def _build_schema_description_prompt(
     schema_name: str,
     current_description: str | None,
@@ -537,4 +670,45 @@ def _mock_schema_description_recommendation(schema_name: str, fields: list[Field
     return {
         "description": f"{schema_name} schema extracts these user-defined fields from the document: {field_names}.",
         "reasoning": "Mock mode generated a deterministic description from the current field list.",
+    }
+
+
+def _mock_classification(classes: list[ClassCandidate], allow_unknown: bool) -> dict[str, Any]:
+    if classes:
+        selected = classes[0]
+        return {
+            "status": "classified",
+            "class_name": selected.class_name,
+            "confidence": 0.88,
+            "reason": f"Mock mode selected the first candidate class: {selected.class_name}.",
+            "evidence": selected.signals[:3] or [selected.description],
+        }
+    return {
+        "status": "unknown" if allow_unknown else "needs_review",
+        "class_name": None,
+        "confidence": 0.0,
+        "reason": "Mock mode found no candidate classes.",
+        "evidence": [],
+    }
+
+
+def _mock_required_field_check(items: list[RequiredFieldItem]) -> dict[str, Any]:
+    checked_items = []
+    missing_required = False
+    for index, item in enumerate(items):
+        status = "present" if index % 3 != 2 else "uncertain"
+        if item.required and status != "present":
+            missing_required = True
+        checked_items.append(
+            {
+                "item_name": item.item_name,
+                "status": status,
+                "confidence": 0.84 if status == "present" else 0.58,
+                "evidence": f"Mock evidence for {item.item_name}",
+                "page": 1,
+            }
+        )
+    return {
+        "overall_status": "needs_review" if missing_required else "complete",
+        "items": checked_items,
     }

@@ -271,6 +271,289 @@ class SchemaDescriptionRecommendationRead(BaseModel):
     reasoning: str | None = None
 
 
+ClassificationStatus = Literal["classified", "unknown", "needs_review"]
+RequiredFieldEvidenceType = Literal["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"]
+RequiredFieldItemStatus = Literal["present", "missing", "uncertain", "not_applicable"]
+RequiredFieldOverallStatus = Literal["complete", "incomplete", "needs_review"]
+
+
+class ClassCandidate(BaseModel):
+    class_name: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=1000)
+    signals: list[str] = Field(default_factory=list)
+
+    @field_validator("class_name", "description")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("signals")
+    @classmethod
+    def validate_signals(cls, values: list[str]) -> list[str]:
+        return [value.strip() for value in values if value.strip()]
+
+
+class DocumentClassifierCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = None
+    allow_unknown: bool = True
+    classes: list[ClassCandidate] = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_unique_classes(self) -> "DocumentClassifierCreate":
+        names = [item.class_name for item in self.classes]
+        if len(names) != len(set(names)):
+            raise ValueError("classifier class_name values must be unique")
+        return self
+
+
+class DocumentClassifierUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    allow_unknown: bool | None = None
+    classes: list[ClassCandidate] | None = Field(default=None, min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else value
+
+    @model_validator(mode="after")
+    def validate_unique_classes(self) -> "DocumentClassifierUpdate":
+        if self.classes is None:
+            return self
+        names = [item.class_name for item in self.classes]
+        if len(names) != len(set(names)):
+            raise ValueError("classifier class_name values must be unique")
+        return self
+
+
+class DocumentClassifierRead(BaseModel):
+    id: str
+    name: str
+    description: str | None
+    allow_unknown: bool
+    archived: bool = False
+    classes: list[ClassCandidate]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ClassificationJobCreate(BaseModel):
+    document_id: str
+    classifier_id: str
+
+
+class ClassificationResultRead(BaseModel):
+    id: str
+    job_id: str
+    raw_model_output: dict[str, Any]
+    validated_output: dict[str, Any]
+    corrected_output: dict[str, Any] | None
+    reviewed: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ClassificationJobRead(BaseModel):
+    job_id: str
+    document_id: str
+    classifier_id: str
+    status: str
+    error_message: str | None
+    result_id: str | None
+    result: ClassificationResultRead | None = None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class ClassificationResultPatch(BaseModel):
+    corrected_output: dict[str, Any] | None = None
+    reviewed: bool | None = None
+
+
+class ClassificationBatchItemRead(BaseModel):
+    id: str
+    document_id: str
+    job_id: str
+    filename: str
+    status: str
+    result_id: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+
+
+class ClassificationBatchRead(BaseModel):
+    id: str
+    classifier_id: str
+    status: str
+    total_count: int
+    completed_count: int
+    failed_count: int
+    canceled_count: int
+    progress: float
+    items: list[ClassificationBatchItemRead]
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class RequiredFieldItem(BaseModel):
+    item_name: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=1000)
+    evidence_type: RequiredFieldEvidenceType = "text_or_handwriting"
+    required: bool = True
+    region_id: str | None = Field(default=None, max_length=80)
+
+    @field_validator("item_name", "description")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("region_id")
+    @classmethod
+    def validate_region_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class RequiredFieldChecklistCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = None
+    regions: list[SchemaRegion] = Field(default_factory=list)
+    items: list[RequiredFieldItem] = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_items_and_regions(self) -> "RequiredFieldChecklistCreate":
+        _validate_required_checklist(self.items, self.regions)
+        return self
+
+
+class RequiredFieldChecklistUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    regions: list[SchemaRegion] | None = None
+    items: list[RequiredFieldItem] | None = Field(default=None, min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else value
+
+    @model_validator(mode="after")
+    def validate_items_and_regions(self) -> "RequiredFieldChecklistUpdate":
+        if self.items is not None and self.regions is not None:
+            _validate_required_checklist(self.items, self.regions)
+        elif self.items is not None:
+            names = [item.item_name for item in self.items]
+            if len(names) != len(set(names)):
+                raise ValueError("required field item_name values must be unique")
+        elif self.regions is not None:
+            region_ids = [region.id for region in self.regions]
+            if len(region_ids) != len(set(region_ids)):
+                raise ValueError("required field region ids must be unique")
+        return self
+
+
+class RequiredFieldChecklistRead(BaseModel):
+    id: str
+    name: str
+    description: str | None
+    archived: bool = False
+    regions: list[SchemaRegion]
+    items: list[RequiredFieldItem]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RequiredFieldCheckJobCreate(BaseModel):
+    document_id: str
+    checklist_id: str
+
+
+class RequiredFieldCheckResultRead(BaseModel):
+    id: str
+    job_id: str
+    raw_model_output: dict[str, Any]
+    validated_output: dict[str, Any]
+    corrected_output: dict[str, Any] | None
+    reviewed: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class RequiredFieldCheckJobRead(BaseModel):
+    job_id: str
+    document_id: str
+    checklist_id: str
+    status: str
+    error_message: str | None
+    result_id: str | None
+    result: RequiredFieldCheckResultRead | None = None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class RequiredFieldCheckResultPatch(BaseModel):
+    corrected_output: dict[str, Any] | None = None
+    reviewed: bool | None = None
+
+
+class RequiredFieldCheckBatchItemRead(BaseModel):
+    id: str
+    document_id: str
+    job_id: str
+    filename: str
+    status: str
+    result_id: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+
+
+class RequiredFieldCheckBatchRead(BaseModel):
+    id: str
+    checklist_id: str
+    status: str
+    total_count: int
+    completed_count: int
+    failed_count: int
+    canceled_count: int
+    progress: float
+    items: list[RequiredFieldCheckBatchItemRead]
+    created_at: datetime
+    completed_at: datetime | None
+
+
+def _validate_required_checklist(items: list[RequiredFieldItem], regions: list[SchemaRegion]) -> None:
+    names = [item.item_name for item in items]
+    if len(names) != len(set(names)):
+        raise ValueError("required field item_name values must be unique")
+    region_ids = [region.id for region in regions]
+    if len(region_ids) != len(set(region_ids)):
+        raise ValueError("required field region ids must be unique")
+    region_id_set = set(region_ids)
+    missing_region_ids = sorted({item.region_id for item in items if item.region_id and item.region_id not in region_id_set})
+    if missing_region_ids:
+        raise ValueError(f"required field item region_id values are missing from regions: {', '.join(missing_region_ids)}")
+
+
 class ExtractionJobCreate(BaseModel):
     document_id: str
     schema_id: str
