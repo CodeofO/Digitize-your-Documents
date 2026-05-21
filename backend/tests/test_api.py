@@ -372,6 +372,33 @@ def test_schema_update_creates_new_version() -> None:
         assert payload["fields"][1]["key_name"] == "invoice_date"
 
 
+def test_schema_update_allows_same_name_for_loaded_schema() -> None:
+    with get_client() as client:
+        schema = create_schema(client, name="테스트")
+        updated = client.patch(
+            f"/api/schemas/{schema['id']}",
+            json={
+                "name": "테스트",
+                "display_name": "테스트",
+                "description": "수정된 설명",
+                "fields": [
+                    {
+                        "key_name": "수정필드",
+                        "description": "사용자가 저장된 스키마를 불러온 뒤 수정한 필드",
+                        "output_format": "string",
+                    }
+                ],
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        payload = updated.json()
+        assert payload["id"] == schema["id"]
+        assert payload["name"] == "테스트"
+        assert payload["description"] == "수정된 설명"
+        assert payload["current_version"] == schema["current_version"] + 1
+        assert payload["fields"][0]["key_name"] == "수정필드"
+
+
 def test_schema_recommendation_mock_mode() -> None:
     try:
         os.environ["VLM_PROVIDER"] = "mock"
