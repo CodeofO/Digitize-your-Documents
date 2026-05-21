@@ -144,11 +144,11 @@ type SavedSchema = {
   name: string;
   display_name: string | null;
   description: string | null;
-  current_version: number;
   is_template: boolean;
   template_category: string | null;
   pinned: boolean;
   ephemeral: boolean;
+  archived: boolean;
   regions: SchemaRegion[];
   fields: FieldDefinition[];
   created_at: string;
@@ -182,7 +182,6 @@ type ExtractionValue = {
 type ValidatedOutput = {
   document_id: string;
   schema_id: string;
-  schema_version: number;
   status: string;
   values: Record<string, ExtractionValue>;
 };
@@ -203,7 +202,6 @@ type ExtractionJob = {
   job_id: string;
   document_id: string;
   schema_id: string;
-  schema_version: number;
   status: string;
   error_message: string | null;
   result_id: string | null;
@@ -284,7 +282,6 @@ type BatchItem = {
 type Batch = {
   id: string;
   schema_id: string;
-  schema_version: number;
   status: string;
   total_count: number;
   completed_count: number;
@@ -569,6 +566,8 @@ export default function App() {
   const [regions, setRegions] = useState<SchemaRegion[]>([]);
   const [schema, setSchema] = useState<SavedSchema | null>(null);
   const [schemaDirty, setSchemaDirty] = useState(false);
+  const [schemaSaveStatus, setSchemaSaveStatus] = useState<"idle" | "pending" | "saving" | "saved" | "error">("idle");
+  const [schemaSaveMessage, setSchemaSaveMessage] = useState<string | null>(null);
   const [schemaJsonInput, setSchemaJsonInput] = useState("");
   const [job, setJob] = useState<ExtractionJob | null>(null);
   const [edits, setEdits] = useState<Record<string, ExtractionValue>>({});
@@ -613,7 +612,7 @@ export default function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
-  const [batchSchemaId, setBatchSchemaId] = useState("");
+  const [schemaLibraryOpen, setSchemaLibraryOpen] = useState(false);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [draftBatchIndex, setDraftBatchIndex] = useState(0);
   const [batchMessage, setBatchMessage] = useState<string | null>(null);
@@ -627,6 +626,9 @@ export default function App() {
   const jobCacheRef = useRef<Map<string, ExtractionJob>>(new Map());
   const loadJobRequestRef = useRef(0);
   const loadJobAbortRef = useRef<AbortController | null>(null);
+  const schemaAutoSaveTimerRef = useRef<number | null>(null);
+  const schemaAutoSaveRequestRef = useRef(0);
+  const schemaDraftKeyRef = useRef("");
 
   useEffect(() => {
     void bootstrapWorkspace();
@@ -696,6 +698,10 @@ export default function App() {
     [schemaName, schemaDescription, schemaPayloadFields, schemaPayloadRegions]
   );
 
+  useEffect(() => {
+    schemaDraftKeyRef.current = schemaPreview;
+  }, [schemaPreview]);
+
   const schemaDownloadUrl = useMemo(
     () => `data:application/json;charset=utf-8,${encodeURIComponent(schemaPreview)}`,
     [schemaPreview]
@@ -730,16 +736,26 @@ export default function App() {
   const result = job?.result ?? null;
   const currentValues = Object.keys(edits).length ? edits : result?.corrected_output?.values ?? result?.validated_output.values ?? {};
   const templates = recentSchemas.filter((item) => item.is_template || item.pinned);
-  const batchSchemaOptions = useMemo(() => {
-    const options = new Map<string, SavedSchema>();
-    if (schema && !schema.ephemeral) options.set(schema.id, schema);
-    recentSchemas.forEach((item) => options.set(item.id, item));
-    return Array.from(options.values());
-  }, [schema, recentSchemas]);
   const schemaNameConflict = useMemo(
-    () => findSavedSchemaNameConflict(schemaName, recentSchemas, schema?.ephemeral ? null : schema?.id ?? null),
-    [schemaName, recentSchemas, schema?.id, schema?.ephemeral]
+    () => findSavedSchemaNameConflict(schemaName, recentSchemas, schema?.ephemeral ? null : schema),
+    [schemaName, recentSchemas, schema]
   );
+  const schemaValidationError = useMemo(
+    () => validateFields(schemaPayloadFields, schemaPayloadRegions),
+    [schemaPayloadFields, schemaPayloadRegions]
+  );
+  const activeSchemaSummary = {
+    name: schema?.display_name || schema?.name || schemaName.trim() || "Untitled schema",
+    fieldCount: schemaPayloadFields.length,
+    regionCount: schemaPayloadRegions.length,
+    ready: Boolean(schemaName.trim()) && !schemaValidationError && !schemaNameConflict,
+    status: schemaSaveStatusLabel(schemaSaveStatus, schema),
+    message: !schemaName.trim()
+      ? "Schema 이름을 입력하세요."
+      : schemaNameConflict
+        ? `이미 같은 이름의 schema가 있습니다: ${schemaNameConflict.display_name || schemaNameConflict.name}`
+        : schemaValidationHint(schemaValidationError)
+  };
   const activeBatch = useMemo(
     () => (activeBatchId ? batches.find((batch) => batch.id === activeBatchId) ?? null : null),
     [batches, activeBatchId]
@@ -761,6 +777,61 @@ export default function App() {
   const batchPollingActive = shouldPollActiveBatch || hasActiveBatch;
   const hasPreparedSchema =
     Boolean(document) || Boolean(schema) || batchFiles.length > 0 || schemaDirty || hasMeaningfulSchema(fields);
+  const schemaLibraryVisible = schemaLibraryOpen && hasPreparedSchema;
+  const keyInfoWorkspaceColumns = schemaLibraryVisible ? "minmax(0, 1fr) minmax(420px, 460px)" : "minmax(0, 1fr)";
+  const keyInfoPaneColumns = `minmax(320px, ${leftPanePercent}%) 12px minmax(380px, 1fr)`;
+
+  useEffect(() => {
+    if (!workspaceRestored || mode !== "key-info") return;
+    if (schemaAutoSaveTimerRef.current) {
+      window.clearTimeout(schemaAutoSaveTimerRef.current);
+      schemaAutoSaveTimerRef.current = null;
+    }
+
+    if (!schemaDirty) {
+      setSchemaSaveStatus(schema ? "saved" : "idle");
+      setSchemaSaveMessage(null);
+      return;
+    }
+    if (!schemaName.trim()) {
+      setSchemaSaveStatus("pending");
+      setSchemaSaveMessage("Schema 이름을 입력하면 자동 저장됩니다.");
+      return;
+    }
+    if (schemaValidationError) {
+      setSchemaSaveStatus("pending");
+      setSchemaSaveMessage(schemaValidationError);
+      return;
+    }
+    if (schemaNameConflict) {
+      setSchemaSaveStatus("error");
+      setSchemaSaveMessage(`이미 저장된 schema 이름입니다: ${schemaNameConflict.display_name || schemaNameConflict.name}`);
+      return;
+    }
+
+    setSchemaSaveStatus("pending");
+    setSchemaSaveMessage(null);
+    const draftKey = schemaPreview;
+    schemaAutoSaveTimerRef.current = window.setTimeout(() => {
+      void autoSaveSchema(draftKey);
+    }, 900);
+
+    return () => {
+      if (schemaAutoSaveTimerRef.current) {
+        window.clearTimeout(schemaAutoSaveTimerRef.current);
+        schemaAutoSaveTimerRef.current = null;
+      }
+    };
+  }, [
+    workspaceRestored,
+    mode,
+    schemaDirty,
+    schemaName,
+    schemaPreview,
+    schemaValidationError,
+    schemaNameConflict,
+    schema
+  ]);
 
   useEffect(() => {
     if (!batchPollingActive) return;
@@ -1151,10 +1222,6 @@ export default function App() {
   }
 
   async function recommendSchemaDescription() {
-    if (!document) {
-      setError("Upload a document before asking AI to revise the schema description.");
-      return;
-    }
     const validationError = validateFields(schemaPayloadFields, schemaPayloadRegions);
     if (validationError) {
       setError(validationError);
@@ -1167,7 +1234,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          document_id: document.document_id,
+          document_id: document?.document_id ?? null,
           name: schemaName.trim() || "draft_schema",
           current_description: schemaDescription || null,
           regions: schemaPayloadRegions,
@@ -1194,19 +1261,26 @@ export default function App() {
     setStep("schema");
   }
 
-  async function saveSchema() {
+  async function persistSchema(options: { silent: boolean; draftKey?: string }) {
     const validationError = validateFields(schemaPayloadFields, schemaPayloadRegions);
     if (validationError) {
-      setError(validationError);
+      if (!options.silent) setError(validationError);
+      setSchemaSaveMessage(validationError);
       return null;
     }
-    const conflict = findSavedSchemaNameConflict(schemaName, recentSchemas, schema?.ephemeral ? null : schema?.id ?? null);
+    const conflict = findSavedSchemaNameConflict(schemaName, recentSchemas, schema?.ephemeral ? null : schema);
     if (conflict) {
-      setError(`이미 저장된 schema 이름입니다: ${conflict.display_name || conflict.name}. 드롭다운에서 불러오거나 다른 이름으로 저장하세요.`);
+      const message = `이미 저장된 schema 이름입니다: ${conflict.display_name || conflict.name}. 드롭다운에서 불러오거나 다른 이름으로 저장하세요.`;
+      if (!options.silent) {
+        setError(message);
+      }
+      setSchemaSaveMessage(message);
       return null;
     }
-    setBusy(schema ? "Saving schema version" : "Saving schema");
-    setError(null);
+    if (!options.silent) {
+      setBusy(schema ? "Saving schema" : "Creating schema");
+      setError(null);
+    }
     try {
       const body = JSON.stringify({
         name: schemaName,
@@ -1221,14 +1295,33 @@ export default function App() {
         body
       });
       setSchema(saved);
-      setSchemaDirty(false);
+      schemaCacheRef.current.set(saved.id, saved);
+      if (!options.draftKey || schemaDraftKeyRef.current === options.draftKey) {
+        setSchemaDirty(false);
+        setSchemaSaveStatus("saved");
+        setSchemaSaveMessage(null);
+      }
       await refreshHistory();
       return saved;
     } catch (err) {
-      setError(toFriendlyError(err));
+      const message = toFriendlyError(err);
+      setSchemaSaveMessage(message);
+      if (!options.silent) setError(message);
       return null;
     } finally {
-      setBusy(null);
+      if (!options.silent) setBusy(null);
+    }
+  }
+
+  async function autoSaveSchema(draftKey: string) {
+    const requestId = ++schemaAutoSaveRequestRef.current;
+    setSchemaSaveStatus("saving");
+    const saved = await persistSchema({ silent: true, draftKey });
+    if (requestId !== schemaAutoSaveRequestRef.current) return;
+    if (saved) {
+      setSchemaSaveStatus(schemaDraftKeyRef.current === draftKey ? "saved" : "pending");
+    } else {
+      setSchemaSaveStatus("error");
     }
   }
 
@@ -1253,8 +1346,7 @@ export default function App() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               document_id: document.document_id,
-              schema_id: schema!.id,
-              schema_version: schema!.current_version
+              schema_id: schema!.id
             })
           })
         : await api<ExtractionJob>("/api/extraction-jobs/draft", {
@@ -1371,6 +1463,26 @@ export default function App() {
     }
   }
 
+  async function deleteSchema(schemaId: string) {
+    const target = recentSchemas.find((item) => item.id === schemaId) ?? (schema?.id === schemaId ? schema : null);
+    if (!target) return;
+    setBusy("Deleting schema");
+    setError(null);
+    try {
+      await api<SavedSchema>(`/api/schemas/${schemaId}`, { method: "DELETE" });
+      schemaCacheRef.current.delete(schemaId);
+      setRecentSchemas((current) => current.filter((item) => item.id !== schemaId));
+      if (schema?.id === schemaId) {
+        startNewSchemaDraft();
+      }
+      await refreshHistory();
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function getCachedDocument(documentId: string, options: { signal?: AbortSignal } = {}) {
     const cached = documentCacheRef.current.get(documentId);
     if (cached) return cached;
@@ -1394,7 +1506,7 @@ export default function App() {
     options: { forceReviewStep?: boolean } = {}
   ) {
     applyDocument(loadedDocument, { clearExtractionState: false });
-    if (!schema || schema.id !== loadedSchema.id || schema.current_version !== loadedSchema.current_version) {
+    if (!schema || schema.id !== loadedSchema.id) {
       applySchema(loadedSchema);
     }
     setJob(loadedJob);
@@ -1528,6 +1640,18 @@ export default function App() {
     setSchemaDirty(false);
   }
 
+  function startNewSchemaDraft() {
+    setSchema(null);
+    setSchemaName("document_schema");
+    setSchemaDescription("");
+    setRegions([]);
+    setFields(initialFields.map((field) => ({ ...field, local_id: createLocalId() })));
+    setSchemaDirty(true);
+    setSchemaSaveStatus("pending");
+    setSchemaSaveMessage("Schema 이름과 필드를 입력하면 자동 저장됩니다.");
+    setStep("schema");
+  }
+
   function applySampleSchema() {
     setSchema(null);
     setSchemaName("sample_document_schema");
@@ -1657,7 +1781,6 @@ export default function App() {
   }
 
   function openBatchExtraction() {
-    setBatchSchemaId(schema?.id ?? recentSchemas[0]?.id ?? "");
     setBatchMessage(null);
     setBatchOpen(true);
     void refreshBatches();
@@ -1671,23 +1794,6 @@ export default function App() {
     const ignoredCount = selected.length - supported.length;
     setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
     setBatchFiles(supported);
-  }
-
-  async function selectBatchSchema(schemaId: string) {
-    setBatchSchemaId(schemaId);
-    if (!schemaId) return;
-    const localSchema = batchSchemaOptions.find((item) => item.id === schemaId);
-    if (localSchema) {
-      applySchema(localSchema);
-      setStep("schema");
-    }
-    try {
-      const loaded = await api<SavedSchema>(`/api/schemas/${schemaId}`);
-      applySchema(loaded);
-      setStep("schema");
-    } catch (err) {
-      setError(toFriendlyError(err));
-    }
   }
 
   function selectKieUploadFiles(files: FileList | File[] | null) {
@@ -1714,30 +1820,35 @@ export default function App() {
     setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
   }
 
-  async function saveCurrentSchemaForBatch() {
-    const saved = await saveSchema();
-    if (!saved) return;
-    setBatchSchemaId(saved.id);
-    setBatchMessage("현재 schema를 저장하고 배치 처리 schema로 선택했습니다.");
-  }
-
   async function runBatchUpload() {
-    const selectedSchema = batchSchemaOptions.find((item) => item.id === batchSchemaId);
-    if (!selectedSchema) {
-      setBatchMessage("배치 처리에 사용할 저장된 schema를 선택하세요.");
-      return;
-    }
     if (!batchFiles.length) {
       setBatchMessage("배치 처리할 파일이나 폴더를 선택하세요.");
+      return;
+    }
+    if (!schemaName.trim()) {
+      setBatchMessage("우측 schema 영역에서 schema 이름을 먼저 입력하세요.");
+      return;
+    }
+    if (schemaValidationError) {
+      setBatchMessage(`우측 schema를 먼저 완성하세요. ${schemaValidationError}`);
       return;
     }
     setBusy("배치 추출 준비 중");
     setError(null);
     setBatchMessage(null);
     try {
+      let selectedSchema = schema && !schema.ephemeral ? schema : null;
+      if (schemaDirty || !selectedSchema) {
+        setSchemaSaveStatus("saving");
+        const saved = await persistSchema({ silent: true, draftKey: schemaDraftKeyRef.current });
+        if (!saved) {
+          setBatchMessage("현재 활성 schema를 저장하지 못해 배치 추출을 시작하지 않았습니다. 우측 schema 상태를 확인하세요.");
+          return;
+        }
+        selectedSchema = saved;
+      }
       const form = new FormData();
       form.append("schema_id", selectedSchema.id);
-      form.append("schema_version", String(selectedSchema.current_version));
       batchFiles.forEach((file) => form.append("files", file));
       const batch = await api<Batch>("/api/batches", { method: "POST", body: form });
       setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 12));
@@ -1812,6 +1923,7 @@ export default function App() {
   function navigateMode(nextMode: AppMode) {
     const hash = nextMode === "home" ? "" : `#${nextMode}`;
     window.history.pushState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+    if (nextMode !== "key-info") setSchemaLibraryOpen(false);
     setMode(nextMode);
   }
 
@@ -1822,7 +1934,9 @@ export default function App() {
 
   function startResize(event: PointerEvent<HTMLButtonElement>) {
     event.preventDefault();
-    const workspace = event.currentTarget.closest<HTMLElement>(".workspace");
+    const workspace =
+      event.currentTarget.closest<HTMLElement>(".resize-scope") ??
+      event.currentTarget.closest<HTMLElement>(".workspace");
     if (!workspace) return;
     const rect = workspace.getBoundingClientRect();
     const pointerId = event.pointerId;
@@ -1830,7 +1944,14 @@ export default function App() {
 
     const update = (clientX: number) => {
       const percent = ((clientX - rect.left) / rect.width) * 100;
-      const nextPercent = Math.min(78, Math.max(35, percent));
+      const minLeftWidth = 320;
+      const minRightWidth = 380;
+      const splitterWidth = 12;
+      const minPercent = Math.max(28, (minLeftWidth / rect.width) * 100);
+      const maxPercent = Math.min(78, ((rect.width - splitterWidth - minRightWidth) / rect.width) * 100);
+      const lowerBound = Math.min(minPercent, maxPercent);
+      const upperBound = Math.max(minPercent, maxPercent);
+      const nextPercent = Math.min(upperBound, Math.max(lowerBound, percent));
       setLeftPanePercent(nextPercent);
       savePersistedLeftPanePercent(nextPercent);
     };
@@ -1892,7 +2013,7 @@ export default function App() {
             <div className="help-panel" role="tooltip">
               <strong>Usage</strong>
               <span>Upload a document, then define or ask AI to recommend a schema.</span>
-              <span>Save schema drafts before extraction. Existing schemas save as new versions.</span>
+              <span>Schema changes are saved automatically after field edits.</span>
               <span>Review warnings, nulls, edits, evidence, and page references before export.</span>
             </div>
           </div>
@@ -1927,181 +2048,228 @@ export default function App() {
       ) : (
         <main
           className="workspace"
-          style={{ gridTemplateColumns: `minmax(320px, ${leftPanePercent}%) 12px minmax(380px, 1fr)` }}
+          style={{ gridTemplateColumns: keyInfoWorkspaceColumns }}
         >
-        <section className="document-pane">
-          {!document ? (
-            <KieUploadPanel
-              schemas={batchSchemaOptions}
-              selectedSchemaId={batchSchemaId}
-              selectedFiles={batchFiles}
-              selectedFileUrl={selectedDraftUrl}
-              selectedFileIndex={draftBatchIndex}
-              regions={regions}
-              showRegions={regionsVisible}
-              regionTarget={draftRegionTarget}
-              message={batchMessage}
-              currentSchemaDirty={schemaDirty}
-              canSaveCurrentSchema={hasMeaningfulSchema(fields)}
-              onSchema={(schemaId) => void selectBatchSchema(schemaId)}
-              onSelectFile={setDraftBatchIndex}
-              onSelectFiles={selectKieUploadFiles}
-              onShowRegions={setRegionsVisible}
-              onSaveRegion={saveRegion}
-              onRemoveRegion={removeRegion}
-              onClearFiles={() => {
-                setBatchFiles([]);
-                setDraftBatchIndex(0);
-                setBatchMessage(null);
-              }}
-              onRunBatch={() => void runBatchUpload()}
-              onSaveCurrentSchema={() => void saveCurrentSchemaForBatch()}
-            />
-          ) : (
-            <div className={activeBatch ? "document-workbench batch-active" : "document-workbench"}>
-              {activeBatch && (
-                <BatchFileRail
-                  batch={activeBatch}
-                  activeItemId={activeBatchItem?.id ?? null}
-                  onOpenItem={(itemId) => void openBatchItem(activeBatch.id, itemId)}
-                  onCancelBatch={(batchId) => void cancelBatch(batchId)}
-                  onRefresh={() => void refreshBatches()}
-                />
-              )}
-              <div className="document-viewer-panel">
-                <DocumentViewer
-                  document={document}
-                  activePage={activePage}
-                  activeImageUrl={activeImageUrl}
-                  regions={regions}
-                  showRegions={regionsVisible}
-                  zoom={zoom}
-                  zoomMode={zoomMode}
-                  rotation={rotation}
-                  onPage={setActivePage}
-                  onShowRegions={setRegionsVisible}
-                  onZoom={setZoom}
-                  onZoomMode={setZoomMode}
-                  onRotation={setRotation}
-                  onReplaceFile={(file) => void uploadFile(file)}
-                  onClear={clearDocumentForNewUpload}
-                />
+        <div className="key-info-main-grid resize-scope" style={{ gridTemplateColumns: keyInfoPaneColumns }}>
+          <section className="document-pane">
+            {!document ? (
+              <KieUploadPanel
+                selectedFiles={batchFiles}
+                selectedFileUrl={selectedDraftUrl}
+                selectedFileIndex={draftBatchIndex}
+                regions={regions}
+                showRegions={regionsVisible}
+                message={batchMessage}
+                activeSchemaName={activeSchemaSummary.name}
+                activeSchemaFieldCount={activeSchemaSummary.fieldCount}
+                activeSchemaRegionCount={activeSchemaSummary.regionCount}
+                activeSchemaReady={activeSchemaSummary.ready}
+                activeSchemaStatus={activeSchemaSummary.status}
+                activeSchemaMessage={activeSchemaSummary.message}
+                onSelectFile={setDraftBatchIndex}
+                onSelectFiles={selectKieUploadFiles}
+                onShowRegions={setRegionsVisible}
+                onClearFiles={() => {
+                  setBatchFiles([]);
+                  setDraftBatchIndex(0);
+                  setBatchMessage(null);
+                }}
+                onRunBatch={() => void runBatchUpload()}
+              />
+            ) : (
+              <div className={activeBatch ? "document-workbench batch-active" : "document-workbench"}>
+                {activeBatch && (
+                  <BatchFileRail
+                    batch={activeBatch}
+                    activeItemId={activeBatchItem?.id ?? null}
+                    onOpenItem={(itemId) => void openBatchItem(activeBatch.id, itemId)}
+                    onCancelBatch={(batchId) => void cancelBatch(batchId)}
+                    onRefresh={() => void refreshBatches()}
+                  />
+                )}
+                <div className="document-viewer-panel">
+                  <DocumentViewer
+                    document={document}
+                    activePage={activePage}
+                    activeImageUrl={activeImageUrl}
+                    regions={regions}
+                    showRegions={regionsVisible}
+                    zoom={zoom}
+                    zoomMode={zoomMode}
+                    rotation={rotation}
+                    onPage={setActivePage}
+                    onShowRegions={setRegionsVisible}
+                    onZoom={setZoom}
+                    onZoomMode={setZoomMode}
+                    onRotation={setRotation}
+                    onReplaceFile={(file) => void uploadFile(file)}
+                    onClear={clearDocumentForNewUpload}
+                  />
+                </div>
               </div>
-            </div>
-          )}
-        </section>
+            )}
+          </section>
 
-        <button
-          className="splitter"
-          type="button"
-          title="Resize panes"
-          aria-label="Resize panes"
-          onPointerDown={startResize}
-        >
-          <GripVertical size={18} />
-        </button>
+          <button
+            className="splitter"
+            type="button"
+            title="Resize panes"
+            aria-label="Resize panes"
+            onPointerDown={startResize}
+          >
+            <GripVertical size={18} />
+          </button>
 
-        <aside className="side-pane">
-          {!hasPreparedSchema ? (
-            <UploadNotes onSampleSchema={applySampleSchema} />
-          ) : step !== "review" ? (
-            <SchemaBuilder
-              schemaName={schemaName}
-              schemaDescription={schemaDescription}
-              fields={fields}
-              regions={regions}
-              schemaPreview={schemaPreview}
-              schemaDownloadUrl={schemaDownloadUrl}
-              schemaJsonInput={schemaJsonInput}
-              savedSchema={schema}
-              schemaDirty={schemaDirty}
-              document={document}
-              regionTarget={activeRegionTarget}
-              activePage={activeRegionPage}
-              systemStatus={systemStatus}
-              savedSchemas={recentSchemas}
-              schemaNameConflict={schemaNameConflict}
-              templates={templates}
-              onSchemaName={(value) => {
-                setSchemaName(value);
-                setSchemaDirty(true);
-              }}
-              onSchemaDescription={(value) => {
-                setSchemaDescription(value);
-                setSchemaDirty(true);
-              }}
-              onLoadSavedSchema={(schemaId) => void loadSchema(schemaId)}
-              onSchemaJsonInput={setSchemaJsonInput}
-              onImportSchemaJson={importSchemaJson}
-              onUpdateField={updateField}
-              onSaveRegion={saveRegion}
-              onRemoveRegion={removeRegion}
-              onAddField={addField}
-              onRemoveField={removeField}
-              onSaveSchema={saveSchema}
-              onRunExtraction={runExtraction}
-              onRecommendSchema={recommendSchema}
-              onRecommendSchemaDescription={recommendSchemaDescription}
-              onSampleSchema={applySampleSchema}
-              onLoadTemplate={(template) => {
-                applySchema(template);
-                setSchema(null);
-                setSchemaDirty(true);
-              }}
-              onSaveTemplate={() => void markSchemaAsTemplate()}
-              canExtract={Boolean(document)}
+          <aside className="side-pane">
+            {!hasPreparedSchema ? (
+              <UploadNotes onSampleSchema={applySampleSchema} />
+            ) : step !== "review" ? (
+              <SchemaBuilder
+                schemaName={schemaName}
+                schemaDescription={schemaDescription}
+                fields={fields}
+                regions={regions}
+                schemaPreview={schemaPreview}
+                schemaDownloadUrl={schemaDownloadUrl}
+                schemaJsonInput={schemaJsonInput}
+                savedSchema={schema}
+                schemaDirty={schemaDirty}
+                schemaSaveStatus={schemaSaveStatus}
+                schemaSaveMessage={schemaSaveMessage}
+                document={document}
+                regionTarget={activeRegionTarget}
+                activePage={activeRegionPage}
+                systemStatus={systemStatus}
+                savedSchemas={recentSchemas}
+                schemaNameConflict={schemaNameConflict}
+                templates={templates}
+                onSchemaName={(value) => {
+                  setSchemaName(value);
+                  setSchemaDirty(true);
+                }}
+                onSchemaDescription={(value) => {
+                  setSchemaDescription(value);
+                  setSchemaDirty(true);
+                }}
+                onLoadSavedSchema={(schemaId) => void loadSchema(schemaId)}
+                onNewSchema={startNewSchemaDraft}
+                onDeleteSchema={(schemaId) => void deleteSchema(schemaId)}
+                onSchemaJsonInput={setSchemaJsonInput}
+                onImportSchemaJson={importSchemaJson}
+                onUpdateField={updateField}
+                onSaveRegion={saveRegion}
+                onRemoveRegion={removeRegion}
+                onAddField={addField}
+                onRemoveField={removeField}
+                onRunExtraction={runExtraction}
+                onRecommendSchema={recommendSchema}
+                onRecommendSchemaDescription={recommendSchemaDescription}
+                onSampleSchema={applySampleSchema}
+                onLoadTemplate={(template) => {
+                  applySchema(template);
+                  setSchema(null);
+                  setSchemaDirty(true);
+                }}
+                onSaveTemplate={() => void markSchemaAsTemplate()}
+                onOpenLibrary={() => setSchemaLibraryOpen(true)}
+                canExtract={Boolean(document)}
+              />
+            ) : result ? (
+              <ReviewPanel
+                fields={fields}
+                result={result}
+                values={currentValues}
+                editedKeys={editedKeys}
+                reviewedFields={reviewedFields}
+                filter={reviewFilter}
+                exportPresets={exportPresets}
+                selectedPresetId={selectedPresetId}
+                auditEvents={auditEvents}
+                onFilter={setReviewFilter}
+                onEdit={updateEdit}
+                onToggleReviewed={toggleReviewed}
+                onSaveCorrections={saveCorrections}
+                onGoToPage={goToPage}
+                onPreset={setSelectedPresetId}
+                onSavePreset={() => void saveDefaultExportPreset()}
+              />
+            ) : activeBatch && activeBatchItem ? (
+              <BatchItemStatusPanel
+                batch={activeBatch}
+                item={activeBatchItem}
+                onRefresh={() => void refreshBatches()}
+                onCancelBatch={(batchId) => void cancelBatch(batchId)}
+              />
+            ) : (
+              <ReviewPanel
+                fields={fields}
+                result={result}
+                values={currentValues}
+                editedKeys={editedKeys}
+                reviewedFields={reviewedFields}
+                filter={reviewFilter}
+                exportPresets={exportPresets}
+                selectedPresetId={selectedPresetId}
+                auditEvents={auditEvents}
+                onFilter={setReviewFilter}
+                onEdit={updateEdit}
+                onToggleReviewed={toggleReviewed}
+                onSaveCorrections={saveCorrections}
+                onGoToPage={goToPage}
+                onPreset={setSelectedPresetId}
+                onSavePreset={() => void saveDefaultExportPreset()}
+              />
+            )}
+            <KieUtilityDock
+              onArchive={() => setArchiveOpen(true)}
+              onBatch={openBatchExtraction}
             />
-          ) : result ? (
-            <ReviewPanel
-              fields={fields}
-              result={result}
-              values={currentValues}
-              editedKeys={editedKeys}
-              reviewedFields={reviewedFields}
-              filter={reviewFilter}
-              exportPresets={exportPresets}
-              selectedPresetId={selectedPresetId}
-              auditEvents={auditEvents}
-              onFilter={setReviewFilter}
-              onEdit={updateEdit}
-              onToggleReviewed={toggleReviewed}
-              onSaveCorrections={saveCorrections}
-              onGoToPage={goToPage}
-              onPreset={setSelectedPresetId}
-              onSavePreset={() => void saveDefaultExportPreset()}
-            />
-          ) : activeBatch && activeBatchItem ? (
-            <BatchItemStatusPanel
-              batch={activeBatch}
-              item={activeBatchItem}
-              onRefresh={() => void refreshBatches()}
-              onCancelBatch={(batchId) => void cancelBatch(batchId)}
-            />
-          ) : (
-            <ReviewPanel
-              fields={fields}
-              result={result}
-              values={currentValues}
-              editedKeys={editedKeys}
-              reviewedFields={reviewedFields}
-              filter={reviewFilter}
-              exportPresets={exportPresets}
-              selectedPresetId={selectedPresetId}
-              auditEvents={auditEvents}
-              onFilter={setReviewFilter}
-              onEdit={updateEdit}
-              onToggleReviewed={toggleReviewed}
-              onSaveCorrections={saveCorrections}
-              onGoToPage={goToPage}
-              onPreset={setSelectedPresetId}
-              onSavePreset={() => void saveDefaultExportPreset()}
-            />
-          )}
-          <KieUtilityDock
-            onArchive={() => setArchiveOpen(true)}
-            onBatch={openBatchExtraction}
+          </aside>
+        </div>
+        {schemaLibraryVisible && (
+          <SchemaLibraryPanel
+            schemaName={schemaName}
+            schemaDescription={schemaDescription}
+            fields={fields}
+            regions={regions}
+            schemaPreview={schemaPreview}
+            schemaDownloadUrl={schemaDownloadUrl}
+            schemaJsonInput={schemaJsonInput}
+            savedSchema={schema}
+            schemaSaveStatus={schemaSaveStatus}
+            schemaSaveMessage={schemaSaveMessage}
+            document={document}
+            regionTarget={activeRegionTarget}
+            activePage={activeRegionPage}
+            systemStatus={systemStatus}
+            savedSchemas={recentSchemas}
+            templates={templates}
+            onSchemaName={(value) => {
+              setSchemaName(value);
+              setSchemaDirty(true);
+            }}
+            onSchemaDescription={(value) => {
+              setSchemaDescription(value);
+              setSchemaDirty(true);
+            }}
+            onLoadSavedSchema={(schemaId) => void loadSchema(schemaId)}
+            onNewSchema={startNewSchemaDraft}
+            onDeleteSchema={(schemaId) => void deleteSchema(schemaId)}
+            onSchemaJsonInput={setSchemaJsonInput}
+            onImportSchemaJson={importSchemaJson}
+            onSaveRegion={saveRegion}
+            onRemoveRegion={removeRegion}
+            onRecommendSchemaDescription={recommendSchemaDescription}
+            onSampleSchema={applySampleSchema}
+            onLoadTemplate={(template) => {
+              applySchema(template);
+              setSchema(null);
+              setSchemaDirty(true);
+            }}
+            onSaveTemplate={() => void markSchemaAsTemplate()}
+            onClose={() => setSchemaLibraryOpen(false)}
           />
-        </aside>
+        )}
         </main>
       )}
       {archiveOpen && (
@@ -2154,13 +2322,14 @@ export default function App() {
         <UtilityModal title="Batch upload & results" eyebrow="Multiple files" onClose={() => setBatchOpen(false)}>
           <BatchPanel
             batches={batches}
-            schemas={batchSchemaOptions}
-            selectedSchemaId={batchSchemaId}
             selectedFiles={batchFiles}
             message={batchMessage}
-            currentSchemaDirty={schemaDirty}
-            canSaveCurrentSchema={hasMeaningfulSchema(fields)}
-            onSchema={setBatchSchemaId}
+            activeSchemaName={activeSchemaSummary.name}
+            activeSchemaFieldCount={activeSchemaSummary.fieldCount}
+            activeSchemaRegionCount={activeSchemaSummary.regionCount}
+            activeSchemaReady={activeSchemaSummary.ready}
+            activeSchemaStatus={activeSchemaSummary.status}
+            activeSchemaMessage={activeSchemaSummary.message}
             onSelectFiles={selectBatchFiles}
             onClearFiles={() => {
               setBatchFiles([]);
@@ -2168,7 +2337,6 @@ export default function App() {
               setBatchMessage(null);
             }}
             onRunBatch={() => void runBatchUpload()}
-            onSaveCurrentSchema={() => void saveCurrentSchemaForBatch()}
             onCancelBatch={(batchId) => void cancelBatch(batchId)}
             onRefresh={() => void refreshBatches()}
             onOpenItem={(batchId, itemId) => {
@@ -2430,30 +2598,26 @@ function RawWorkspace(props: {
 }
 
 function KieUploadPanel(props: {
-  schemas: SavedSchema[];
-  selectedSchemaId: string;
   selectedFiles: File[];
   selectedFileUrl: string | null;
   selectedFileIndex: number;
   regions: SchemaRegion[];
   showRegions: boolean;
-  regionTarget: RegionEditorTarget | null;
   message: string | null;
-  currentSchemaDirty: boolean;
-  canSaveCurrentSchema: boolean;
-  onSchema: (schemaId: string) => void;
+  activeSchemaName: string;
+  activeSchemaFieldCount: number;
+  activeSchemaRegionCount: number;
+  activeSchemaReady: boolean;
+  activeSchemaStatus: string;
+  activeSchemaMessage: string | null;
   onSelectFile: (index: number) => void;
   onSelectFiles: (files: FileList | File[] | null) => void;
   onShowRegions: (show: boolean) => void;
-  onSaveRegion: (region: SchemaRegion) => void;
-  onRemoveRegion: (regionId: string) => void;
   onClearFiles: () => void;
   onRunBatch: () => void;
-  onSaveCurrentSchema: () => void;
 }) {
   const selectedFile = props.selectedFiles[props.selectedFileIndex] ?? props.selectedFiles[0] ?? null;
   const selectedUrl = props.selectedFileUrl;
-  const [regionsOpen, setRegionsOpen] = useState(false);
 
   async function onUnifiedDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
@@ -2468,29 +2632,15 @@ function KieUploadPanel(props: {
   function renderBatchControls() {
     return (
       <>
-        <label className="field-stack">
-          <span>Schema</span>
-          <select value={props.selectedSchemaId} onChange={(event) => props.onSchema(event.target.value)}>
-            <option value="">Select saved schema</option>
-            {props.schemas.map((schema) => (
-              <option key={schema.id} value={schema.id}>
-                {schema.display_name || schema.name} · v{schema.current_version} · {schema.fields.length} fields
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {props.currentSchemaDirty && (
-          <div className="notice-card">
-            현재 schema 변경사항이 저장되지 않았습니다. 최신 schema로 배치 처리하려면 먼저 저장하세요.
+        <div className={props.activeSchemaReady ? "active-schema-card ready" : "active-schema-card warning"}>
+          <div>
+            <span>Active schema</span>
+            <strong>{props.activeSchemaName}</strong>
           </div>
-        )}
-
-        <div className="action-row">
-          <button className="secondary" disabled={!props.canSaveCurrentSchema} onClick={props.onSaveCurrentSchema}>
-            <Save size={16} />
-            Save current schema
-          </button>
+          <p>
+            {props.activeSchemaFieldCount} fields · {props.activeSchemaRegionCount} regions · {props.activeSchemaStatus}
+          </p>
+          {props.activeSchemaMessage && <small>{props.activeSchemaMessage}</small>}
         </div>
 
         <div className="file-picker-grid">
@@ -2514,7 +2664,7 @@ function KieUploadPanel(props: {
 
         {props.message && <div className="success-card">{props.message}</div>}
 
-        <button className="primary run-batch-button" disabled={!props.selectedSchemaId || !props.selectedFiles.length} onClick={props.onRunBatch}>
+        <button className="primary run-batch-button" disabled={!props.activeSchemaReady || !props.selectedFiles.length} onClick={props.onRunBatch}>
           <Play size={16} />
           Run batch
         </button>
@@ -2539,7 +2689,7 @@ function KieUploadPanel(props: {
         <section className="batch-main-upload draft-controls draft-controls-horizontal">
           <div className="batch-intro">
             <strong>Batch upload</strong>
-            <p>선택한 파일과 schema region을 확인한 뒤 같은 schema로 추출을 실행합니다.</p>
+            <p>우측에서 활성화된 schema를 기준으로 선택한 파일을 한 번에 추출합니다.</p>
           </div>
           <div className="draft-region-actions">
             <button
@@ -2550,16 +2700,7 @@ function KieUploadPanel(props: {
               title={props.regions.length ? "선택한 이미지 위에 schema region을 표시합니다." : "저장된 region이 없습니다."}
             >
               <PanelLeft size={14} />
-              Regions
-            </button>
-            <button
-              type="button"
-              className="secondary compact"
-              disabled={!props.regionTarget}
-              onClick={() => setRegionsOpen(true)}
-              title={props.regionTarget ? "현재 선택한 batch 이미지 기준으로 region을 편집합니다." : "이미지 파일을 선택해야 region을 편집할 수 있습니다."}
-            >
-              Manage regions
+              {props.showRegions ? "Hide regions" : "Show regions"}
             </button>
           </div>
           {renderBatchControls()}
@@ -2597,16 +2738,6 @@ function KieUploadPanel(props: {
             </div>
           </section>
         </div>
-        {props.regionTarget && regionsOpen && (
-          <RegionManagerModal
-            target={props.regionTarget}
-            regions={props.regions}
-            activePage={0}
-            onSaveRegion={props.onSaveRegion}
-            onRemoveRegion={props.onRemoveRegion}
-            onClose={() => setRegionsOpen(false)}
-          />
-        )}
       </div>
     );
   }
@@ -3246,7 +3377,7 @@ function HistoryPanel(props: {
               props.schemas.map((item) => (
                 <button key={item.id} onClick={() => props.onLoadSchema(item.id)}>
                   <strong>{item.display_name || item.name}</strong>
-                  <span>v{item.current_version} · {item.fields.length} field(s)</span>
+                  <span>{item.fields.length} field(s)</span>
                 </button>
               ))
             ) : (
@@ -3315,17 +3446,17 @@ function ArchivePanel(props: {
 
 function BatchPanel(props: {
   batches: Batch[];
-  schemas: SavedSchema[];
-  selectedSchemaId: string;
   selectedFiles: File[];
   message: string | null;
-  currentSchemaDirty: boolean;
-  canSaveCurrentSchema: boolean;
-  onSchema: (schemaId: string) => void;
+  activeSchemaName: string;
+  activeSchemaFieldCount: number;
+  activeSchemaRegionCount: number;
+  activeSchemaReady: boolean;
+  activeSchemaStatus: string;
+  activeSchemaMessage: string | null;
   onSelectFiles: (files: FileList | null) => void;
   onClearFiles: () => void;
   onRunBatch: () => void;
-  onSaveCurrentSchema: () => void;
   onCancelBatch: (batchId: string) => void;
   onRefresh: () => void;
   onOpenItem: (batchId: string, itemId: string) => void;
@@ -3335,32 +3466,18 @@ function BatchPanel(props: {
       <div className="batch-create-panel">
         <div className="batch-intro">
           <strong>Batch upload</strong>
-          <p>저장된 schema 하나를 선택한 뒤 여러 문서나 폴더를 업로드해 같은 기준으로 KIE 추출을 실행합니다.</p>
+          <p>현재 workspace에서 활성화된 schema를 그대로 사용해 여러 문서나 폴더를 같은 기준으로 추출합니다.</p>
         </div>
 
-        <label className="field-stack">
-          <span>Schema</span>
-          <select value={props.selectedSchemaId} onChange={(event) => props.onSchema(event.target.value)}>
-            <option value="">Select saved schema</option>
-            {props.schemas.map((schema) => (
-              <option key={schema.id} value={schema.id}>
-                {schema.display_name || schema.name} · v{schema.current_version} · {schema.fields.length} fields
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {props.currentSchemaDirty && (
-          <div className="notice-card">
-            현재 화면의 schema에 저장되지 않은 변경사항이 있습니다. 배치 처리에 최신 schema를 쓰려면 먼저 저장하세요.
+        <div className={props.activeSchemaReady ? "active-schema-card ready" : "active-schema-card warning"}>
+          <div>
+            <span>Active schema</span>
+            <strong>{props.activeSchemaName}</strong>
           </div>
-        )}
-
-        <div className="action-row">
-          <button className="secondary" disabled={!props.canSaveCurrentSchema} onClick={props.onSaveCurrentSchema}>
-            <Save size={16} />
-            Save current schema
-          </button>
+          <p>
+            {props.activeSchemaFieldCount} fields · {props.activeSchemaRegionCount} regions · {props.activeSchemaStatus}
+          </p>
+          {props.activeSchemaMessage && <small>{props.activeSchemaMessage}</small>}
         </div>
 
         <div className="file-picker-grid">
@@ -3406,7 +3523,7 @@ function BatchPanel(props: {
 
         {props.message && <div className="success-card">{props.message}</div>}
 
-        <button className="primary run-batch-button" disabled={!props.selectedSchemaId || !props.selectedFiles.length} onClick={props.onRunBatch}>
+        <button className="primary run-batch-button" disabled={!props.activeSchemaReady || !props.selectedFiles.length} onClick={props.onRunBatch}>
           <Play size={16} />
           Run batch
         </button>
@@ -3501,6 +3618,8 @@ function SchemaBuilder(props: {
   schemaJsonInput: string;
   savedSchema: SavedSchema | null;
   schemaDirty: boolean;
+  schemaSaveStatus: "idle" | "pending" | "saving" | "saved" | "error";
+  schemaSaveMessage: string | null;
   document: UploadedDocument | null;
   regionTarget: RegionEditorTarget | null;
   activePage: number;
@@ -3511,6 +3630,8 @@ function SchemaBuilder(props: {
   onSchemaName: (value: string) => void;
   onSchemaDescription: (value: string) => void;
   onLoadSavedSchema: (schemaId: string) => void;
+  onNewSchema: () => void;
+  onDeleteSchema: (schemaId: string) => void;
   onSchemaJsonInput: (value: string) => void;
   onImportSchemaJson: () => void;
   onUpdateField: (index: number, patch: Partial<FieldDefinition>) => void;
@@ -3518,16 +3639,15 @@ function SchemaBuilder(props: {
   onRemoveRegion: (regionId: string) => void;
   onAddField: () => void;
   onRemoveField: (index: number) => void;
-  onSaveSchema: () => Promise<SavedSchema | null>;
   onRunExtraction: () => Promise<void>;
   onRecommendSchema: () => Promise<void>;
   onRecommendSchemaDescription: () => Promise<void>;
   onSampleSchema: () => void;
   onLoadTemplate: (schema: SavedSchema) => void;
   onSaveTemplate: () => void;
+  onOpenLibrary: () => void;
   canExtract: boolean;
 }) {
-  const [toolsOpen, setToolsOpen] = useState(false);
   const [regionsOpen, setRegionsOpen] = useState(false);
 
   return (
@@ -3535,14 +3655,19 @@ function SchemaBuilder(props: {
       <div className="pane-header schema-main-header">
         <div>
           <p className="eyebrow">Schema</p>
-          <h2>Define extraction fields</h2>
+          <h2>Fields</h2>
+          <p className="schema-current-line">
+            {props.savedSchema ? props.schemaName : "New schema"} · {props.fields.length} fields
+          </p>
         </div>
         <div className="schema-header-actions">
-          {props.savedSchema && (
-            <span className={`saved-badge ${props.schemaDirty ? "dirty" : ""}`}>
-              {props.schemaDirty ? "Draft changes" : `Saved v${props.savedSchema.current_version}`}
-            </span>
-          )}
+          <span className={`saved-badge ${props.schemaSaveStatus}`}>
+            {schemaSaveStatusLabel(props.schemaSaveStatus, props.savedSchema)}
+          </span>
+          <button type="button" className="secondary compact" onClick={props.onOpenLibrary}>
+            <ClipboardList size={14} />
+            Schema Library
+          </button>
           <button
             type="button"
             className="primary compact"
@@ -3553,74 +3678,19 @@ function SchemaBuilder(props: {
             <Sparkles size={14} />
             AI recommend schema
           </button>
-          <button type="button" className="secondary compact" onClick={() => setToolsOpen(true)}>
-            <Settings size={14} />
-            More options
-          </button>
         </div>
       </div>
 
       <div className="schema-core-panel">
-        <div className="schema-name-grid">
-          <label className="field-stack">
-            <span>Schema name</span>
-            <input value={props.schemaName} onChange={(event) => props.onSchemaName(event.target.value)} />
-          </label>
-          <label className="field-stack">
-            <span>Load saved schema</span>
-            <select
-              value={props.savedSchema?.id ?? ""}
-              onChange={(event) => {
-                if (event.target.value) props.onLoadSavedSchema(event.target.value);
-              }}
-            >
-              <option value="">저장된 schema 선택</option>
-              {props.savedSchemas.map((savedSchema) => (
-                <option key={savedSchema.id} value={savedSchema.id}>
-                  {savedSchema.display_name || savedSchema.name} · v{savedSchema.current_version} · {savedSchema.fields.length} fields
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        {props.schemaNameConflict && (
-          <div className="notice-card compact-notice">
-            이미 저장된 schema 이름입니다. 기존 schema를 수정하려면 드롭다운에서{" "}
-            <strong>{props.schemaNameConflict.display_name || props.schemaNameConflict.name}</strong>을 불러오세요.
-          </div>
-        )}
-        <div className="field-stack">
-          <div className="field-label-row">
-            <span>Schema description</span>
-            <button
-              type="button"
-              className="secondary compact mini-action"
-              disabled={!props.document || !props.fields.length}
-              title={props.document ? "현재 필드와 문서 이미지를 보고 schema description만 다시 작성합니다." : "문서 이미지가 있어야 사용할 수 있습니다."}
-              onClick={() => void props.onRecommendSchemaDescription()}
-            >
-              <Sparkles size={13} />
-              AI 수정
-            </button>
-          </div>
-          <textarea value={props.schemaDescription} onChange={(event) => props.onSchemaDescription(event.target.value)} />
-        </div>
-        <div className="region-manager-bar">
+        <div className="schema-name-banner">
           <div>
-            <strong>Extraction regions</strong>
-            <span>{props.regions.length ? `${props.regions.length} saved` : "No shared regions"}</span>
+            <span>{props.savedSchema ? "Active schema" : "Draft schema"}</span>
+            <strong>{props.schemaName || "Untitled schema"}</strong>
           </div>
-          <button
-            type="button"
-            className="secondary compact"
-            disabled={!props.regionTarget}
-            title={props.regionTarget ? "현재 선택한 이미지 위에 extraction region을 지정합니다." : "문서 이미지가 있어야 region을 지정할 수 있습니다."}
-            onClick={() => setRegionsOpen(true)}
-          >
-            Manage regions
-          </button>
+          <p>
+            {props.fields.length} fields · {props.regions.length} regions · {schemaSaveStatusLabel(props.schemaSaveStatus, props.savedSchema)}
+          </p>
         </div>
-
         <div className="schema-table-wrap">
           <div className="schema-field-table" role="table" aria-label="Schema fields">
             <div className="schema-field-head" role="row">
@@ -3680,9 +3750,15 @@ function SchemaBuilder(props: {
             <Plus size={16} />
             Add field
           </button>
-          <button className="secondary" onClick={() => void props.onSaveSchema()}>
-            <Save size={16} />
-            Save schema
+          <button
+            type="button"
+            className="secondary"
+            disabled={!props.regionTarget}
+            title={props.regionTarget ? "현재 선택한 이미지 위에 extraction region을 지정합니다." : "문서 이미지가 있어야 region을 지정할 수 있습니다."}
+            onClick={() => setRegionsOpen(true)}
+          >
+            <PanelLeft size={16} />
+            Regions
           </button>
           <button className="primary" disabled={!props.canExtract} onClick={() => void props.onRunExtraction()}>
             <Play size={16} />
@@ -3691,101 +3767,6 @@ function SchemaBuilder(props: {
         </div>
       </div>
 
-      {toolsOpen && (
-        <div className="modal-backdrop" role="presentation">
-          <section className="modal-panel schema-tools-modal" role="dialog" aria-modal="true" aria-label="Schema tools">
-            <div className="modal-header">
-              <div>
-                <p className="eyebrow">Schema options</p>
-                <h2>Template and JSON</h2>
-              </div>
-              <button type="button" className="icon-only secondary" aria-label="Close schema tools" onClick={() => setToolsOpen(false)}>
-                <X size={16} />
-              </button>
-            </div>
-
-            {props.document && (
-              <div className="intel-card">
-                <div>
-                  <span className="eyebrow">Document intelligence</span>
-                  <strong>{props.document.document_type || "Unknown document type"}</strong>
-                </div>
-                <span>{props.document.language || "language unknown"} · {props.document.page_count} page(s)</span>
-                {props.document.recommendation_reasoning && <p>{props.document.recommendation_reasoning}</p>}
-              </div>
-            )}
-
-            {props.systemStatus?.is_mock && (
-              <div className="notice-card">Mock mode is active. AI recommendation and extraction use deterministic demo data.</div>
-            )}
-
-            <div className="tool-section">
-              <h3>Schema import/export</h3>
-              <div className="action-row">
-                <button
-                  className="secondary"
-                  onClick={() => {
-                    props.onSampleSchema();
-                    setToolsOpen(false);
-                  }}
-                >
-                  <ClipboardList size={16} />
-                  Use sample schema
-                </button>
-                <a className="secondary link-button" href={props.schemaDownloadUrl} download={`${props.schemaName || "schema"}.json`}>
-                  <FileDown size={16} />
-                  Download schema JSON
-                </a>
-              </div>
-            </div>
-
-            <div className="template-strip">
-              <div className="template-header">
-                <strong>Template library</strong>
-                <button className="secondary compact" onClick={props.onSaveTemplate}>
-                  Save as template
-                </button>
-              </div>
-              <div className="template-list">
-                {props.templates.length ? (
-                  props.templates.slice(0, 4).map((template) => (
-                    <button key={template.id} onClick={() => props.onLoadTemplate(template)}>
-                      <strong>{template.display_name || template.name}</strong>
-                      <span>{template.template_category || "General"} · {template.fields.length} fields</span>
-                    </button>
-                  ))
-                ) : (
-                  <span className="muted">Save a schema as a template to reuse it here.</span>
-                )}
-              </div>
-            </div>
-
-            <details className="import-box">
-              <summary>
-                <FileUp size={16} />
-                Import schema JSON
-              </summary>
-              <textarea
-                value={props.schemaJsonInput}
-                onChange={(event) => props.onSchemaJsonInput(event.target.value)}
-                placeholder="Paste schema JSON here"
-              />
-              <button className="secondary" onClick={props.onImportSchemaJson}>
-                <FileUp size={16} />
-                Import
-              </button>
-            </details>
-
-            <div className="preview-block">
-              <div className="preview-title">
-                <FileJson size={16} />
-                JSON preview
-              </div>
-              <pre>{props.schemaPreview}</pre>
-            </div>
-          </section>
-        </div>
-      )}
       {props.regionTarget && regionsOpen && (
         <RegionManagerModal
           target={props.regionTarget}
@@ -3797,6 +3778,270 @@ function SchemaBuilder(props: {
         />
       )}
     </div>
+  );
+}
+
+function SchemaLibraryPanel(props: {
+  schemaName: string;
+  schemaDescription: string;
+  fields: SchemaField[];
+  regions: SchemaRegion[];
+  schemaPreview: string;
+  schemaDownloadUrl: string;
+  schemaJsonInput: string;
+  savedSchema: SavedSchema | null;
+  schemaSaveStatus: "idle" | "pending" | "saving" | "saved" | "error";
+  schemaSaveMessage: string | null;
+  document: UploadedDocument | null;
+  regionTarget: RegionEditorTarget | null;
+  activePage: number;
+  systemStatus: SystemStatus | null;
+  savedSchemas: SavedSchema[];
+  templates: SavedSchema[];
+  onSchemaName: (value: string) => void;
+  onSchemaDescription: (value: string) => void;
+  onLoadSavedSchema: (schemaId: string) => void;
+  onNewSchema: () => void;
+  onDeleteSchema: (schemaId: string) => void;
+  onSchemaJsonInput: (value: string) => void;
+  onImportSchemaJson: () => void;
+  onSaveRegion: (region: SchemaRegion) => void;
+  onRemoveRegion: (regionId: string) => void;
+  onRecommendSchemaDescription: () => Promise<void>;
+  onSampleSchema: () => void;
+  onLoadTemplate: (schema: SavedSchema) => void;
+  onSaveTemplate: () => void;
+  onClose: () => void;
+}) {
+  const [selectedSchemaIds, setSelectedSchemaIds] = useState<string[]>([]);
+  const [regionsOpen, setRegionsOpen] = useState(false);
+  const selectedSchemaIdSet = new Set(selectedSchemaIds);
+
+  function toggleSchemaSelection(schemaId: string) {
+    setSelectedSchemaIds((current) =>
+      current.includes(schemaId) ? current.filter((id) => id !== schemaId) : [...current, schemaId]
+    );
+  }
+
+  function deleteSelectedSchemas() {
+    selectedSchemaIds.forEach((schemaId) => props.onDeleteSchema(schemaId));
+    setSelectedSchemaIds([]);
+  }
+
+  return (
+    <aside className="schema-library-sidebar" aria-label="Schema library">
+      <div className="modal-header schema-library-header">
+        <div>
+          <p className="eyebrow">Schema Library</p>
+          <h2>Manage schema</h2>
+        </div>
+        <button type="button" className="icon-only secondary" aria-label="Close schema library" onClick={props.onClose}>
+          <X size={16} />
+        </button>
+      </div>
+
+      <section className="schema-library-section">
+        <div className="schema-library-top">
+          <div>
+            <strong>Saved schemas</strong>
+            <span>{selectedSchemaIds.length ? `${selectedSchemaIds.length} selected` : `${props.savedSchemas.length} saved`}</span>
+          </div>
+          <div className="schema-library-actions">
+            {selectedSchemaIds.length > 0 && (
+              <button type="button" className="secondary compact danger-outline" onClick={deleteSelectedSchemas}>
+                <Trash2 size={14} />
+                Delete selected
+              </button>
+            )}
+            <button type="button" className="primary compact" onClick={props.onNewSchema}>
+              <Plus size={14} />
+              New schema
+            </button>
+          </div>
+        </div>
+        <div className="schema-card-list">
+          {props.savedSchemas.length ? (
+            props.savedSchemas.map((savedSchema) => (
+              <div
+                key={savedSchema.id}
+                className={props.savedSchema?.id === savedSchema.id ? "schema-card active" : "schema-card"}
+                onClick={() => props.onLoadSavedSchema(savedSchema.id)}
+              >
+                <input
+                  aria-label={`Select ${savedSchema.display_name || savedSchema.name}`}
+                  checked={selectedSchemaIdSet.has(savedSchema.id)}
+                  onChange={() => toggleSchemaSelection(savedSchema.id)}
+                  onClick={(event) => event.stopPropagation()}
+                  type="checkbox"
+                />
+                <button
+                  type="button"
+                  className="schema-card-body"
+                  onClick={() => props.onLoadSavedSchema(savedSchema.id)}
+                >
+                  <span className="schema-card-title" title={savedSchema.display_name || savedSchema.name}>
+                    {savedSchema.display_name || savedSchema.name}
+                  </span>
+                  <span className="schema-card-meta">
+                    {savedSchema.fields.length} fields · {savedSchema.regions.length} regions · {formatDate(savedSchema.updated_at)}
+                  </span>
+                </button>
+              </div>
+            ))
+          ) : (
+            <div className="empty-schema-library">
+              <span>No saved schemas.</span>
+              <button type="button" className="secondary compact" onClick={props.onNewSchema}>
+                <Plus size={14} />
+                Create first schema
+              </button>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <div className="schema-identity-panel">
+        <label className="field-stack schema-name-inline">
+          <span>Selected schema name</span>
+          <input value={props.schemaName} onChange={(event) => props.onSchemaName(event.target.value)} />
+        </label>
+        <div className="schema-detail-actions">
+          <span>{props.savedSchema ? `${props.fields.length} fields` : "Unsaved draft"}</span>
+          <button
+            type="button"
+            className="secondary compact danger-outline"
+            disabled={!props.savedSchema}
+            onClick={() => props.savedSchema && props.onDeleteSchema(props.savedSchema.id)}
+          >
+            <Trash2 size={14} />
+            Delete
+          </button>
+        </div>
+        {props.schemaSaveMessage && (
+          <div className={`schema-save-message ${props.schemaSaveStatus}`}>
+            {props.schemaSaveMessage}
+          </div>
+        )}
+      </div>
+
+      <div className="field-stack drawer-section">
+        <div className="field-label-row">
+          <span>Schema description</span>
+          <button
+            type="button"
+            className="secondary compact mini-action"
+            disabled={!props.fields.length}
+            title="현재 필드만 보고 schema description을 다시 작성합니다."
+            onClick={() => void props.onRecommendSchemaDescription()}
+          >
+            <Sparkles size={13} />
+            AI 수정
+          </button>
+        </div>
+        <textarea value={props.schemaDescription} onChange={(event) => props.onSchemaDescription(event.target.value)} />
+      </div>
+
+      <div className="region-manager-bar">
+        <div>
+          <strong>Extraction regions</strong>
+          <span>{props.regions.length ? `${props.regions.length} saved` : "No shared regions"}</span>
+        </div>
+        <button
+          type="button"
+          className="secondary compact"
+          disabled={!props.regionTarget}
+          title={props.regionTarget ? "현재 선택한 이미지 위에 extraction region을 지정합니다." : "문서 이미지가 있어야 region을 지정할 수 있습니다."}
+          onClick={() => setRegionsOpen(true)}
+        >
+          Manage regions
+        </button>
+      </div>
+
+      {props.document && (
+        <div className="intel-card">
+          <div>
+            <span className="eyebrow">Document intelligence</span>
+            <strong>{props.document.document_type || "Unknown document type"}</strong>
+          </div>
+          <span>{props.document.language || "language unknown"} · {props.document.page_count} page(s)</span>
+          {props.document.recommendation_reasoning && <p>{props.document.recommendation_reasoning}</p>}
+        </div>
+      )}
+
+      {props.systemStatus?.is_mock && (
+        <div className="notice-card">Mock mode is active. AI recommendation and extraction use deterministic demo data.</div>
+      )}
+
+      <div className="tool-section">
+        <h3>Schema import/export</h3>
+        <div className="action-row">
+          <button className="secondary" onClick={props.onSampleSchema}>
+            <ClipboardList size={16} />
+            Use sample schema
+          </button>
+          <a className="secondary link-button" href={props.schemaDownloadUrl} download={`${props.schemaName || "schema"}.json`}>
+            <FileDown size={16} />
+            Download schema JSON
+          </a>
+        </div>
+      </div>
+
+      <div className="template-strip">
+        <div className="template-header">
+          <strong>Template library</strong>
+          <button className="secondary compact" onClick={props.onSaveTemplate}>
+            Save as template
+          </button>
+        </div>
+        <div className="template-list">
+          {props.templates.length ? (
+            props.templates.slice(0, 4).map((template) => (
+              <button key={template.id} onClick={() => props.onLoadTemplate(template)}>
+                <strong>{template.display_name || template.name}</strong>
+                <span>{template.template_category || "General"} · {template.fields.length} fields</span>
+              </button>
+            ))
+          ) : (
+            <span className="muted">Save a schema as a template to reuse it here.</span>
+          )}
+        </div>
+      </div>
+
+      <details className="import-box">
+        <summary>
+          <FileUp size={16} />
+          Import schema JSON
+        </summary>
+        <textarea
+          value={props.schemaJsonInput}
+          onChange={(event) => props.onSchemaJsonInput(event.target.value)}
+          placeholder="Paste schema JSON here"
+        />
+        <button className="secondary" onClick={props.onImportSchemaJson}>
+          <FileUp size={16} />
+          Import
+        </button>
+      </details>
+
+      <div className="preview-block">
+        <div className="preview-title">
+          <FileJson size={16} />
+          JSON preview
+        </div>
+        <pre>{props.schemaPreview}</pre>
+      </div>
+
+      {props.regionTarget && regionsOpen && (
+        <RegionManagerModal
+          target={props.regionTarget}
+          regions={props.regions}
+          activePage={props.activePage}
+          onSaveRegion={props.onSaveRegion}
+          onRemoveRegion={props.onRemoveRegion}
+          onClose={() => setRegionsOpen(false)}
+        />
+      )}
+    </aside>
   );
 }
 
@@ -4305,17 +4550,46 @@ function hasMeaningfulSchema(fields: SchemaField[]) {
   return fields.some((field) => field.key_name.trim() || field.description.trim());
 }
 
-function findSavedSchemaNameConflict(name: string, schemas: SavedSchema[], currentSchemaId: string | null) {
+function findSavedSchemaNameConflict(name: string, schemas: SavedSchema[], currentSchema: SavedSchema | null) {
   const normalized = name.trim();
   if (!normalized) return null;
+  if (currentSchema && currentSchema.name.trim() === normalized) {
+    return null;
+  }
   return (
     schemas.find(
       (schema) =>
         !schema.ephemeral &&
-        schema.id !== currentSchemaId &&
-        (schema.name.trim() === normalized || (schema.display_name ?? "").trim() === normalized)
+        schema.id !== currentSchema?.id &&
+        schema.name.trim() === normalized
     ) ?? null
   );
+}
+
+function schemaSaveStatusLabel(
+  status: "idle" | "pending" | "saving" | "saved" | "error",
+  savedSchema: SavedSchema | null
+) {
+  if (status === "saving") return "Auto-saving";
+  if (status === "pending") return "Auto-save pending";
+  if (status === "saved") return savedSchema ? "Auto-saved" : "Ready";
+  if (status === "error") return "Auto-save blocked";
+  return savedSchema ? "Auto-saved" : "Draft";
+}
+
+function schemaValidationHint(message: string | null) {
+  if (!message) return null;
+  const hints: Record<string, string> = {
+    "Add at least one schema field.": "우측 schema에 최소 1개 이상의 필드를 추가하세요.",
+    "Every field needs a key name.": "모든 필드에 key name을 입력하세요.",
+    "Every field needs a description.": "모든 필드에 description을 입력하세요.",
+    "Every field needs a supported output format.": "모든 필드의 output format을 확인하세요.",
+    "Extraction regions must use page plus x, y, width, height values between 0 and 1.": "Region 좌표는 0~1 사이 상대 좌표여야 합니다.",
+    "Every field region must reference a saved extraction region.": "필드에 연결된 region이 저장된 region인지 확인하세요.",
+    "Field key names must be unique.": "Field key name은 중복될 수 없습니다.",
+    "Extraction region ids must be unique.": "Region id는 중복될 수 없습니다."
+  };
+  return hints[message] ?? message;
 }
 
 function exportHref(resultId: string, format: "json" | "csv", presetId: string) {

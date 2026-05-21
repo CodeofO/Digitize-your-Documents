@@ -56,10 +56,12 @@ class Schema(Base):
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    schema_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     is_template: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     template_category: Mapped[str | None] = mapped_column(String, nullable=True)
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ephemeral: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -67,24 +69,6 @@ class Schema(Base):
         onupdate=func.now(),
         nullable=False,
     )
-
-    versions: Mapped[list["SchemaVersion"]] = relationship(
-        back_populates="schema",
-        cascade="all, delete-orphan",
-        order_by="SchemaVersion.version",
-    )
-
-
-class SchemaVersion(Base):
-    __tablename__ = "schema_versions"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("schema_version"))
-    schema_id: Mapped[str] = mapped_column(ForeignKey("schemas.id"), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    schema_json: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
-
-    schema: Mapped[Schema] = relationship(back_populates="versions")
 
 
 class ExtractionJob(Base):

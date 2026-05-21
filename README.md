@@ -17,9 +17,10 @@
 
 ## 2026-05-21 변경 사항
 
-- KIE 단일 문서 화면에서 저장된 schema를 Schema name 영역의 드롭다운으로 바로 불러올 수 있습니다.
-- 필드 수정 후 Schema description 옆의 `AI 수정` 버튼으로 현재 필드와 문서 이미지를 반영한 schema-level 설명을 다시 생성할 수 있습니다.
-- `Extract`는 더 이상 draft schema를 자동 저장하지 않습니다. 저장하지 않은 schema는 one-off 추출로 실행되고 schema 목록에는 남지 않습니다.
+- Schema version 개념을 제거했습니다. 같은 이름의 schema는 하나의 현재 내용만 가지며, 수정하면 새 버전이 아니라 기존 schema가 갱신됩니다.
+- KIE 단일 문서 화면에서 저장된 schema를 `Schema Library`의 카드형 리스트로 선택하고, 필드/설명/region 수정 내용은 자동 저장됩니다.
+- Schema 추가, 선택, 이름 변경, 설명, 삭제, 템플릿, JSON import/export, region 관리는 `Schema Library` drawer로 분리하고, 메인 화면은 field table 중심으로 정리했습니다.
+- Schema description 옆의 `AI 수정` 버튼은 문서 이미지를 요구하지 않고 현재 field list만 보고 schema-level 설명을 다시 생성합니다.
 - Setting 창에 파싱 기록 삭제 버튼을 추가했습니다. 저장된 schema는 유지하고 문서, batch, 추출 결과, raw extraction 기록만 비울 수 있습니다.
 - Batch 파일은 업로드 직후부터 이미지명 오름차순으로 정렬해 sidebar에 표시합니다.
 - Batch CSV/JSON export도 이미지명 오름차순으로 정렬해 내려받습니다.
@@ -241,7 +242,7 @@ Raw API:
 | `output_format` | `string`, `float`, `date`, `bool` |
 | `region_id` | 선택 항목. schema-level region을 참조하는 ID |
 
-`regions`는 schema 최상위에 저장됩니다. 각 region은 `id`, `name`, `page`, `x`, `y`, `width`, `height`로 구성하며 `x/y/width/height`는 0~1 사이 상대 좌표입니다. 여러 field가 같은 `region_id`를 참조할 수 있고, `region_id`가 없는 field는 전체 문서에서 추출합니다. Batch extraction은 저장된 schema version을 그대로 사용하므로 region template도 함께 재사용됩니다.
+`regions`는 schema 최상위에 저장됩니다. 각 region은 `id`, `name`, `page`, `x`, `y`, `width`, `height`로 구성하며 `x/y/width/height`는 0~1 사이 상대 좌표입니다. 여러 field가 같은 `region_id`를 참조할 수 있고, `region_id`가 없는 field는 전체 문서에서 추출합니다. Batch extraction은 저장된 schema의 현재 내용을 사용하므로 region template도 함께 재사용됩니다.
 
 Region field는 VLM 입력 시 두 이미지를 함께 사용합니다. 하나는 region 외부를 흐리게 만든 원본 page context이고, 다른 하나는 실제 판독용 crop입니다. 따라서 description에 “우측 하단” 같은 위치 표현이 있어도 원본 page 위치 맥락과 crop 집중도를 함께 제공합니다.
 

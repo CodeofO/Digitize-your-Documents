@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 from app.audit import log_audit_event
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import Document, ExtractionJob, ExtractionResult, SchemaVersion
+from app.models import Document, ExtractionJob, ExtractionResult, Schema
 from app.schemas import FieldDefinition, FieldRegion, SchemaRegion
 from app.validation import validate_extracted_values
 from app.vlm import extract_with_vlm
@@ -36,7 +36,6 @@ class DocumentSnapshot:
 class ExtractionContext:
     document: DocumentSnapshot
     schema_id: str
-    schema_version: int
     fields: list[FieldDefinition]
     regions: list[SchemaRegion]
 
@@ -93,18 +92,13 @@ def _prepare_extraction_job(job_id: str) -> ExtractionContext | None:
         job.started_at = datetime.utcnow()
         db.commit()
         document = db.get(Document, job.document_id)
-        schema_version = (
-            db.query(SchemaVersion)
-            .filter(
-                SchemaVersion.schema_id == job.schema_id,
-                SchemaVersion.version == job.schema_version,
-            )
-            .one_or_none()
-        )
-        if not document or not schema_version:
-            raise RuntimeError("Document or schema version not found")
+        schema = db.get(Schema, job.schema_id)
+        if not document or not schema:
+            raise RuntimeError("Document or schema not found")
+        if not schema.schema_json or schema.schema_json == "{}":
+            raise RuntimeError("Schema data is missing")
 
-        schema_data = json.loads(schema_version.schema_json)
+        schema_data = json.loads(schema.schema_json)
         fields = [FieldDefinition(**field) for field in schema_data["fields"]]
         regions = [SchemaRegion(**region) for region in schema_data.get("regions", [])]
         pages = [
@@ -114,7 +108,6 @@ def _prepare_extraction_job(job_id: str) -> ExtractionContext | None:
         return ExtractionContext(
             document=DocumentSnapshot(id=document.id, storage_path=document.storage_path, pages=pages),
             schema_id=job.schema_id,
-            schema_version=job.schema_version,
             fields=fields,
             regions=regions,
         )
@@ -144,7 +137,6 @@ def _save_extraction_result(job_id: str, context: ExtractionContext, raw_values:
         validated_output = {
             "document_id": context.document.id,
             "schema_id": context.schema_id,
-            "schema_version": context.schema_version,
             "status": "needs_review" if warnings else "completed",
             "values": values,
         }

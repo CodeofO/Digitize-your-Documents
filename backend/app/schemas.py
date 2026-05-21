@@ -145,11 +145,11 @@ class SchemaRead(BaseModel):
     name: str
     display_name: str | None
     description: str | None
-    current_version: int
     is_template: bool
     template_category: str | None
     pinned: bool
     ephemeral: bool = False
+    archived: bool = False
     regions: list[SchemaRegion]
     fields: list[FieldDefinition]
     created_at: datetime
@@ -237,7 +237,7 @@ class SchemaRecommendationRead(BaseModel):
 
 
 class SchemaDescriptionRecommendationRequest(BaseModel):
-    document_id: str
+    document_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
     current_description: str | None = None
     regions: list[SchemaRegion] = Field(default_factory=list)
@@ -274,7 +274,6 @@ class SchemaDescriptionRecommendationRead(BaseModel):
 class ExtractionJobCreate(BaseModel):
     document_id: str
     schema_id: str
-    schema_version: int | None = None
     options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -309,7 +308,6 @@ class ExtractionJobRead(BaseModel):
     job_id: str
     document_id: str
     schema_id: str
-    schema_version: int
     status: str
     error_message: str | None
     result_id: str | None
@@ -346,7 +344,6 @@ class BatchItemRead(BaseModel):
 class BatchRead(BaseModel):
     id: str
     schema_id: str
-    schema_version: int
     status: str
     total_count: int
     completed_count: int

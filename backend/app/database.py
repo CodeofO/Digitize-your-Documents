@@ -46,10 +46,12 @@ def _run_lightweight_migrations() -> None:
             ("recommendation_reasoning", "TEXT"),
         ],
         "schemas": [
+            ("schema_json", "TEXT"),
             ("is_template", "INTEGER NOT NULL DEFAULT 0"),
             ("template_category", "VARCHAR"),
             ("pinned", "INTEGER NOT NULL DEFAULT 0"),
             ("ephemeral", "INTEGER NOT NULL DEFAULT 0"),
+            ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ],
         "extraction_results": [
             ("reviewed_fields", "TEXT NOT NULL DEFAULT '[]'"),
@@ -71,6 +73,34 @@ def _run_lightweight_migrations() -> None:
             for column_name, sql_type in specs:
                 if column_name not in existing:
                     connection.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type}'))
+
+        if "schemas" in tables:
+            schema_columns = {
+                row[1]
+                for row in connection.execute(text('PRAGMA table_info("schemas")')).all()
+            }
+            if "schema_json" in schema_columns and "current_version" in schema_columns and "schema_versions" in tables:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE schemas
+                        SET schema_json = (
+                            SELECT schema_versions.schema_json
+                            FROM schema_versions
+                            WHERE schema_versions.schema_id = schemas.id
+                              AND schema_versions.version = schemas.current_version
+                            LIMIT 1
+                        )
+                        WHERE (schema_json IS NULL OR schema_json = '' OR schema_json = '{}')
+                          AND EXISTS (
+                            SELECT 1
+                            FROM schema_versions
+                            WHERE schema_versions.schema_id = schemas.id
+                              AND schema_versions.version = schemas.current_version
+                          )
+                        """
+                    )
+                )
 
 
 def get_db() -> Generator[Session, None, None]:

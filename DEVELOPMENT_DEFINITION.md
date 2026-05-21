@@ -111,11 +111,12 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 3. 좌측 문서 viewer에서 페이지를 확인한다.
 4. 우측 schema builder에서 `key_name`, `description`, `output_format`을 정의한다.
 5. 필요 필드만 선택적으로 extraction region을 지정한다.
-6. 저장된 schema는 Schema name 영역의 dropdown에서 바로 불러온다.
-7. 사용자가 필드를 수정한 뒤 `AI 수정`으로 현재 필드와 문서 이미지를 기반으로 schema-level description만 다시 생성할 수 있다.
-8. Save schema는 명시적으로 누를 때만 schema를 저장한다. 저장하지 않은 draft schema로 Extract를 누르면 one-off extraction으로 실행하고 schema 목록에는 노출하지 않는다.
-9. 결과 table에서 value, normalized value, status, page, confidence, warning을 검토한다.
-10. 사용자는 결과를 수정하고 JSON/CSV로 export한다.
+6. 저장된 schema는 `Schema Library` drawer의 카드형 리스트에서 선택한다.
+7. schema는 version 없이 이름 단위로 현재 내용만 관리한다.
+8. 사용자가 field, schema description, region을 수정하면 debounce 후 자동 저장한다. `Save now`는 자동 저장 실패/지연 시 즉시 재시도용이다.
+9. 사용자가 필드를 수정한 뒤 `AI 수정`으로 현재 필드만 기반으로 schema-level description을 다시 생성할 수 있다. 문서 이미지는 필요하지 않다.
+10. 결과 table에서 value, normalized value, status, page, confidence, warning을 검토한다.
+11. 사용자는 결과를 수정하고 JSON/CSV로 export한다.
 
 ### 3.2 Schema
 
@@ -211,10 +212,11 @@ Raw workspace:
 Key Information workspace:
 
 - 기존 upload/schema/review 흐름 유지
-- Schema name 영역에서 신규 이름 입력과 저장된 schema dropdown 선택을 함께 제공한다.
-- Schema description 옆에 `AI 수정` action을 제공한다. 이 action은 현재 field list와 문서 image를 VLM에 전달해 schema-level description만 갱신하고 저장은 수행하지 않는다.
-- 같은 schema name이 이미 저장되어 있으면 저장 시 사용자에게 알려주고 중복 저장을 막는다.
-- Recent items 진입 버튼은 제거하고, schema 재사용은 schema dropdown으로 옮긴다.
+- 메인 schema panel은 field table 중심으로 유지하고, schema 선택/이름/설명/템플릿/JSON/region 관리는 `Schema Library` drawer에서 제공한다.
+- Schema description 옆에 `AI 수정` action을 제공한다. 이 action은 현재 field list만 VLM에 전달해 schema-level description을 갱신하며, 변경 내용은 자동 저장 대상이 된다.
+- 같은 schema name이 이미 저장되어 있으면 신규 schema 생성을 막고, 기존 schema는 `Schema Library` list에서 선택해 수정하도록 안내한다.
+- Schema 삭제는 과거 extraction/archive 참조를 보존하기 위해 물리 삭제가 아니라 `archived` 처리로 목록에서 숨긴다.
+- Recent items 진입 버튼은 제거하고, schema 재사용은 `Schema Library` list로 옮긴다.
 - Home navigation 제공
 - Batch draft와 batch result sidebar는 파일명 기준 오름차순으로 표시한다.
 - Batch export CSV/JSON도 파일명 기준 오름차순으로 row를 정렬한다.

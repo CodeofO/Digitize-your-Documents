@@ -38,7 +38,6 @@ from app.models import (
     ExtractionResult,
     RawExtraction,
     Schema,
-    SchemaVersion,
 )
 from app.raw_extractor import RawExtractionError, RawExtractionOptions, create_raw_outputs, save_raw_upload, validate_raw_upload
 from app.schemas import (
@@ -337,22 +336,17 @@ def create_schema(payload: SchemaCreate, db: Session = Depends(get_db)) -> Schem
         display_name=payload.display_name,
         description=payload.description,
         current_version=1,
+        schema_json=json.dumps(payload.model_dump(), ensure_ascii=False),
         is_template=payload.is_template,
         template_category=payload.template_category,
         pinned=payload.pinned,
         ephemeral=False,
+        archived=False,
     )
     db.add(schema)
     db.flush()
     schema_json = payload.model_dump()
     _validate_schema_region_references(schema_json)
-    db.add(
-        SchemaVersion(
-            schema_id=schema.id,
-            version=1,
-            schema_json=json.dumps(schema_json, ensure_ascii=False),
-        )
-    )
     log_audit_event(
         db,
         entity_type="schema",
@@ -370,11 +364,14 @@ def create_schema(payload: SchemaCreate, db: Session = Depends(get_db)) -> Schem
 def list_schemas(
     templates: bool | None = None,
     include_ephemeral: bool = False,
+    include_archived: bool = False,
     db: Session = Depends(get_db),
 ) -> list[SchemaRead]:
     query = db.query(Schema)
     if not include_ephemeral:
         query = query.filter(Schema.ephemeral == False)  # noqa: E712
+    if not include_archived:
+        query = query.filter(Schema.archived == False)  # noqa: E712
     if templates is not None:
         query = query.filter(Schema.is_template == templates)
     schemas = query.order_by(Schema.pinned.desc(), Schema.created_at.desc()).all()
@@ -421,12 +418,15 @@ def recommend_schema_description(
     payload: SchemaDescriptionRecommendationRequest,
     db: Session = Depends(get_db),
 ) -> SchemaDescriptionRecommendationRead:
-    document = db.get(Document, payload.document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    image_paths: list[str] = []
+    if payload.document_id:
+        document = db.get(Document, payload.document_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        image_paths = [page.image_path for page in document.pages]
     try:
         recommendation = recommend_schema_description_with_vlm(
-            [page.image_path for page in document.pages],
+            image_paths,
             schema_name=payload.name,
             current_description=payload.current_description,
             fields=payload.fields,
@@ -468,7 +468,10 @@ def update_schema(schema_id: str, payload: SchemaUpdate, db: Session = Depends(g
         "fields": [field.model_dump() for field in payload.fields] if payload.fields is not None else current["fields"],
     }
     _validate_schema_region_references(next_schema_data)
-    _raise_if_schema_name_conflicts(db, next_schema_data["name"], schema_id=schema.id)
+    if next_schema_data["name"].strip() == schema.name.strip():
+        _merge_duplicate_schema_names_into(db, schema, next_schema_data["name"])
+    else:
+        _raise_if_schema_name_conflicts(db, next_schema_data["name"], schema_id=schema.id)
 
     schema.name = next_schema_data["name"]
     schema.display_name = next_schema_data["display_name"]
@@ -476,14 +479,7 @@ def update_schema(schema_id: str, payload: SchemaUpdate, db: Session = Depends(g
     schema.is_template = next_schema_data["is_template"]
     schema.template_category = next_schema_data["template_category"]
     schema.pinned = next_schema_data["pinned"]
-    schema.current_version += 1
-    db.add(
-        SchemaVersion(
-            schema_id=schema.id,
-            version=schema.current_version,
-            schema_json=json.dumps(next_schema_data, ensure_ascii=False),
-        )
-    )
+    schema.schema_json = json.dumps(next_schema_data, ensure_ascii=False)
     log_audit_event(
         db,
         entity_type="schema",
@@ -491,10 +487,33 @@ def update_schema(schema_id: str, payload: SchemaUpdate, db: Session = Depends(g
         action="updated",
         message=f"Updated schema {schema.name}",
         metadata={
-            "version": schema.current_version,
             "is_template": schema.is_template,
             "field_count": len(next_schema_data["fields"]),
         },
+    )
+    db.commit()
+    db.refresh(schema)
+    return _schema_read(schema)
+
+
+@app.delete("/api/schemas/{schema_id}", response_model=SchemaRead)
+def delete_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRead:
+    schema = db.get(Schema, schema_id)
+    if not schema:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    if schema.ephemeral:
+        raise HTTPException(status_code=400, detail="Draft schemas cannot be archived from the library")
+
+    schema.archived = True
+    schema.pinned = False
+    schema.is_template = False
+    log_audit_event(
+        db,
+        entity_type="schema",
+        entity_id=schema.id,
+        action="archived",
+        message=f"Archived schema {schema.name}",
+        metadata={"name": schema.name},
     )
     db.commit()
     db.refresh(schema)
@@ -515,19 +534,10 @@ def create_extraction_job(
         raise HTTPException(status_code=404, detail="Schema not found")
     _repair_image_document_if_needed(document, db)
 
-    schema_version = payload.schema_version or schema.current_version
-    version_exists = (
-        db.query(SchemaVersion)
-        .filter(SchemaVersion.schema_id == schema.id, SchemaVersion.version == schema_version)
-        .one_or_none()
-    )
-    if not version_exists:
-        raise HTTPException(status_code=404, detail="Schema version not found")
-
     job = ExtractionJob(
         document_id=document.id,
         schema_id=schema.id,
-        schema_version=schema_version,
+        schema_version=1,
         status="queued",
     )
     db.add(job)
@@ -538,7 +548,7 @@ def create_extraction_job(
         entity_id=job.id,
         action="created",
         message="Extraction job created",
-        metadata={"document_id": document.id, "schema_id": schema.id, "schema_version": schema_version},
+        metadata={"document_id": document.id, "schema_id": schema.id},
     )
     db.commit()
     db.refresh(job)
@@ -571,20 +581,15 @@ def create_draft_extraction_job(
         display_name=draft_schema.display_name or draft_schema.name,
         description=draft_schema.description,
         current_version=1,
+        schema_json=json.dumps(schema_data, ensure_ascii=False),
         is_template=False,
         template_category=None,
         pinned=False,
         ephemeral=True,
+        archived=False,
     )
     db.add(schema)
     db.flush()
-    db.add(
-        SchemaVersion(
-            schema_id=schema.id,
-            version=1,
-            schema_json=json.dumps(schema_data, ensure_ascii=False),
-        )
-    )
     job = ExtractionJob(
         document_id=document.id,
         schema_id=schema.id,
@@ -793,25 +798,16 @@ def delete_export_preset(preset_id: str, db: Session = Depends(get_db)) -> dict[
 def create_batch(
     background_tasks: BackgroundTasks,
     schema_id: str = Form(...),
-    schema_version: int | None = Form(default=None),
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ) -> BatchRead:
     schema = db.get(Schema, schema_id)
     if not schema:
         raise HTTPException(status_code=404, detail="Schema not found")
-    version = schema_version or schema.current_version
-    version_exists = (
-        db.query(SchemaVersion)
-        .filter(SchemaVersion.schema_id == schema.id, SchemaVersion.version == version)
-        .one_or_none()
-    )
-    if not version_exists:
-        raise HTTPException(status_code=404, detail="Schema version not found")
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
-    batch = Batch(schema_id=schema.id, schema_version=version, status="running", total_count=len(files))
+    batch = Batch(schema_id=schema.id, schema_version=1, status="running", total_count=len(files))
     db.add(batch)
     db.flush()
     job_ids: list[str] = []
@@ -820,7 +816,7 @@ def create_batch(
         job = ExtractionJob(
             document_id=document.id,
             schema_id=schema.id,
-            schema_version=version,
+            schema_version=1,
             status="queued",
         )
         db.add(job)
@@ -850,7 +846,7 @@ def create_batch(
         entity_id=batch.id,
         action="created",
         message=f"Created batch with {len(files)} file(s)",
-        metadata={"schema_id": schema.id, "schema_version": version, "file_count": len(files)},
+        metadata={"schema_id": schema.id, "file_count": len(files)},
     )
     db.commit()
     db.refresh(batch)
@@ -924,21 +920,16 @@ def export_batch(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
 
-    schema_version = (
-        db.query(SchemaVersion)
-        .filter(SchemaVersion.schema_id == batch.schema_id, SchemaVersion.version == batch.schema_version)
-        .one_or_none()
-    )
-    if not schema_version:
-        raise HTTPException(status_code=404, detail="Schema version not found")
+    schema = db.get(Schema, batch.schema_id)
+    if not schema:
+        raise HTTPException(status_code=404, detail="Schema not found")
 
-    schema_data = json.loads(schema_version.schema_json)
+    schema_data = _schema_data(schema)
     field_names = [field["key_name"] for field in schema_data.get("fields", [])]
     rows = [_batch_export_row(item, field_names) for item in _sorted_batch_items(batch.items)]
     payload = {
         "batch_id": batch.id,
         "schema_id": batch.schema_id,
-        "schema_version": batch.schema_version,
         "status": _batch_read(batch).status,
         "total_count": batch.total_count,
         "rows": rows,
@@ -1014,7 +1005,6 @@ def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
     db.query(RawExtraction).delete(synchronize_session=False)
     db.query(AuditEvent).delete(synchronize_session=False)
     if ephemeral_schema_ids:
-        db.query(SchemaVersion).filter(SchemaVersion.schema_id.in_(ephemeral_schema_ids)).delete(synchronize_session=False)
         db.query(Schema).filter(Schema.id.in_(ephemeral_schema_ids)).delete(synchronize_session=False)
     db.commit()
 
@@ -1156,11 +1146,11 @@ def _schema_read(schema: Schema) -> SchemaRead:
         name=schema.name,
         display_name=schema.display_name,
         description=schema.description,
-        current_version=schema.current_version,
         is_template=schema.is_template,
         template_category=schema.template_category,
         pinned=schema.pinned,
         ephemeral=schema.ephemeral,
+        archived=schema.archived,
         regions=schema_data.get("regions", []),
         fields=schema_data["fields"],
         created_at=schema.created_at,
@@ -1169,10 +1159,9 @@ def _schema_read(schema: Schema) -> SchemaRead:
 
 
 def _schema_data(schema: Schema) -> dict[str, Any]:
-    version = next((item for item in schema.versions if item.version == schema.current_version), None)
-    if version is None:
-        raise HTTPException(status_code=500, detail="Schema version is missing")
-    return json.loads(version.schema_json)
+    if not schema.schema_json or schema.schema_json == "{}":
+        raise HTTPException(status_code=500, detail="Schema data is missing")
+    return json.loads(schema.schema_json)
 
 
 def _validate_schema_region_references(schema_data: dict[str, Any]) -> None:
@@ -1195,11 +1184,44 @@ def _raise_if_schema_name_conflicts(db: Session, name: str, schema_id: str | Non
     normalized = name.strip()
     if not normalized:
         return
-    query = db.query(Schema).filter(Schema.name == normalized, Schema.ephemeral == False)  # noqa: E712
+    query = db.query(Schema).filter(Schema.name == normalized, Schema.ephemeral == False, Schema.archived == False)  # noqa: E712
     if schema_id:
         query = query.filter(Schema.id != schema_id)
     if query.first():
         raise HTTPException(status_code=409, detail=f"Schema name already exists: {normalized}")
+
+
+def _merge_duplicate_schema_names_into(db: Session, schema: Schema, name: str) -> None:
+    normalized = name.strip()
+    if not normalized:
+        return
+    duplicates = (
+        db.query(Schema)
+        .filter(Schema.name == normalized, Schema.ephemeral == False, Schema.archived == False, Schema.id != schema.id)  # noqa: E712
+        .all()
+    )
+    for duplicate in duplicates:
+        db.query(ExtractionJob).filter(ExtractionJob.schema_id == duplicate.id).update(
+            {ExtractionJob.schema_id: schema.id},
+            synchronize_session=False,
+        )
+        db.query(Batch).filter(Batch.schema_id == duplicate.id).update(
+            {Batch.schema_id: schema.id},
+            synchronize_session=False,
+        )
+        db.query(ExportPreset).filter(ExportPreset.schema_id == duplicate.id).update(
+            {ExportPreset.schema_id: schema.id},
+            synchronize_session=False,
+        )
+        log_audit_event(
+            db,
+            entity_type="schema",
+            entity_id=schema.id,
+            action="merged_duplicate",
+            message=f"Merged duplicate schema {duplicate.id} into {schema.id}",
+            metadata={"duplicate_schema_id": duplicate.id, "name": normalized},
+        )
+        db.delete(duplicate)
 
 
 def _schema_recommendation_read(payload: dict[str, Any]) -> SchemaRecommendationRead:
@@ -1227,7 +1249,6 @@ def _job_read(job: ExtractionJob) -> ExtractionJobRead:
         job_id=job.id,
         document_id=job.document_id,
         schema_id=job.schema_id,
-        schema_version=job.schema_version,
         status=job.status,
         error_message=job.error_message,
         result_id=job.result_id,
@@ -1260,7 +1281,6 @@ def _batch_read(batch: Batch) -> BatchRead:
     return BatchRead(
         id=batch.id,
         schema_id=batch.schema_id,
-        schema_version=batch.schema_version,
         status=status,
         total_count=batch.total_count,
         completed_count=completed_count,

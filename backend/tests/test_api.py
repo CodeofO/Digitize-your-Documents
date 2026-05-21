@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import os
 import zipfile
 
@@ -344,7 +345,7 @@ def test_extraction_fails_without_vlm_credentials() -> None:
         assert "VLM API key and model name are required" in job["error_message"]
 
 
-def test_schema_update_creates_new_version() -> None:
+def test_schema_update_replaces_current_schema() -> None:
     with get_client() as client:
         schema = create_schema(client)
         updated = client.patch(
@@ -367,7 +368,7 @@ def test_schema_update_creates_new_version() -> None:
         )
         assert updated.status_code == 200, updated.text
         payload = updated.json()
-        assert payload["current_version"] == schema["current_version"] + 1
+        assert "current_version" not in payload
         assert payload["display_name"] == "Updated Invoice Basic"
         assert payload["fields"][1]["key_name"] == "invoice_date"
 
@@ -395,8 +396,89 @@ def test_schema_update_allows_same_name_for_loaded_schema() -> None:
         assert payload["id"] == schema["id"]
         assert payload["name"] == "테스트"
         assert payload["description"] == "수정된 설명"
-        assert payload["current_version"] == schema["current_version"] + 1
+        assert "current_version" not in payload
         assert payload["fields"][0]["key_name"] == "수정필드"
+
+
+def test_schema_update_merges_duplicate_loaded_schema_name() -> None:
+    from app.database import SessionLocal
+    from app.models import Schema
+
+    with get_client() as client:
+        schema = create_schema(client, name="중복스키마")
+        duplicate_schema_json = {
+            "name": "중복스키마",
+            "display_name": "중복스키마",
+            "description": "old duplicate",
+            "is_template": False,
+            "template_category": None,
+            "pinned": False,
+            "regions": [],
+            "fields": [
+                {
+                    "key_name": "old_field",
+                    "description": "Old duplicate field.",
+                    "output_format": "string",
+                }
+            ],
+        }
+        db = SessionLocal()
+        try:
+            duplicate = Schema(
+                name="중복스키마",
+                display_name="중복스키마",
+                description="old duplicate",
+                current_version=1,
+                schema_json=json.dumps(duplicate_schema_json, ensure_ascii=False),
+                is_template=False,
+                template_category=None,
+                pinned=False,
+                ephemeral=False,
+            )
+            db.add(duplicate)
+            db.commit()
+            duplicate_id = duplicate.id
+        finally:
+            db.close()
+
+        updated = client.patch(
+            f"/api/schemas/{schema['id']}",
+            json={
+                "name": "중복스키마",
+                "display_name": "중복스키마",
+                "description": "merged current schema",
+                "fields": [
+                    {
+                        "key_name": "current_field",
+                        "description": "Current schema field.",
+                        "output_format": "string",
+                    }
+                ],
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        schemas = [item for item in client.get("/api/schemas").json() if item["name"] == "중복스키마"]
+        assert len(schemas) == 1
+        assert schemas[0]["id"] == schema["id"]
+        assert client.get(f"/api/schemas/{duplicate_id}").status_code == 404
+
+
+def test_schema_delete_archives_and_allows_name_reuse() -> None:
+    with get_client() as client:
+        schema = create_schema(client, name="삭제테스트")
+        deleted = client.delete(f"/api/schemas/{schema['id']}")
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["archived"] is True
+
+        listed_names = [item["name"] for item in client.get("/api/schemas").json()]
+        assert "삭제테스트" not in listed_names
+
+        archived = client.get(f"/api/schemas/{schema['id']}")
+        assert archived.status_code == 200
+        assert archived.json()["archived"] is True
+
+        recreated = create_schema(client, name="삭제테스트")
+        assert recreated["id"] != schema["id"]
 
 
 def test_schema_recommendation_mock_mode() -> None:
@@ -421,11 +503,9 @@ def test_schema_description_recommendation_mock_mode() -> None:
         os.environ["VLM_PROVIDER"] = "mock"
         get_settings.cache_clear()
         with get_client() as client:
-            document = upload_png(client)
             response = client.post(
                 "/api/schemas/description-recommendations",
                 json={
-                    "document_id": document["document_id"],
                     "name": "consent_schema",
                     "current_description": "Old description",
                     "fields": [
