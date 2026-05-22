@@ -14,6 +14,8 @@ import type { Connection, Edge, EdgeChange, Node, NodeChange, NodeProps } from "
 import {
   AlertTriangle,
   Braces,
+  ChevronLeft,
+  ChevronRight,
   CheckCircle2,
   CheckSquare,
   ClipboardList,
@@ -87,6 +89,21 @@ type WorkflowRunItem = {
   result: WorkflowItemResult;
 };
 
+type WorkflowDocumentPage = {
+  id: string;
+  page: number;
+  image_url: string;
+  width: number;
+  height: number;
+};
+
+type WorkflowDocument = {
+  document_id: string;
+  filename: string;
+  page_count: number;
+  pages: WorkflowDocumentPage[];
+};
+
 type WorkflowRun = {
   id: string;
   workflow_id: string;
@@ -105,9 +122,14 @@ type WorkflowItemResult = {
   branch_path?: string | null;
   kie_values?: Record<string, { value?: unknown; evidence?: string; confidence?: number } | unknown>;
   required_overall_status?: string | null;
-  required_items?: Record<string, { status?: string; evidence?: string | null }>;
+  required_items?: Record<string, { status?: string; evidence?: string | null; region_id?: string | null }>;
   node_results?: Record<string, unknown>;
   error_message?: string | null;
+  current_node_id?: string | null;
+  current_node_kind?: string | null;
+  current_node_label?: string | null;
+  completed_node_ids?: string[];
+  path_node_ids?: string[];
 };
 
 type WorkflowBuilderProps = {
@@ -123,6 +145,7 @@ type WorkflowDraft = {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   selectedNodeId: string | null;
+  settingsCollapsed?: boolean;
 };
 
 const WORKFLOW_DRAFT_KEY = "digitize_workflow_builder_draft_v1";
@@ -171,7 +194,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [edges, setEdges] = useState<WorkflowEdge[]>(() => initialDraft?.edges ?? defaultEdges.map(normalizeWorkflowEdge));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(initialDraft?.selectedNodeId ?? defaultNodes[1]?.id ?? null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [settingsCollapsed, setSettingsCollapsed] = useState(false);
+  const [settingsCollapsed, setSettingsCollapsed] = useState(Boolean(initialDraft?.settingsCollapsed));
   const [schemas, setSchemas] = useState<SchemaSummary[]>([]);
   const [classifiers, setClassifiers] = useState<ClassifierSummary[]>([]);
   const [checklists, setChecklists] = useState<ChecklistSummary[]>([]);
@@ -179,10 +202,14 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [activeRunId, setActiveRunId] = useState("");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isStartingRun, setIsStartingRun] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(initialDraft ? "복원됨" : null);
+  const [selectedDocument, setSelectedDocument] = useState<WorkflowDocument | null>(null);
+  const [documentLoading, setDocumentLoading] = useState(false);
+  const [activeDocumentPage, setActiveDocumentPage] = useState(0);
 
   const activeWorkflow = workflows.find((workflow) => workflow.id === activeWorkflowId) ?? null;
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
@@ -193,6 +220,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
     activeRun?.items.find((item) => item.id === selectedItemId) ?? activeRun?.items[0] ?? null;
   const validation = useMemo(() => validateWorkflow(nodes, edges), [nodes, edges]);
   const uploadMode = files.length > 1 ? "배치 실행" : files.length === 1 ? "단일 실행" : "파일 없음";
+  const isRunningRun = Boolean(activeRun && !TERMINAL_RUN_STATUSES.includes(activeRun.status));
 
   useEffect(() => {
     void refreshAll();
@@ -212,12 +240,34 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
         workflowDescription,
         nodes,
         edges,
-        selectedNodeId
+        selectedNodeId,
+        settingsCollapsed
       });
       setDraftSavedAt(new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [activeWorkflowId, workflowName, workflowDescription, nodes, edges, selectedNodeId]);
+  }, [activeWorkflowId, workflowName, workflowDescription, nodes, edges, selectedNodeId, settingsCollapsed]);
+
+  useEffect(() => {
+    let canceled = false;
+    setActiveDocumentPage(0);
+    setSelectedDocument(null);
+    if (!selectedRunItem?.document_id) return;
+    setDocumentLoading(true);
+    api<WorkflowDocument>(`/api/documents/${selectedRunItem.document_id}`)
+      .then((document) => {
+        if (!canceled) setSelectedDocument(document);
+      })
+      .catch((exc) => {
+        if (!canceled) setError(exc instanceof Error ? exc.message : "문서 preview를 불러오지 못했습니다.");
+      })
+      .finally(() => {
+        if (!canceled) setDocumentLoading(false);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [selectedRunItem?.document_id]);
 
   const onNodesChange = useCallback((changes: NodeChange<WorkflowNode>[]) => {
     setNodes((current) => applyNodeChanges(changes, current));
@@ -315,7 +365,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       setError(validation.errors[0]);
       return;
     }
-    setBusy("워크플로우 저장 중");
+    setIsSaving(true);
     setError(null);
     try {
       const payload = {
@@ -335,7 +385,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 저장에 실패했습니다.");
     } finally {
-      setBusy(null);
+      setIsSaving(false);
     }
   }
 
@@ -344,15 +394,16 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       setError("먼저 워크플로우를 저장하세요.");
       return;
     }
-    if (!files.length) {
+    const runFiles = [...files];
+    if (!runFiles.length) {
       setError("실행할 문서를 업로드하세요.");
       return;
     }
-    setBusy("워크플로우 실행 중");
+    setIsStartingRun(true);
     setError(null);
     try {
       const form = new FormData();
-      files.forEach((file) => form.append("files", file));
+      runFiles.forEach((file) => form.append("files", file));
       const run = await api<WorkflowRun>(`/api/workflows/${activeWorkflowId}/runs`, {
         method: "POST",
         body: form
@@ -360,12 +411,14 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)].slice(0, 12));
       setActiveRunId(run.id);
       setSelectedItemId(run.items[0]?.id ?? null);
+      setSelectedDocument(null);
+      setActiveDocumentPage(0);
       setMessage(`${uploadMode}을 시작했습니다.`);
       void refreshRun(run.id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 실행에 실패했습니다.");
     } finally {
-      setBusy(null);
+      setIsStartingRun(false);
     }
   }
 
@@ -402,6 +455,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
     const nextFiles = Array.from(event.target.files ?? []);
     nextFiles.sort((a, b) => a.name.localeCompare(b.name));
     setFiles(nextFiles);
+    event.currentTarget.value = "";
   }
 
   return (
@@ -466,8 +520,8 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             <button type="button" className="secondary" onClick={() => void refreshAll()}>
               <Library size={16} /> 갱신
             </button>
-            <button type="button" onClick={() => void saveWorkflow()} disabled={Boolean(busy) || validation.errors.length > 0}>
-              <Save size={16} /> 저장
+            <button type="button" onClick={() => void saveWorkflow()} disabled={isSaving || validation.errors.length > 0}>
+              {isSaving ? <Loader2 size={16} className="spin" /> : <Save size={16} />} 저장
             </button>
             {selectedEdge && (
               <div className="workflow-edge-actions">
@@ -480,15 +534,6 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             <span className="workflow-autosave">
               자동 저장 {draftSavedAt ?? "대기"}
             </span>
-            <button
-              type="button"
-              className="secondary icon-only workflow-panel-toggle"
-              aria-label={settingsCollapsed ? "노드 설정 패널 펼치기" : "노드 설정 패널 접기"}
-              title={settingsCollapsed ? "노드 설정 패널 펼치기" : "노드 설정 패널 접기"}
-              onClick={() => setSettingsCollapsed((current) => !current)}
-            >
-              {settingsCollapsed ? <PanelRightOpen size={17} /> : <PanelRightClose size={17} />}
-            </button>
           </div>
 
           <div className="workflow-canvas">
@@ -518,14 +563,14 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
           </div>
 
           <div className="workflow-run-bar">
-            <label className="workflow-upload">
+            <label className={`workflow-upload ${isStartingRun || isRunningRun ? "disabled" : ""}`}>
               <UploadCloud size={17} />
               <span>{files.length ? `${files.length}개 파일 선택됨 · ${uploadMode}` : "문서 업로드"}</span>
-              <input type="file" multiple accept={WORKFLOW_FILE_ACCEPT} onChange={onFileInput} />
+              <input type="file" multiple accept={WORKFLOW_FILE_ACCEPT} onChange={onFileInput} disabled={isStartingRun || isRunningRun} />
             </label>
-            <button type="button" onClick={() => void runWorkflow()} disabled={Boolean(busy) || !activeWorkflowId || !files.length}>
-              {busy ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
-              실행
+            <button type="button" onClick={() => void runWorkflow()} disabled={isStartingRun || isRunningRun || !activeWorkflowId || !files.length}>
+              {isStartingRun || isRunningRun ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
+              {isStartingRun ? "시작 중" : isRunningRun ? "실행 중" : "실행"}
             </button>
             {activeRun && (
               <>
@@ -553,11 +598,25 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             <WorkflowRunResults
               run={activeRun}
               selectedItem={selectedRunItem}
+              document={selectedDocument}
+              documentLoading={documentLoading}
+              activePage={activeDocumentPage}
               onSelectItem={(itemId) => setSelectedItemId(itemId)}
+              onPage={setActiveDocumentPage}
               onRefresh={() => void refreshRun(activeRun.id)}
             />
           )}
         </section>
+
+        <button
+          type="button"
+          className="secondary icon-only workflow-settings-toggle"
+          aria-label={settingsCollapsed ? "노드 설정 패널 펼치기" : "노드 설정 패널 접기"}
+          title={settingsCollapsed ? "노드 설정 패널 펼치기" : "노드 설정 패널 접기"}
+          onClick={() => setSettingsCollapsed((current) => !current)}
+        >
+          {settingsCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
+        </button>
 
         {!settingsCollapsed && (
           <aside className="workflow-settings" aria-label="노드 설정">
@@ -712,9 +771,14 @@ function ConfigSelect(props: {
 function WorkflowRunResults(props: {
   run: WorkflowRun;
   selectedItem: WorkflowRunItem | null;
+  document: WorkflowDocument | null;
+  documentLoading: boolean;
+  activePage: number;
   onSelectItem: (itemId: string) => void;
+  onPage: (page: number) => void;
   onRefresh: () => void;
 }) {
+  const finishedCount = props.run.completed_count + props.run.failed_count + props.run.needs_review_count;
   return (
     <section className="workflow-results">
       <div className="workflow-results-header">
@@ -722,90 +786,162 @@ function WorkflowRunResults(props: {
           <p className="eyebrow">Run</p>
           <h2>{props.run.status} · {Math.round(props.run.progress * 100)}%</h2>
         </div>
+        <div className="workflow-run-kpis">
+          <span><strong>{finishedCount}</strong> 완료/검토/실패</span>
+          <span><strong>{props.run.items.filter((item) => item.status === "running").length}</strong> 실행 중</span>
+          <span><strong>{props.run.items.filter((item) => item.status === "queued").length}</strong> 대기</span>
+        </div>
         <button type="button" className="secondary" onClick={props.onRefresh}>갱신</button>
       </div>
-      <div className="workflow-result-grid">
-        <div className="workflow-result-table-wrap">
-          <table className="data-table workflow-result-table">
-            <thead>
-              <tr>
-                <th>파일명</th>
-                <th>분류</th>
-                <th>Branch</th>
-                <th>KIE</th>
-                <th>필수항목</th>
-                <th>상태</th>
-              </tr>
-            </thead>
-            <tbody>
-              {props.run.items.map((item) => {
-                const result = item.result ?? {};
-                const kieCount = Object.keys(result.kie_values ?? {}).length;
-                const requiredCount = Object.keys(result.required_items ?? {}).length;
-                return (
-                  <tr key={item.id} className={props.selectedItem?.id === item.id ? "selected-row" : ""} onClick={() => props.onSelectItem(item.id)}>
-                    <td>{item.filename}</td>
-                    <td>{result.classification?.class_name || result.classification?.status || "-"}</td>
-                    <td>{result.branch_path || "-"}</td>
-                    <td>{kieCount ? `${kieCount} fields` : "-"}</td>
-                    <td>{result.required_overall_status || (requiredCount ? `${requiredCount} items` : "-")}</td>
-                    <td>{item.status}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        <WorkflowItemDetail item={props.selectedItem} />
+      <progress className="workflow-run-progress" value={props.run.progress} max={1} />
+      <div className="workflow-run-workbench">
+        <WorkflowRunRail run={props.run} selectedItem={props.selectedItem} onSelectItem={props.onSelectItem} />
+        <WorkflowDocumentPreview document={props.document} loading={props.documentLoading} activePage={props.activePage} onPage={props.onPage} item={props.selectedItem} />
+        <WorkflowItemInspector item={props.selectedItem} />
       </div>
     </section>
   );
 }
 
-function WorkflowItemDetail({ item }: { item: WorkflowRunItem | null }) {
-  if (!item) {
-    return <aside className="workflow-item-detail">결과 문서를 선택하세요.</aside>;
-  }
-  const result = item.result ?? {};
+function WorkflowRunRail(props: { run: WorkflowRun; selectedItem: WorkflowRunItem | null; onSelectItem: (itemId: string) => void }) {
   return (
-    <aside className="workflow-item-detail">
-      <p className="eyebrow">Document</p>
-      <h3>{item.filename}</h3>
-      <div className="detail-stack">
-        <DetailRow label="상태" value={item.status} />
-        <DetailRow label="분류" value={result.classification?.class_name || result.classification?.status || "-"} />
-        <DetailRow label="Branch" value={result.branch_path || "-"} />
-        <DetailRow label="필수항목" value={result.required_overall_status || "-"} />
-        {item.error_message && <DetailRow label="오류" value={item.error_message} />}
+    <aside className="workflow-run-rail">
+      <div className="workflow-run-rail-head">
+        <span>{props.run.items.length}개 문서</span>
+        <small>{workflowStatusLabel(props.run.status)}</small>
       </div>
-      <h4>KIE 결과</h4>
-      <div className="mini-result-list">
-        {Object.entries(result.kie_values ?? {}).map(([key, value]) => (
-          <span key={key}>
-            <strong>{key}</strong>
-            {typeof value === "object" && value !== null && "value" in value ? String(value.value ?? "") : String(value ?? "")}
-          </span>
-        ))}
-      </div>
-      <h4>필수 항목</h4>
-      <div className="mini-result-list">
-        {Object.entries(result.required_items ?? {}).map(([key, value]) => (
-          <span key={key}>
-            <strong>{key}</strong>
-            {value.status || "-"}
-          </span>
-        ))}
+      <div className="workflow-run-list">
+        {props.run.items.map((item) => {
+          const result = item.result ?? {};
+          const classification = result.classification?.class_name || result.classification?.status || "-";
+          const activeNode = item.status === "queued" ? "대기 중" : result.current_node_label || workflowStatusLabel(item.status);
+          return (
+            <button key={item.id} type="button" className={item.id === props.selectedItem?.id ? "active" : ""} onClick={() => props.onSelectItem(item.id)}>
+              <span>
+                <i className={`workflow-status-dot ${item.status}`} />
+                <strong>{item.filename}</strong>
+              </span>
+              <small>{classification} · {activeNode}</small>
+            </button>
+          );
+        })}
       </div>
     </aside>
   );
 }
 
-function DetailRow({ label, value }: { label: string; value: string }) {
+function WorkflowDocumentPreview(props: {
+  document: WorkflowDocument | null;
+  loading: boolean;
+  activePage: number;
+  item: WorkflowRunItem | null;
+  onPage: (page: number) => void;
+}) {
+  if (props.loading) {
+    return <section className="workflow-preview-pane"><div className="workflow-preview-empty">문서 preview를 불러오는 중입니다.</div></section>;
+  }
+  if (!props.document) {
+    return <section className="workflow-preview-pane"><div className="workflow-preview-empty">문서를 선택하면 이미지가 표시됩니다.</div></section>;
+  }
+  const document = props.document;
+  const safePage = Math.min(Math.max(0, props.activePage), Math.max(0, document.page_count - 1));
+  const page = document.pages[safePage];
   return (
-    <span>
-      <strong>{label}</strong>
-      {value}
-    </span>
+    <section className="workflow-preview-pane">
+      <div className="workflow-preview-toolbar">
+        <button type="button" onClick={() => props.onPage(Math.max(0, safePage - 1))}>
+          <ChevronLeft size={15} />
+        </button>
+        <span>{safePage + 1} / {document.page_count}</span>
+        <button type="button" onClick={() => props.onPage(Math.min(document.page_count - 1, safePage + 1))}>
+          <ChevronRight size={15} />
+        </button>
+        {props.item?.result.current_node_label && <strong>{props.item.result.current_node_label} 진행 중</strong>}
+      </div>
+      <div className="workflow-preview-stage">
+        <div className="workflow-preview-image-wrap">
+          {page && <img src={workflowDocumentPageSrc(page)} alt={`${document.filename} ${safePage + 1}페이지`} />}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function WorkflowItemInspector({ item }: { item: WorkflowRunItem | null }) {
+  if (!item) {
+    return <aside className="workflow-item-detail">결과 문서를 선택하세요.</aside>;
+  }
+  const result = item.result ?? {};
+  const kieEntries = Object.entries(result.kie_values ?? {});
+  const requiredEntries = Object.entries(result.required_items ?? {});
+  const classificationOnly = result.branch_path && !kieEntries.length && !requiredEntries.length && item.status !== "running" && item.status !== "queued";
+  return (
+    <aside className="workflow-item-detail">
+      <div className="workflow-inspector-head">
+        <p className="eyebrow">Document</p>
+        <h3>{item.filename}</h3>
+        <span className={`workflow-status-pill ${item.status}`}>{workflowStatusLabel(item.status)}</span>
+      </div>
+      <div className="workflow-inspector-cards">
+        <div>
+          <strong>분류</strong>
+          <span>{result.classification?.class_name || result.classification?.status || "-"}</span>
+        </div>
+        <div>
+          <strong>Branch</strong>
+          <span>{result.branch_path || "-"}</span>
+        </div>
+        <div>
+          <strong>현재 모듈</strong>
+          <span>{item.status === "queued" ? "대기 중" : result.current_node_label || "-"}</span>
+        </div>
+        <div>
+          <strong>필수항목</strong>
+          <span>{result.required_overall_status || "-"}</span>
+        </div>
+      </div>
+      {classificationOnly && <div className="workflow-classification-only">이 문서는 후속 route가 없어 분류 결과만 export됩니다.</div>}
+      {item.status === "running" && <div className="workflow-running-skeleton">모듈 실행 결과를 기다리는 중입니다.</div>}
+      {item.error_message && <div className="module-error">{item.error_message}</div>}
+      <h4>KIE 결과</h4>
+      <div className="workflow-result-table-wrap compact">
+        <table className="module-result-table workflow-module-table">
+          <thead>
+            <tr><th>필드</th><th>값</th><th>신뢰도</th><th>근거</th></tr>
+          </thead>
+          <tbody>
+            {kieEntries.length ? kieEntries.map(([key, value]) => {
+              const entry = typeof value === "object" && value !== null ? value as { value?: unknown; evidence?: string; confidence?: number } : { value };
+              return (
+                <tr key={key}>
+                  <td>{key}</td>
+                  <td>{formatWorkflowValue(entry.value)}</td>
+                  <td>{typeof entry.confidence === "number" ? `${Math.round(entry.confidence * 100)}%` : "-"}</td>
+                  <td>{entry.evidence || "-"}</td>
+                </tr>
+              );
+            }) : <tr><td colSpan={4}>표시할 KIE 결과가 없습니다.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <h4>필수 항목</h4>
+      <div className="workflow-result-table-wrap compact">
+        <table className="module-result-table workflow-module-table">
+          <thead>
+            <tr><th>항목</th><th>상태</th><th>근거</th></tr>
+          </thead>
+          <tbody>
+            {requiredEntries.length ? requiredEntries.map(([key, value]) => (
+              <tr key={key}>
+                <td>{key}</td>
+                <td>{value.status || "-"}</td>
+                <td>{value.evidence || "-"}</td>
+              </tr>
+            )) : <tr><td colSpan={3}>표시할 필수항목 결과가 없습니다.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </aside>
   );
 }
 
@@ -940,7 +1076,8 @@ function readWorkflowDraft(): WorkflowDraft | null {
       workflowDescription: typeof parsed.workflowDescription === "string" ? parsed.workflowDescription : "",
       nodes: parsed.nodes.map(normalizeWorkflowNode),
       edges: parsed.edges.map(normalizeWorkflowEdge),
-      selectedNodeId: typeof parsed.selectedNodeId === "string" ? parsed.selectedNodeId : parsed.nodes[0]?.id ?? null
+      selectedNodeId: typeof parsed.selectedNodeId === "string" ? parsed.selectedNodeId : parsed.nodes[0]?.id ?? null,
+      settingsCollapsed: Boolean(parsed.settingsCollapsed)
     };
   } catch {
     return null;
@@ -1062,6 +1199,31 @@ function branchKeyLabel(key: string) {
   if (key.startsWith("class:")) return key.replace("class:", "class · ");
   if (key === "needs_review") return "needs review";
   return key;
+}
+
+function workflowStatusLabel(status: string | null | undefined) {
+  const labels: Record<string, string> = {
+    queued: "대기 중",
+    running: "실행 중",
+    completed: "완료",
+    completed_with_errors: "일부 실패",
+    failed: "실패",
+    canceled: "취소됨",
+    needs_review: "검토 필요",
+    complete: "완료",
+    incomplete: "누락 있음"
+  };
+  return status ? labels[status] ?? status : "-";
+}
+
+function workflowDocumentPageSrc(page: WorkflowDocumentPage) {
+  return `${API_BASE}${page.image_url}?v=${page.width}x${page.height}`;
+}
+
+function formatWorkflowValue(value: unknown) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {

@@ -250,6 +250,17 @@ type VlmSettings = {
   env_path: string;
 };
 
+type HomeWorkflowRun = {
+  id: string;
+  status: string;
+  total_count: number;
+  completed_count: number;
+  failed_count: number;
+  needs_review_count: number;
+  progress: number;
+  created_at: string;
+};
+
 type MaintenanceClearResponse = {
   status: string;
   counts: Record<string, number>;
@@ -595,6 +606,7 @@ export default function App() {
   const [rawHistoryCollapsed, setRawHistoryCollapsed] = useState(false);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [vlmSettings, setVlmSettings] = useState<VlmSettings | null>(null);
+  const [homeWorkflowRuns, setHomeWorkflowRuns] = useState<HomeWorkflowRun[]>([]);
   const [vlmApiKey, setVlmApiKey] = useState("");
   const [vlmModelName, setVlmModelName] = useState("");
   const [libreOfficePath, setLibreOfficePath] = useState("/Applications/LibreOffice.app/Contents/MacOS/soffice");
@@ -864,7 +876,7 @@ export default function App() {
   }
 
   async function refreshAll(reloadCurrent = true) {
-    await Promise.all([refreshHistory(), refreshRawHistory(), refreshSystemStatus(), loadVlmSettings(), refreshBatches(), searchArchive()]);
+    await Promise.all([refreshHistory(), refreshRawHistory(), refreshSystemStatus(), loadVlmSettings(), refreshHomeWorkflowRuns(), refreshBatches(), searchArchive()]);
     if (reloadCurrent) {
       await refreshCurrentWorkspace();
     }
@@ -988,6 +1000,14 @@ export default function App() {
       setSystemStatus(await api<SystemStatus>("/api/system/status"));
     } catch {
       setSystemStatus(null);
+    }
+  }
+
+  async function refreshHomeWorkflowRuns() {
+    try {
+      setHomeWorkflowRuns(await api<HomeWorkflowRun[]>("/api/workflow-runs?limit=3"));
+    } catch {
+      setHomeWorkflowRuns([]);
     }
   }
 
@@ -2055,6 +2075,9 @@ export default function App() {
           onClassifier={() => navigateMode("classifier")}
           onRequiredChecker={() => navigateMode("required-checker")}
           onWorkflow={() => navigateMode("workflow")}
+          systemStatus={systemStatus}
+          vlmSettings={vlmSettings}
+          workflowRuns={homeWorkflowRuns}
         />
       ) : mode === "raw" ? (
         <RawWorkspace
@@ -2460,14 +2483,47 @@ function HomeScreen(props: {
   onClassifier: () => void;
   onRequiredChecker: () => void;
   onWorkflow: () => void;
+  systemStatus: SystemStatus | null;
+  vlmSettings: VlmSettings | null;
+  workflowRuns: HomeWorkflowRun[];
 }) {
   return (
     <main className="home-screen">
-      <section className="home-hero">
-        <p className="eyebrow">작업 공간</p>
-        <h2>문서 처리 방식을 선택하세요</h2>
-        <p>대량 문서의 원본 정보 추출, 핵심값 추출, 문서 분류, 필수 항목 확인을 하나의 workspace에서 자동화합니다.</p>
+      <section className="home-hero home-hero-workflow">
+        <div>
+          <p className="eyebrow">작업 공간</p>
+          <h2>워크플로우로 문서 처리를 한 번에 연결하세요</h2>
+          <p>분류, 핵심값 추출, 필수 항목 확인을 하나의 파이프라인으로 묶고 배치 실행 결과를 한 화면에서 검수합니다.</p>
+          <button type="button" className="primary home-workflow-cta" onClick={props.onWorkflow}>
+            <FileJson size={18} />
+            워크플로우 빌더 열기
+          </button>
+        </div>
+        <div className="home-workflow-panel">
+          <div className="home-pipeline-preview" aria-hidden="true">
+            {["Input", "Classify", "Branch", "KIE", "Required", "Export"].map((item) => (
+              <span key={item}>{item}</span>
+            ))}
+          </div>
+          <div className="home-ops-grid">
+            <span><strong>{props.systemStatus?.is_mock ? "Mock" : props.systemStatus?.has_vlm_credentials ? "Ready" : "Setup"}</strong> VLM</span>
+            <span><strong>{props.vlmSettings?.batch_max_workers ?? "-"}</strong> Workers</span>
+            <span><strong>{props.workflowRuns[0] ? `${Math.round(props.workflowRuns[0].progress * 100)}%` : "-"}</strong> Recent</span>
+          </div>
+          <div className="home-recent-runs">
+            {props.workflowRuns.length ? props.workflowRuns.map((run) => (
+              <button key={run.id} type="button" onClick={props.onWorkflow}>
+                <span>{statusLabel(run.status)}</span>
+                <strong>{run.completed_count + run.failed_count + run.needs_review_count}/{run.total_count}</strong>
+              </button>
+            )) : <span>최근 workflow run이 없습니다.</span>}
+          </div>
+        </div>
       </section>
+      <div className="home-section-title">
+        <p className="eyebrow">단일 모듈 도구</p>
+        <h3>필요한 기능만 따로 실행할 수도 있습니다</h3>
+      </div>
       <section className="feature-grid">
         <button className="feature-card active-feature" onClick={props.onRaw}>
           <FileUp size={24} />
@@ -2488,11 +2544,6 @@ function HomeScreen(props: {
           <CheckSquare size={24} />
           <strong>필수 항목 확인</strong>
           <span>값의 정확성보다 필수 항목이 존재하는지 여부를 빠르게 확인합니다.</span>
-        </button>
-        <button className="feature-card active-feature" onClick={props.onWorkflow}>
-          <FileJson size={24} />
-          <strong>워크플로우 빌더</strong>
-          <span>화이트보드에서 여러 모듈을 연결해 문서 처리 파이프라인을 실행합니다.</span>
         </button>
       </section>
     </main>

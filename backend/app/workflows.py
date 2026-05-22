@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
+from app.config import get_settings
 from app.database import SessionLocal
 from app.document_modules import classification_result_to_dict, required_field_result_to_dict, run_classification_job, run_required_field_check_job
 from app.extraction import result_to_dict, run_extraction_job
@@ -138,8 +140,25 @@ def run_workflow_run(run_id: str) -> None:
     finally:
         db.close()
 
-    for item_id in item_ids:
-        _run_workflow_item(item_id, graph)
+    max_workers = max(1, min(get_settings().batch_max_workers, len(item_ids)))
+    submitted_item_ids: set[str] = set()
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for item_id in item_ids:
+                future = executor.submit(_run_workflow_item, item_id, graph)
+                futures[future] = item_id
+                submitted_item_ids.add(item_id)
+            for future in as_completed(futures):
+                item_id = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    _mark_workflow_item_failed(item_id, f"Workflow worker failed: {exc}")
+    except Exception as exc:
+        for item_id in set(item_ids) - submitted_item_ids:
+            _mark_workflow_item_failed(item_id, f"Workflow worker did not start item: {exc}")
+        raise
 
     _finalize_workflow_run(run_id)
 
@@ -181,6 +200,11 @@ def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
                 "filename": item.filename,
                 "node_results": {},
                 "branch_path": None,
+                "path_node_ids": [],
+                "completed_node_ids": [],
+                "current_node_id": None,
+                "current_node_kind": None,
+                "current_node_label": None,
             },
         )
         db.commit()
@@ -201,23 +225,79 @@ def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
         db.commit()
     except Exception as exc:
         db.rollback()
-        failed = db.get(WorkflowRunItem, item_id)
-        if failed:
-            failed.status = "failed"
-            failed.error_message = str(exc)
-            failed.completed_at = datetime.utcnow()
-            failed.result_json = _json_dumps(
-                {
-                    "document_id": failed.document_id,
-                    "filename": failed.filename,
-                    "node_results": {},
-                    "branch_path": None,
-                    "error_message": str(exc),
-                },
-            )
-            db.commit()
+        _mark_workflow_item_failed(item_id, str(exc), db=db)
     finally:
         db.close()
+
+
+def _mark_workflow_item_failed(item_id: str, message: str, db: Session | None = None) -> None:
+    owns_session = db is None
+    session = db or SessionLocal()
+    try:
+        failed = session.get(WorkflowRunItem, item_id)
+        if not failed:
+            return
+        existing = _json_or_empty(failed.result_json)
+        failed.status = "failed"
+        failed.error_message = message
+        failed.completed_at = datetime.utcnow()
+        failed.result_json = _json_dumps(
+            {
+                "document_id": failed.document_id,
+                "filename": failed.filename,
+                "node_results": existing.get("node_results", {}),
+                "branch_path": existing.get("branch_path"),
+                "path_node_ids": existing.get("path_node_ids", []),
+                "completed_node_ids": existing.get("completed_node_ids", []),
+                "current_node_id": None,
+                "current_node_kind": None,
+                "current_node_label": None,
+                "error_message": message,
+            },
+        )
+        log_audit_event(
+            session,
+            entity_type="workflow_run_item",
+            entity_id=failed.id,
+            action="failed",
+            message=f"Workflow item failed: {message}",
+            metadata={"document_id": failed.document_id, "workflow_run_id": failed.run_id},
+        )
+        session.commit()
+    finally:
+        if owns_session:
+            session.close()
+
+
+def _save_workflow_item_progress(
+    db: Session,
+    item: WorkflowRunItem,
+    *,
+    node_results: dict[str, Any],
+    branch_path: str | None,
+    visited: list[str],
+    completed_node_ids: list[str],
+    current_node_id: str | None = None,
+    current_node_kind: str | None = None,
+    current_node_label: str | None = None,
+) -> None:
+    item.result_json = _json_dumps(
+        {
+            "document_id": item.document_id,
+            "filename": item.filename,
+            "status": item.status,
+            "error_message": item.error_message,
+            "branch_path": branch_path,
+            "path_node_ids": visited,
+            "completed_node_ids": completed_node_ids,
+            "current_node_id": current_node_id,
+            "current_node_kind": current_node_kind,
+            "current_node_label": current_node_label,
+            "node_results": node_results,
+            **_workflow_summary(node_results, branch_path),
+        },
+    )
+    db.commit()
 
 
 def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowGraph) -> dict[str, Any]:
@@ -225,6 +305,7 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
     current_id = _single_next_node_id(graph, input_node_id)
     node_results: dict[str, Any] = {}
     visited: list[str] = []
+    completed_node_ids: list[str] = []
     branch_path: str | None = None
     status = "completed"
     error_message: str | None = None
@@ -235,6 +316,17 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
         visited.append(current_id)
         node = graph.nodes[current_id]
         kind = _node_kind(node)
+        _save_workflow_item_progress(
+            db,
+            item,
+            node_results=node_results,
+            branch_path=branch_path,
+            visited=visited,
+            completed_node_ids=completed_node_ids,
+            current_node_id=current_id,
+            current_node_kind=kind,
+            current_node_label=_node_label(node),
+        )
         if kind == "classifier":
             node_result = _execute_classifier_node(db, item.document_id, node)
             node_results[current_id] = node_result
@@ -244,6 +336,15 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
                 break
             if node_result.get("classification", {}).get("status") != "classified":
                 status = "needs_review"
+            completed_node_ids.append(current_id)
+            _save_workflow_item_progress(
+                db,
+                item,
+                node_results=node_results,
+                branch_path=branch_path,
+                visited=visited,
+                completed_node_ids=completed_node_ids,
+            )
             current_id = _single_next_node_id(graph, current_id)
             continue
         if kind == "branch":
@@ -256,9 +357,19 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
                     "branch_key": branch_path,
                     "downstream_skipped": True,
                 }
+                completed_node_ids.append(current_id)
                 break
             branch_path = _branch_edge_key(branch_edge)
             node_results[current_id] = {"kind": kind, "status": "completed", "branch_key": branch_path}
+            completed_node_ids.append(current_id)
+            _save_workflow_item_progress(
+                db,
+                item,
+                node_results=node_results,
+                branch_path=branch_path,
+                visited=visited,
+                completed_node_ids=completed_node_ids,
+            )
             current_id = branch_edge["target"]
             continue
         if kind == "kie":
@@ -270,6 +381,15 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
                 break
             if node_result["status"] == "needs_review":
                 status = "needs_review"
+            completed_node_ids.append(current_id)
+            _save_workflow_item_progress(
+                db,
+                item,
+                node_results=node_results,
+                branch_path=branch_path,
+                visited=visited,
+                completed_node_ids=completed_node_ids,
+            )
             current_id = _single_next_node_id(graph, current_id)
             continue
         if kind == "required-checker":
@@ -282,14 +402,33 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
             overall = node_result.get("required_check", {}).get("overall_status")
             if node_result["status"] == "needs_review" or overall in {"incomplete", "needs_review"}:
                 status = "needs_review"
+            completed_node_ids.append(current_id)
+            _save_workflow_item_progress(
+                db,
+                item,
+                node_results=node_results,
+                branch_path=branch_path,
+                visited=visited,
+                completed_node_ids=completed_node_ids,
+            )
             current_id = _single_next_node_id(graph, current_id)
             continue
         if kind == "merge":
             node_results[current_id] = {"kind": kind, "status": "completed"}
+            completed_node_ids.append(current_id)
+            _save_workflow_item_progress(
+                db,
+                item,
+                node_results=node_results,
+                branch_path=branch_path,
+                visited=visited,
+                completed_node_ids=completed_node_ids,
+            )
             current_id = _single_next_node_id(graph, current_id)
             continue
         if kind == "export":
             node_results[current_id] = {"kind": kind, "status": "completed"}
+            completed_node_ids.append(current_id)
             break
         current_id = _single_next_node_id(graph, current_id)
 
@@ -301,6 +440,10 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
         "error_message": error_message,
         "branch_path": branch_path,
         "path_node_ids": visited,
+        "completed_node_ids": completed_node_ids,
+        "current_node_id": None,
+        "current_node_kind": None,
+        "current_node_label": None,
         "node_results": node_results,
         **summary,
     }
@@ -653,6 +796,12 @@ def _node_kind(node: dict[str, Any]) -> str:
         "required_field_checker": "required-checker",
     }
     return aliases.get(str(kind), str(kind))
+
+
+def _node_label(node: dict[str, Any]) -> str:
+    data = node.get("data") if isinstance(node.get("data"), dict) else {}
+    label = data.get("label") or node.get("label") or _node_kind(node)
+    return str(label)
 
 
 def _node_config_value(node: dict[str, Any], key: str) -> str | None:

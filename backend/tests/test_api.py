@@ -2,6 +2,8 @@ import base64
 import io
 import json
 import os
+import threading
+import time
 from types import SimpleNamespace
 import zipfile
 
@@ -14,6 +16,7 @@ except ImportError:  # pragma: no cover - compatibility for older PyMuPDF instal
 from PIL import Image
 
 from app.config import get_settings
+from app.models import WorkflowRunItem
 from tests.conftest import get_client
 
 
@@ -1370,6 +1373,159 @@ def test_workflow_branch_without_downstream_path_completes_classification_only()
             assert item["result"]["kie_values"] == {}
             assert item["result"]["required_items"] == {}
     finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_progress_payload_marks_current_and_completed_nodes(monkeypatch) -> None:
+    observed_current_nodes: list[str | None] = []
+
+    def fake_classifier(db, document_id, node):
+        item = db.query(WorkflowRunItem).filter(WorkflowRunItem.document_id == document_id).one()
+        observed_current_nodes.append(json.loads(item.result_json).get("current_node_kind"))
+        return {
+            "kind": "classifier",
+            "status": "completed",
+            "classification": {"status": "classified", "class_name": "contract"},
+        }
+
+    monkeypatch.setattr("app.workflows._execute_classifier_node", fake_classifier)
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="workflow_progress_schema")
+            classifier = create_document_classifier(client, name="workflow_progress_classifier")
+            checklist = create_required_field_checklist(client, name="workflow_progress_checklist")
+            definition = workflow_definition(schema["id"], classifier["id"], checklist["id"])
+            definition["edges"] = [edge for edge in definition["edges"] if edge["source"] != "branch"]
+            workflow = client.post("/api/workflows", json={"name": "progress_payload", "definition": definition})
+            assert workflow.status_code == 200, workflow.text
+
+            run_response = client.post(
+                f"/api/workflows/{workflow.json()['id']}/runs",
+                files=[("files", ("progress.png", ONE_BY_ONE_PNG, "image/png"))],
+            )
+            assert run_response.status_code == 200, run_response.text
+            run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
+            result = run["items"][0]["result"]
+            assert observed_current_nodes == ["classifier"]
+            assert result["current_node_id"] is None
+            assert "classifier" in result["completed_node_ids"]
+            assert "branch" in result["completed_node_ids"]
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_run_uses_batch_max_workers(monkeypatch) -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_execute(db, item, graph):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return {
+            "document_id": item.document_id,
+            "filename": item.filename,
+            "status": "completed",
+            "error_message": None,
+            "branch_path": "class:contract",
+            "path_node_ids": ["classifier"],
+            "completed_node_ids": ["classifier"],
+            "current_node_id": None,
+            "current_node_kind": None,
+            "current_node_label": None,
+            "node_results": {},
+            "classification": {"status": "classified", "class_name": "contract"},
+            "kie_values": {},
+            "required_overall_status": None,
+            "required_items": {},
+        }
+
+    monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_execute)
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        os.environ["BATCH_MAX_WORKERS"] = "2"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="workflow_parallel_schema")
+            classifier = create_document_classifier(client, name="workflow_parallel_classifier")
+            checklist = create_required_field_checklist(client, name="workflow_parallel_checklist")
+            workflow = client.post(
+                "/api/workflows",
+                json={"name": "parallel_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+            )
+            assert workflow.status_code == 200, workflow.text
+            run_response = client.post(
+                f"/api/workflows/{workflow.json()['id']}/runs",
+                files=[("files", (f"doc_{index}.png", ONE_BY_ONE_PNG, "image/png")) for index in range(4)],
+            )
+            assert run_response.status_code == 200, run_response.text
+            run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
+            assert run["status"] == "completed"
+            assert max_active == 2
+    finally:
+        os.environ["BATCH_MAX_WORKERS"] = "4"
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_parallel_item_failure_does_not_stop_other_items(monkeypatch) -> None:
+    def fake_execute(db, item, graph):
+        if item.filename == "doc_1.png":
+            raise RuntimeError("synthetic workflow failure")
+        return {
+            "document_id": item.document_id,
+            "filename": item.filename,
+            "status": "completed",
+            "error_message": None,
+            "branch_path": "class:contract",
+            "path_node_ids": ["classifier"],
+            "completed_node_ids": ["classifier"],
+            "current_node_id": None,
+            "current_node_kind": None,
+            "current_node_label": None,
+            "node_results": {},
+            "classification": {"status": "classified", "class_name": "contract"},
+            "kie_values": {},
+            "required_overall_status": None,
+            "required_items": {},
+        }
+
+    monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_execute)
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        os.environ["BATCH_MAX_WORKERS"] = "3"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="workflow_failure_schema")
+            classifier = create_document_classifier(client, name="workflow_failure_classifier")
+            checklist = create_required_field_checklist(client, name="workflow_failure_checklist")
+            workflow = client.post(
+                "/api/workflows",
+                json={"name": "parallel_failure", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+            )
+            assert workflow.status_code == 200, workflow.text
+            run_response = client.post(
+                f"/api/workflows/{workflow.json()['id']}/runs",
+                files=[("files", (f"doc_{index}.png", ONE_BY_ONE_PNG, "image/png")) for index in range(3)],
+            )
+            assert run_response.status_code == 200, run_response.text
+            run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
+            statuses = {item["filename"]: item["status"] for item in run["items"]}
+            assert run["status"] == "completed_with_errors"
+            assert statuses["doc_1.png"] == "failed"
+            assert statuses["doc_0.png"] == "completed"
+            assert statuses["doc_2.png"] == "completed"
+    finally:
+        os.environ["BATCH_MAX_WORKERS"] = "4"
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
 

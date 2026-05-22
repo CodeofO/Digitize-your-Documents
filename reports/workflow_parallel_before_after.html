@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workflow Parallelization Before / After</title>
+  <style>
+    :root { color: #1d2529; background: #f6f7f4; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; padding: 32px; }
+    main { max-width: 1120px; margin: 0 auto; display: grid; gap: 20px; }
+    section { background: #fff; border: 1px solid #d9e2dc; border-radius: 12px; padding: 20px; box-shadow: 0 12px 30px rgba(31,45,41,.06); }
+    h1, h2, p { margin-top: 0; }
+    .grid { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .metric { background: #f3f8f6; border: 1px solid #c8ded8; border-radius: 10px; padding: 14px; }
+    .metric strong { display: block; font-size: 28px; color: #157f78; }
+    .timeline { display: grid; gap: 10px; }
+    .row { display: grid; gap: 8px; grid-template-columns: 120px 1fr; align-items: center; }
+    .bar { height: 18px; border-radius: 999px; background: #e3e9e5; overflow: hidden; }
+    .bar span { display: block; height: 100%; background: #157f78; }
+    .bar.before span { width: 100%; background: #9a6a24; }
+    .bar.after span { width: 32%; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #e6ece8; padding: 10px; text-align: left; }
+    th { color: #5f6e65; font-size: 12px; text-transform: uppercase; }
+    code { background: #edf2ef; border-radius: 6px; padding: 2px 5px; }
+    @media (max-width: 760px) { body { padding: 18px; } .grid, .row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <section>
+    <h1>Workflow Parallelization Before / After</h1>
+    <p>워크플로우 배치 실행은 기존에 문서를 하나씩 순차 처리했다. 변경 후에는 <code>BATCH_MAX_WORKERS</code>를 사용해 문서 단위 workflow item을 병렬 실행하고, 각 worker는 독립 DB session으로 상태를 저장한다.</p>
+  </section>
+
+  <section class="grid">
+    <div class="metric">
+      <strong>Before</strong>
+      <p>1개 background task 안에서 item을 순차 실행. 4개 문서와 3단계 VLM 경로라면 대기 시간이 거의 선형으로 증가한다.</p>
+    </div>
+    <div class="metric">
+      <strong>After</strong>
+      <p>최대 <code>BATCH_MAX_WORKERS</code>개 문서를 동시에 실행. 한 문서 실패가 다른 문서 처리를 막지 않는다.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Expected Runtime Shape</h2>
+    <div class="timeline">
+      <div class="row"><strong>Before</strong><div class="bar before"><span></span></div></div>
+      <div class="row"><strong>After</strong><div class="bar after"><span></span></div></div>
+    </div>
+    <p style="margin-top:12px">예: 문서 8개, 문서당 평균 30초, workers=4라면 이상적인 wall time은 약 240초에서 약 60초 수준으로 줄어든다. 실제 시간은 provider rate limit, 문서 페이지 수, schema/region 수에 따라 달라진다.</p>
+  </section>
+
+  <section>
+    <h2>Implementation Notes</h2>
+    <table>
+      <thead><tr><th>Area</th><th>Before</th><th>After</th></tr></thead>
+      <tbody>
+        <tr><td>Scheduling</td><td>for-loop item execution</td><td>ThreadPoolExecutor + as_completed</td></tr>
+        <tr><td>Concurrency limit</td><td>1</td><td><code>min(BATCH_MAX_WORKERS, item_count)</code></td></tr>
+        <tr><td>Failure isolation</td><td>worker path could block perceived progress</td><td>failed item saved, other items continue</td></tr>
+        <tr><td>UI feedback</td><td>queued/running/completed only</td><td>current node + completed node ids during polling</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>
