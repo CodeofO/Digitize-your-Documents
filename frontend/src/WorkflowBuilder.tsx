@@ -26,6 +26,8 @@ import {
   GitMerge,
   Library,
   Loader2,
+  Maximize2,
+  Minimize2,
   PanelRightClose,
   PanelRightOpen,
   Play,
@@ -210,6 +212,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [selectedDocument, setSelectedDocument] = useState<WorkflowDocument | null>(null);
   const [documentLoading, setDocumentLoading] = useState(false);
   const [activeDocumentPage, setActiveDocumentPage] = useState(0);
+  const [resultsFocused, setResultsFocused] = useState(false);
 
   const activeWorkflow = workflows.find((workflow) => workflow.id === activeWorkflowId) ?? null;
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
@@ -334,6 +337,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       if (!activeRunId && loadedRuns[0]) {
         setActiveRunId(loadedRuns[0].id);
         setSelectedItemId(loadedRuns[0].items[0]?.id ?? null);
+        setResultsFocused(true);
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 데이터를 불러오지 못했습니다.");
@@ -413,6 +417,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       setSelectedItemId(run.items[0]?.id ?? null);
       setSelectedDocument(null);
       setActiveDocumentPage(0);
+      setResultsFocused(true);
       setMessage(`${uploadMode}을 시작했습니다.`);
       void refreshRun(run.id);
     } catch (exc) {
@@ -460,7 +465,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
 
   return (
     <ReactFlowProvider>
-      <main className={`workflow-builder ${settingsCollapsed ? "settings-collapsed" : ""}`}>
+      <main className={`workflow-builder ${settingsCollapsed ? "settings-collapsed" : ""} ${resultsFocused && activeRun ? "results-focused" : ""}`}>
         <aside className="workflow-palette" aria-label="워크플로우 모듈">
           <div className="workflow-panel-header">
             <p className="eyebrow">Builder</p>
@@ -491,7 +496,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
           </div>
         </aside>
 
-        <section className="workflow-canvas-shell">
+        <section className={`workflow-canvas-shell ${resultsFocused && activeRun ? "results-focused" : ""}`}>
           <div className="workflow-toolbar">
             <div className="workflow-title-fields">
               <input value={workflowName} onChange={(event) => setWorkflowName(event.target.value)} aria-label="워크플로우 이름" />
@@ -530,6 +535,12 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
                   <Unlink2 size={15} /> 선 삭제
                 </button>
               </div>
+            )}
+            {activeRun && (
+              <button type="button" className="secondary" onClick={() => setResultsFocused((current) => !current)}>
+                {resultsFocused ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+                {resultsFocused ? "캔버스 보기" : "결과 크게"}
+              </button>
             )}
             <span className="workflow-autosave">
               자동 저장 {draftSavedAt ?? "대기"}
@@ -601,9 +612,11 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
               document={selectedDocument}
               documentLoading={documentLoading}
               activePage={activeDocumentPage}
+              focused={resultsFocused}
               onSelectItem={(itemId) => setSelectedItemId(itemId)}
               onPage={setActiveDocumentPage}
               onRefresh={() => void refreshRun(activeRun.id)}
+              onToggleFocus={() => setResultsFocused((current) => !current)}
             />
           )}
         </section>
@@ -774,9 +787,11 @@ function WorkflowRunResults(props: {
   document: WorkflowDocument | null;
   documentLoading: boolean;
   activePage: number;
+  focused: boolean;
   onSelectItem: (itemId: string) => void;
   onPage: (page: number) => void;
   onRefresh: () => void;
+  onToggleFocus: () => void;
 }) {
   const finishedCount = props.run.completed_count + props.run.failed_count + props.run.needs_review_count;
   return (
@@ -791,7 +806,13 @@ function WorkflowRunResults(props: {
           <span><strong>{props.run.items.filter((item) => item.status === "running").length}</strong> 실행 중</span>
           <span><strong>{props.run.items.filter((item) => item.status === "queued").length}</strong> 대기</span>
         </div>
-        <button type="button" className="secondary" onClick={props.onRefresh}>갱신</button>
+        <div className="workflow-results-actions">
+          <button type="button" className="secondary" onClick={props.onToggleFocus}>
+            {props.focused ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            {props.focused ? "캔버스 보기" : "결과만 보기"}
+          </button>
+          <button type="button" className="secondary" onClick={props.onRefresh}>갱신</button>
+        </div>
       </div>
       <progress className="workflow-run-progress" value={props.run.progress} max={1} />
       <div className="workflow-run-workbench">

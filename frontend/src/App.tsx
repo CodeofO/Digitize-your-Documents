@@ -2494,56 +2494,90 @@ function HomeScreen(props: {
           <p className="eyebrow">작업 공간</p>
           <h2>워크플로우로 문서 처리를 한 번에 연결하세요</h2>
           <p>분류, 핵심값 추출, 필수 항목 확인을 하나의 파이프라인으로 묶고 배치 실행 결과를 한 화면에서 검수합니다.</p>
-          <button type="button" className="primary home-workflow-cta" onClick={props.onWorkflow}>
-            <FileJson size={18} />
-            워크플로우 빌더 열기
-          </button>
+          <div className="home-hero-actions">
+            <button type="button" className="primary home-workflow-cta" onClick={props.onWorkflow}>
+              <FileJson size={18} />
+              워크플로우 빌더 열기
+            </button>
+            <div className="home-ops-row" aria-label="운영 상태">
+              <span><strong>{props.systemStatus?.is_mock ? "Mock" : props.systemStatus?.has_vlm_credentials ? "Ready" : "Setup"}</strong> VLM</span>
+              <span><strong>{props.vlmSettings?.batch_max_workers ?? "-"}</strong> Workers</span>
+            </div>
+          </div>
         </div>
         <div className="home-workflow-panel">
+          <div className="home-workflow-panel-head">
+            <span>예시 파이프라인</span>
+            <strong>혼합 서류 접수 자동화</strong>
+          </div>
           <div className="home-pipeline-preview" aria-hidden="true">
-            {["Input", "Classify", "Branch", "KIE", "Required", "Export"].map((item) => (
-              <span key={item}>{item}</span>
+            {["Upload", "Classify", "Branch", "Extract", "Check", "Export"].map((item, index) => (
+              <span key={item}>
+                <i>{index + 1}</i>
+                {item}
+              </span>
             ))}
           </div>
-          <div className="home-ops-grid">
-            <span><strong>{props.systemStatus?.is_mock ? "Mock" : props.systemStatus?.has_vlm_credentials ? "Ready" : "Setup"}</strong> VLM</span>
-            <span><strong>{props.vlmSettings?.batch_max_workers ?? "-"}</strong> Workers</span>
-            <span><strong>{props.workflowRuns[0] ? `${Math.round(props.workflowRuns[0].progress * 100)}%` : "-"}</strong> Recent</span>
-          </div>
-          <div className="home-recent-runs">
-            {props.workflowRuns.length ? props.workflowRuns.map((run) => (
-              <button key={run.id} type="button" onClick={props.onWorkflow}>
-                <span>{statusLabel(run.status)}</span>
-                <strong>{run.completed_count + run.failed_count + run.needs_review_count}/{run.total_count}</strong>
-              </button>
-            )) : <span>최근 workflow run이 없습니다.</span>}
+          <div className="home-example-branches">
+            <div>
+              <strong>신청서</strong>
+              <span>KIE schema 실행</span>
+            </div>
+            <div>
+              <strong>동의서</strong>
+              <span>필수 서명/체크 확인</span>
+            </div>
+            <div>
+              <strong>unknown</strong>
+              <span>분류만 export</span>
+            </div>
           </div>
         </div>
       </section>
       <div className="home-section-title">
-        <p className="eyebrow">단일 모듈 도구</p>
-        <h3>필요한 기능만 따로 실행할 수도 있습니다</h3>
+        <p className="eyebrow">핵심 기능</p>
+        <h3>필요한 작업을 바로 실행하거나 워크플로우에 연결하세요</h3>
       </div>
       <section className="feature-grid">
         <button className="feature-card active-feature" onClick={props.onRaw}>
-          <FileUp size={24} />
+          <span className="feature-icon"><FileUp size={26} /></span>
           <strong>원문 데이터 추출</strong>
-          <span>DOCX, XLSX, PPTX, PDF를 PDF 미리보기와 HTML로 변환합니다.</span>
+          <span>DOCX, XLSX, PPTX, PDF를 PDF 미리보기와 HTML 원문으로 변환합니다.</span>
+          <div className="feature-points">
+            <small>Office preview</small>
+            <small>HTML 원문 확인</small>
+          </div>
+          <em>RAW workspace 열기</em>
         </button>
         <button className="feature-card active-feature" onClick={props.onKie}>
-          <Sparkles size={24} />
+          <span className="feature-icon"><Sparkles size={26} /></span>
           <strong>핵심 정보 추출</strong>
-          <span>PDF, 이미지, DOCX, PPTX에서 schema에 맞는 값만 추출합니다.</span>
+          <span>저장된 schema와 region 기준으로 필요한 field/value/evidence만 구조화합니다.</span>
+          <div className="feature-points">
+            <small>Schema library</small>
+            <small>Region crop</small>
+          </div>
+          <em>KIE workspace 열기</em>
         </button>
         <button className="feature-card active-feature" onClick={props.onClassifier}>
-          <ClipboardList size={24} />
+          <span className="feature-icon"><ClipboardList size={26} /></span>
           <strong>문서 분류</strong>
-          <span>사용자가 정의한 후보 class와 미분류 허용 규칙으로 문서를 자동 분류합니다.</span>
+          <span>사용자가 정의한 class 후보로 문서 종류를 판단하고 branch 실행의 기준을 만듭니다.</span>
+          <div className="feature-points">
+            <small>Class 후보 관리</small>
+            <small>unknown 허용</small>
+          </div>
+          <em>Classifier 열기</em>
         </button>
         <button className="feature-card active-feature" onClick={props.onRequiredChecker}>
-          <CheckSquare size={24} />
+          <span className="feature-icon"><CheckSquare size={26} /></span>
           <strong>필수 항목 확인</strong>
-          <span>값의 정확성보다 필수 항목이 존재하는지 여부를 빠르게 확인합니다.</span>
+          <span>서명, 날짜, 체크박스, 도장처럼 빠지면 안 되는 항목의 존재 여부를 확인합니다.</span>
+          <div className="feature-points">
+            <small>AI checklist 추천</small>
+            <small>누락/불확실 검수</small>
+          </div>
+          <em>Required Checker 열기</em>
         </button>
       </section>
     </main>

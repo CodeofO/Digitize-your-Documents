@@ -224,6 +224,16 @@ textarea {
   grid-template-columns: minmax(210px, 250px) minmax(0, 1fr);
 }
 
+.workflow-builder.results-focused {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workflow-builder.results-focused .workflow-palette,
+.workflow-builder.results-focused .workflow-settings,
+.workflow-builder.results-focused .workflow-settings-toggle {
+  display: none;
+}
+
 .workflow-palette,
 .workflow-settings,
 .workflow-canvas-shell,
@@ -312,6 +322,10 @@ textarea {
   position: relative;
 }
 
+.workflow-canvas-shell.results-focused {
+  min-height: 0;
+}
+
 .workflow-toolbar,
 .workflow-run-bar,
 .workflow-results-header,
@@ -346,6 +360,10 @@ textarea {
   background-size: 24px 24px;
   flex: 1;
   min-height: 360px;
+}
+
+.workflow-canvas-shell.results-focused .workflow-canvas {
+  display: none;
 }
 
 .workflow-node {
@@ -577,6 +595,12 @@ textarea {
   padding: 10px 12px;
 }
 
+.workflow-results-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
 .workflow-run-kpis {
   display: flex;
   flex-wrap: wrap;
@@ -603,6 +627,28 @@ textarea {
   display: grid;
   grid-template-columns: minmax(190px, 240px) minmax(360px, 1fr) minmax(320px, 420px);
   min-height: 340px;
+}
+
+.workflow-canvas-shell.results-focused .workflow-results {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.workflow-canvas-shell.results-focused .workflow-run-workbench {
+  flex: 1;
+  grid-template-columns: minmax(210px, 280px) minmax(520px, 1fr) minmax(380px, 520px);
+  min-height: 0;
+}
+
+.workflow-canvas-shell.results-focused .workflow-preview-stage {
+  padding: 24px;
+}
+
+.workflow-canvas-shell.results-focused .workflow-preview-image-wrap {
+  max-width: 980px;
+  width: min(100%, 860px);
 }
 
 .workflow-run-rail {
@@ -865,6 +911,10 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .workflow-canvas-shell.results-focused .workflow-run-workbench {
+    grid-template-columns: 1fr;
+  }
+
   .workflow-settings-toggle {
     bottom: 18px;
     position: fixed;
@@ -930,30 +980,30 @@ textarea {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 18px;
-  margin-top: 18px;
+  gap: 14px;
+  margin-top: 12px;
   min-height: 0;
   overflow: auto;
 }
 
 .home-hero {
   border-bottom: 1px solid #d8ded8;
-  padding: 8px 0 18px;
+  padding: 0 0 12px;
 }
 
 .home-hero-workflow {
   align-items: stretch;
-  background: linear-gradient(135deg, #ffffff 0%, #f3f8f6 58%, #eef3ff 100%);
+  background: #ffffff;
   border: 1px solid #d9e4de;
   border-radius: 12px;
   display: grid;
-  gap: 22px;
-  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
-  padding: 24px;
+  gap: 18px;
+  grid-template-columns: minmax(420px, 0.95fr) minmax(520px, 1.05fr);
+  padding: 22px;
 }
 
 .home-hero h2 {
-  font-size: 30px;
+  font-size: 34px;
   letter-spacing: 0;
   margin: 0 0 8px;
 }
@@ -965,86 +1015,160 @@ textarea {
   max-width: 760px;
 }
 
-.home-workflow-cta {
+.home-hero-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
   margin-top: 18px;
 }
 
+.home-workflow-cta {
+  min-height: 44px;
+  padding-inline: 18px;
+}
+
+.home-ops-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.home-ops-row span {
+  background: #f4f8f5;
+  border: 1px solid #dce6df;
+  border-radius: 999px;
+  color: #53615a;
+  font-size: 12px;
+  padding: 8px 11px;
+}
+
+.home-ops-row strong {
+  color: #1d2529;
+}
+
 .home-workflow-panel {
-  background: rgba(255, 255, 255, 0.76);
-  border: 1px solid #dbe5df;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(35, 54, 49, 0.14) 1px, transparent 0),
+    #fbfcfa;
+  background-size: 22px 22px;
+  border: 1px solid #cddbd3;
   border-radius: 12px;
   box-shadow: 0 18px 44px rgba(31, 45, 41, 0.1);
   display: flex;
   flex-direction: column;
+  gap: 16px;
+  min-height: 230px;
+  padding: 18px;
+}
+
+.home-workflow-panel-head {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
   gap: 14px;
-  padding: 16px;
+}
+
+.home-workflow-panel-head span {
+  color: #66746d;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.home-workflow-panel-head strong {
+  color: #1d2529;
+  font-size: 18px;
 }
 
 .home-pipeline-preview {
   display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .home-pipeline-preview span {
-  background: #f7faf8;
-  border: 1px solid #d8e3dc;
-  border-radius: 8px;
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #d4e1da;
+  border-radius: 10px;
+  box-shadow: 0 8px 18px rgba(31, 45, 41, 0.06);
   color: #33423c;
+  display: grid;
   font-size: 12px;
   font-weight: 700;
-  padding: 10px;
+  gap: 7px;
+  min-height: 82px;
+  padding: 10px 8px;
+  position: relative;
   text-align: center;
 }
 
-.home-ops-grid {
+.home-pipeline-preview span:not(:last-child)::after {
+  background: #60736b;
+  content: "";
+  height: 2px;
+  position: absolute;
+  right: -11px;
+  top: 50%;
+  width: 12px;
+}
+
+.home-pipeline-preview i {
+  align-items: center;
+  background: #147a74;
+  border-radius: 999px;
+  color: #ffffff;
+  display: inline-flex;
+  font-style: normal;
+  height: 24px;
+  justify-content: center;
+  justify-self: center;
+  width: 24px;
+}
+
+.home-example-branches {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.home-ops-grid span {
-  background: #eef8f5;
-  border: 1px solid #c2ded8;
-  border-radius: 8px;
+.home-example-branches div {
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid #dce6df;
+  border-radius: 10px;
   color: #53615a;
   display: grid;
-  gap: 2px;
-  padding: 10px;
+  gap: 4px;
+  min-height: 66px;
+  padding: 12px;
 }
 
-.home-ops-grid strong {
+.home-example-branches strong {
   color: #1d2529;
-  font-size: 17px;
+  font-size: 14px;
 }
 
-.home-recent-runs {
+.home-section-title {
+  align-items: start;
   display: grid;
-  gap: 8px;
-}
-
-.home-recent-runs button,
-.home-recent-runs > span {
-  align-items: center;
-  background: #ffffff;
-  border: 1px solid #dde5df;
-  border-radius: 8px;
-  color: #53615a;
-  display: flex;
-  justify-content: space-between;
-  min-height: 40px;
-  padding: 8px 10px;
+  gap: 4px;
+  justify-content: start;
 }
 
 .home-section-title h3 {
-  font-size: 18px;
+  font-size: 21px;
   margin: 0;
 }
 
 .feature-grid {
   display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  flex: 1;
+  gap: 14px;
+  grid-auto-rows: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 380px;
 }
 
 .feature-card {
@@ -1052,21 +1176,58 @@ textarea {
   background: #ffffff;
   border-color: #d6ddd7;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   justify-content: flex-start;
-  min-height: 160px;
-  padding: 16px;
+  min-height: 180px;
+  padding: 20px;
+  position: relative;
   text-align: left;
 }
 
+.feature-icon {
+  align-items: center;
+  background: #eef7f4;
+  border: 1px solid #c8ded7;
+  border-radius: 12px;
+  color: #147a74;
+  display: inline-flex;
+  height: 46px;
+  justify-content: center;
+  width: 46px;
+}
+
 .feature-card strong {
-  font-size: 16px;
+  font-size: 20px;
 }
 
 .feature-card span {
   color: #53615a;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.45;
+}
+
+.feature-points {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.feature-points small {
+  background: #f4f8f5;
+  border: 1px solid #dce6df;
+  border-radius: 999px;
+  color: #53615a;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 9px;
+}
+
+.feature-card em {
+  color: #147a74;
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 800;
+  margin-top: auto;
 }
 
 .feature-card.active-feature:hover,
@@ -3835,6 +3996,14 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .home-pipeline-preview {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .home-pipeline-preview span:nth-child(3)::after {
+    display: none;
+  }
+
   .utility-dock {
     grid-template-columns: 1fr;
   }
@@ -3934,12 +4103,16 @@ pre {
   .region-toolbar,
   .region-manager-actions,
   .region-list-row,
-  .settings-grid,
-  .feature-grid,
-  .home-ops-grid,
+    .settings-grid,
+    .feature-grid,
+  .home-example-branches,
   .home-pipeline-preview,
   .diff-grid {
     grid-template-columns: 1fr;
+  }
+
+  .home-pipeline-preview span::after {
+    display: none;
   }
 
   .region-manager-actions,
