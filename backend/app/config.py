@@ -9,8 +9,42 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = BACKEND_DIR.parent
 ROOT_ENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_LIBREOFFICE_PATH = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+DEFAULT_CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+]
+DEFAULT_CORS_ALLOW_ORIGIN_REGEX = r"^http://(localhost|127\.0\.0\.1):\d+$"
 DEFAULT_ENV_VALUES = {
     "APP_ENV": "local",
+    "ACCESS_CONTROL_MODE": "disabled",
+    "APP_ACCESS_SECRET": "",
+    "SESSION_SECRET_KEY": "",
+    "SESSION_TTL_SECONDS": "86400",
+    "SESSION_COOKIE_SECURE": "false",
+    "SESSION_COOKIE_SAMESITE": "lax",
+    "CORS_ALLOWED_ORIGINS": "",
+    "CORS_ALLOW_ORIGIN_REGEX": "",
+    "ALLOW_RUNTIME_SETTINGS": "false",
+    "SERVE_FRONTEND": "false",
+    "FRONTEND_DIST_DIR": "",
+    "STORAGE_BACKEND": "local",
+    "OBJECT_STORAGE_ENDPOINT_URL": "",
+    "OBJECT_STORAGE_REGION": "",
+    "OBJECT_STORAGE_BUCKET": "",
+    "OBJECT_STORAGE_ACCESS_KEY_ID": "",
+    "OBJECT_STORAGE_SECRET_ACCESS_KEY": "",
+    "OBJECT_STORAGE_FORCE_PATH_STYLE": "false",
+    "OBJECT_STORAGE_PREFIX": "",
+    "UPLOAD_MAX_FILE_BYTES": "52428800",
+    "UPLOAD_MAX_BATCH_FILES": "50",
+    "UPLOAD_MAX_PDF_PAGES": "30",
+    "UPLOAD_MAX_IMAGE_PIXELS": "50000000",
+    "PROCESSING_TMP_DIR": "",
+    "UPLOAD_RETENTION_HOURS": "",
+    "RETENTION_CLEANUP_INTERVAL_SECONDS": "86400",
+    "SECURITY_HEADERS_ENABLED": "true",
     "VLM_PROVIDER": "auto",
     "VLM_API_KEY": "",
     "VLM_MODEL_NAME": "",
@@ -30,10 +64,37 @@ DEFAULT_ENV_VALUES = {
 
 class Settings(BaseSettings):
     app_env: str = "local"
+    access_control_mode: str = "disabled"
+    app_access_secret: str | None = None
+    session_secret_key: str | None = None
+    session_ttl_seconds: int = 86400
+    session_cookie_secure: bool = False
+    session_cookie_samesite: str = "lax"
     database_url: str | None = None
     document_storage_dir: str | None = None
     raw_storage_dir: str | None = None
     libreoffice_path: str | None = None
+    cors_allowed_origins: str | None = None
+    cors_allow_origin_regex: str | None = None
+    allow_runtime_settings: bool = False
+    serve_frontend: bool = False
+    frontend_dist_dir: str | None = None
+    storage_backend: str = "local"
+    object_storage_endpoint_url: str | None = None
+    object_storage_region: str | None = None
+    object_storage_bucket: str | None = None
+    object_storage_access_key_id: str | None = None
+    object_storage_secret_access_key: str | None = None
+    object_storage_force_path_style: bool = False
+    object_storage_prefix: str | None = None
+    upload_max_file_bytes: int = 50 * 1024 * 1024
+    upload_max_batch_files: int = 50
+    upload_max_pdf_pages: int = 30
+    upload_max_image_pixels: int = 50_000_000
+    processing_tmp_dir: str | None = None
+    upload_retention_hours: int | None = None
+    retention_cleanup_interval_seconds: int = 86400
+    security_headers_enabled: bool = True
 
     vlm_provider: str = "auto"
     vlm_api_key: str | None = None
@@ -81,6 +142,50 @@ class Settings(BaseSettings):
         return path
 
     @property
+    def resolved_processing_tmp_dir(self) -> Path:
+        raw = self.processing_tmp_dir or str(BACKEND_DIR / "storage" / "processing")
+        path = Path(raw)
+        if not path.is_absolute():
+            path = BACKEND_DIR / path
+        return path
+
+    @property
+    def resolved_frontend_dist_dir(self) -> Path:
+        raw = self.frontend_dist_dir or str(PROJECT_ROOT / "frontend" / "dist")
+        path = Path(raw)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() in {"prod", "production"}
+
+    @property
+    def runtime_settings_writable(self) -> bool:
+        return not self.is_production or self.allow_runtime_settings
+
+    @property
+    def auth_required(self) -> bool:
+        mode = (self.access_control_mode or "disabled").strip().lower()
+        return mode == "shared_secret" and bool((self.app_access_secret or "").strip())
+
+    @property
+    def resolved_session_secret_key(self) -> str | None:
+        return (self.session_secret_key or self.app_access_secret or "").strip() or None
+
+    @property
+    def normalized_session_cookie_samesite(self) -> str:
+        value = (self.session_cookie_samesite or "lax").strip().lower()
+        return value if value in {"lax", "strict", "none"} else "lax"
+
+    @property
+    def resolved_upload_retention_hours(self) -> int:
+        if self.upload_retention_hours is not None:
+            return max(0, self.upload_retention_hours)
+        return 24 if self.is_production else 0
+
+    @property
     def resolved_vlm_api_key(self) -> str | None:
         return self.vlm_api_key or self.openai_api_key
 
@@ -92,6 +197,19 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def parse_cors_allowed_origins(raw: str | None) -> list[str]:
+    if not raw or not raw.strip():
+        return DEFAULT_CORS_ALLOWED_ORIGINS
+    return [origin.strip() for origin in raw.replace("\n", ",").split(",") if origin.strip()]
+
+
+def resolved_cors_allow_origin_regex(raw: str | None) -> str | None:
+    if raw is None:
+        return DEFAULT_CORS_ALLOW_ORIGIN_REGEX
+    stripped = raw.strip()
+    return stripped or DEFAULT_CORS_ALLOW_ORIGIN_REGEX
 
 
 def upsert_root_env(updates: Mapping[str, str], include_defaults: bool = False) -> Path:

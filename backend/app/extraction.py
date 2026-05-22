@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Document, ExtractionJob, ExtractionResult, Schema
 from app.schemas import FieldDefinition, FieldRegion, SchemaRegion
+from app.storage import materialize_storage_ref, scratch_dir_for_ref
 from app.validation import validate_extracted_values
 from app.vlm import extract_with_vlm, format_vlm_exception
 
@@ -290,8 +291,7 @@ def _build_extraction_requests(
     if not field_region_refs:
         return requests
 
-    crop_dir = Path(document.storage_path).parent / "regions" / job_id
-    crop_dir.mkdir(parents=True, exist_ok=True)
+    crop_dir = scratch_dir_for_ref(document.storage_path, "regions", job_id)
 
     for index, region_ref in enumerate(_group_region_refs(field_region_refs)):
         region = region_ref["region"]
@@ -373,7 +373,7 @@ def _group_region_refs(field_region_refs: dict[str, dict[str, Any]]) -> list[dic
 
 
 def _crop_region_image(page: DocumentPageSnapshot, region: FieldRegion, output_path: Path) -> Path:
-    source_path = Path(page.image_path)
+    source_path = materialize_storage_ref(page.image_path)
     with Image.open(source_path) as source:
         image = source.convert("RGB")
 
@@ -398,7 +398,7 @@ def _crop_region_image(page: DocumentPageSnapshot, region: FieldRegion, output_p
 
 
 def _mask_region_image(page: DocumentPageSnapshot, region: FieldRegion, output_path: Path) -> Path:
-    source_path = Path(page.image_path)
+    source_path = materialize_storage_ref(page.image_path)
     with Image.open(source_path) as source:
         image = source.convert("RGB")
     width, height = image.size

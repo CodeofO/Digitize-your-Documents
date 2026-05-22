@@ -46,12 +46,12 @@ PDF, 이미지, DOCX, PPTX, XLSX 같은 업무 문서를 업로드하면 문서 
 
 ![Workflow result review](assets/readme/workflow-results.png)
 
-Workflow 실행 후에는 캔버스를 접고 결과만 크게 볼 수 있습니다. 문서 리스트, 선택 문서 preview, 현재 실행 node, KIE 결과 table, 필수 항목 table을 한 화면에서 확인합니다.
+Workflow 실행 후에는 캔버스를 유지한 상태에서 진행률을 확인하고, 결과 상세 보기를 누르면 캔버스 위에 overlay 결과창이 뜹니다. 문서 리스트, 선택 문서 preview, 현재 실행 node, KIE 결과 table, 필수 항목 table을 한 화면에서 확인합니다.
 
 ### Document Classifier
 
 - 문서 종류 후보 class를 직접 정의합니다.
-- 후보에 맞지 않거나 판단이 불확실한 문서는 `unknown` 또는 `needs_review`로 남길 수 있습니다.
+- 후보에 맞지 않거나 판단이 불확실한 문서는 `unknown`으로 남깁니다.
 - batch 실행과 CSV/JSON export를 지원합니다.
 
 ### Required Field Checker
@@ -84,12 +84,16 @@ Workflow 실행 후에는 캔버스를 접고 결과만 크게 볼 수 있습니
 
 ## 디자인 기준
 
-Home과 Workflow Builder UI는 [Toss Design System Mobile](https://tossmini-docs.toss.im/tds-mobile/) 문서를 참고해 회색 기반 표면, 명확한 primary action, 리스트 단위의 정보 구조, 실행 결과 집중 화면을 중심으로 정리했습니다.
+Home과 Workflow Builder UI는 [Toss Design System Mobile](https://tossmini-docs.toss.im/tds-mobile/)과 [앱인토스 TDS 문서](https://developers-apps-in-toss.toss.im/design/components.html)를 벤치마크해 회색 기반 표면, 명확한 blue primary action, 리스트 단위의 정보 구조, 실행 결과 집중 화면을 중심으로 정리했습니다. 상세 기준은 [docs/toss-design-benchmark.md](docs/toss-design-benchmark.md)에 정리했습니다.
 
-- [Colors](https://tossmini-docs.toss.im/tds-mobile/foundation/colors/)와 Typography 흐름을 참고해 배경은 차분하게, 실제 행동 버튼은 blue primary로 강조합니다.
-- [Button](https://tossmini-docs.toss.im/tds-mobile/components/button/)의 `fill`/`weak` 위계를 참고해 실행, 저장, 결과 보기 같은 주요 행동과 보조 행동을 분리합니다.
+- [Colors](https://tossmini-docs.toss.im/tds-mobile/foundation/colors/)와 [Typography](https://tossmini-docs.toss.im/tds-mobile/foundation/typography/) 흐름을 참고해 배경은 차분하게, 실제 행동 버튼은 blue primary로 강조합니다.
+- [Button](https://tossmini-docs.toss.im/tds-mobile/components/button/)의 `fill`/`weak` 위계를 참고해 실행 버튼은 blue fill, 저장/갱신/결과 보기 같은 보조 행동은 weak 톤으로 분리합니다.
 - [ListRow](https://tossmini-docs.toss.im/tds-mobile/components/ListRow/list-row-overview/)의 left/content/right 구조를 참고해 Home 기능 카드와 Workflow 실행 문서 rail을 더 읽기 쉬운 정보 단위로 구성합니다.
-- Workflow 실행 결과는 캔버스와 분리해 문서 이미지, 현재 node, KIE/Required 결과 table을 집중해서 검토할 수 있게 합니다.
+- [Badge](https://tossmini-docs.toss.im/tds-mobile/components/badge/), [Progress Bar](https://tossmini-docs.toss.im/tds-mobile/components/progress-bar/), [Modal](https://tossmini-docs.toss.im/tds-mobile/components/modal/)의 역할을 참고해 상태 pill, 실행 progress, 결과 overlay를 구성합니다.
+
+### 디자인 출처와 사용 범위
+
+이 프로젝트는 Toss Design System의 공개 문서를 시각적 기준으로 참고한 자체 구현입니다. 공식 TDS UI Kit, 컴포넌트 패키지, 로고, 브랜드 자산, Figma 파일을 포함하거나 재배포하지 않습니다. 앱인토스 [피그마/TDS Mobile UI Kit 라이선스](https://developers-apps-in-toss.toss.im/design/prepare/figma-ui-license.html)는 UI Kit의 사용 범위를 제한하므로, 본 저장소의 표기는 “TDS 문서를 벤치마크한 UI 톤”으로 유지합니다.
 
 ## VLM 실행 구조
 
@@ -170,14 +174,49 @@ Backend와 frontend를 함께 실행합니다.
 
 `scripts/run_dev.sh`는 실행 전에 backend 핵심 package와 frontend package 상태를 점검합니다. `node_modules`가 없거나 불완전하면 lockfile 기준으로 복구합니다.
 
+## 외부 호스팅
+
+외부 호스팅은 frontend 정적 배포와 backend API 배포를 분리하는 구성을 기본으로 준비했습니다. 초기 베타는 로그인 대신 `APP_ACCESS_SECRET` 공유 코드로 접근을 제한하고, 업로드 문서/결과는 local persistent volume에 저장한 뒤 `UPLOAD_RETENTION_HOURS=24`로 하루 단위 삭제를 적용합니다.
+
+- Frontend API 주소는 `window.__DIGITIZE_CONFIG__.API_BASE_URL` → `VITE_API_BASE_URL` → 기본값 순서로 결정됩니다.
+- 정적 호스팅에서 같은 build를 여러 환경에 배포할 때는 `frontend/public/config.js`의 `API_BASE_URL`만 교체합니다.
+- 외부 접근 링크는 `https://app.example.com/#access=<APP_ACCESS_SECRET>` 형태를 사용합니다. 프론트가 세션으로 교환한 뒤 URL에서 제거합니다.
+- Backend CORS는 `CORS_ALLOWED_ORIGINS`, `CORS_ALLOW_ORIGIN_REGEX`로 설정합니다.
+- `/api/health`, `/api/auth/session`, `/api/auth/logout` 외 API는 HttpOnly 세션 쿠키가 필요하고, 쓰기 요청은 CSRF 토큰을 검사합니다.
+- `APP_ENV=production`에서는 설정 화면의 `.env` 쓰기가 기본 차단됩니다. 꼭 필요할 때만 `ALLOW_RUNTIME_SETTINGS=true`를 사용합니다.
+- 외부 DB는 Postgres를 권장합니다. 저장소는 우선 `STORAGE_BACKEND=local` + persistent volume을 쓰고, S3/R2/MinIO는 env만 준비해 나중에 전환합니다.
+
+자세한 배포 절차와 env 목록은 [docs/deployment.md](docs/deployment.md)에 정리했습니다.
+
 ## 설정
 
 Home 우측 상단 `Setting`에서 VLM과 LibreOffice 설정을 저장할 수 있습니다. 저장하면 프로젝트 root의 `.env`가 생성 또는 갱신됩니다.
 
 ```env
 APP_ENV=local
+ACCESS_CONTROL_MODE=disabled
+APP_ACCESS_SECRET=
+SESSION_SECRET_KEY=
+SESSION_TTL_SECONDS=86400
+SESSION_COOKIE_SECURE=false
+SESSION_COOKIE_SAMESITE=lax
 DATABASE_URL=sqlite:///backend/kie.db
 DOCUMENT_STORAGE_DIR=backend/storage/documents
+RAW_STORAGE_DIR=backend/storage/raw
+CORS_ALLOWED_ORIGINS=
+CORS_ALLOW_ORIGIN_REGEX=
+ALLOW_RUNTIME_SETTINGS=false
+SERVE_FRONTEND=false
+FRONTEND_DIST_DIR=
+STORAGE_BACKEND=local
+UPLOAD_MAX_FILE_BYTES=52428800
+UPLOAD_MAX_BATCH_FILES=50
+UPLOAD_MAX_PDF_PAGES=30
+UPLOAD_MAX_IMAGE_PIXELS=50000000
+PROCESSING_TMP_DIR=
+UPLOAD_RETENTION_HOURS=
+RETENTION_CLEANUP_INTERVAL_SECONDS=86400
+SECURITY_HEADERS_ENABLED=true
 
 VLM_PROVIDER=auto
 VLM_API_KEY=
@@ -248,6 +287,7 @@ README 이미지는 `assets/readme-src/*.html` 아트보드를 Chrome headless�
 ├── scripts/run_dev.sh        # backend/frontend 동시 실행
 ├── reports/                  # 개발 검증 보고서
 ├── assets/                   # README 이미지와 HTML 아트보드
+├── docs/                     # 디자인 벤치마크 등 프로젝트 문서
 ├── DEVELOPMENT_DEFINITION.md # 개발 기준과 운영 원칙
 ├── ERROR_NOTE.md             # 문제 해결 playbook
 └── README.md

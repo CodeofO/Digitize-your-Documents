@@ -47,7 +47,9 @@ class RawExtractionOptions:
 
 
 class RawExtractionError(ValueError):
-    pass
+    def __init__(self, message: str, status_code: int = 400):
+        self.status_code = status_code
+        super().__init__(message)
 
 
 def validate_raw_upload(filename: str) -> str:
@@ -71,9 +73,32 @@ def save_raw_upload(upload: UploadFile, raw_id: str) -> tuple[str, str, Path, in
             if not chunk:
                 break
             size += len(chunk)
+            if size > settings.upload_max_file_bytes:
+                raise RawExtractionError("Uploaded file is too large", status_code=413)
             destination.write(chunk)
 
+    _validate_raw_file_content(original_path, suffix)
     return upload.filename or original_path.name, suffix[1:], original_path, size
+
+
+def _validate_raw_file_content(path: Path, suffix: str) -> None:
+    if suffix == ".pdf":
+        if not path.read_bytes()[:16].startswith(b"%PDF-"):
+            raise RawExtractionError("Uploaded file does not match the PDF format", status_code=415)
+        return
+    if suffix in {".docx", ".xlsx", ".pptx"}:
+        if not zipfile.is_zipfile(path):
+            raise RawExtractionError("Uploaded file does not match the Office document format", status_code=415)
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = set(archive.namelist())
+        except zipfile.BadZipFile as exc:
+            raise RawExtractionError("Uploaded file does not match the Office document format", status_code=415) from exc
+        if "[Content_Types].xml" not in names:
+            raise RawExtractionError("Uploaded Office document is missing required metadata", status_code=415)
+        expected_dir = {".docx": "word/", ".xlsx": "xl/", ".pptx": "ppt/"}[suffix]
+        if not any(name.startswith(expected_dir) for name in names):
+            raise RawExtractionError(f"Uploaded file does not match the {suffix[1:].upper()} format", status_code=415)
 
 
 def create_raw_outputs(

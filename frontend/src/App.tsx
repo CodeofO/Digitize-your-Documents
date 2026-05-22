@@ -32,10 +32,11 @@ import {
 } from "lucide-react";
 import { ChangeEvent, DragEvent, PointerEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, UIEvent } from "react";
+import { apiFetch, exchangeAccessFragment, refreshAuthSession } from "./apiClient";
+import { API_BASE } from "./apiConfig";
 import { ModuleWorkspace } from "./ModuleWorkspace";
 import { WorkflowBuilder } from "./WorkflowBuilder";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const WORKSPACE_STATE_KEY = "digitize_workspace_state_v1";
 const LEFT_PANE_PERCENT_KEY = "digitize_left_pane_percent_v1";
 const OUTPUT_FORMATS = ["string", "float", "date", "bool"] as const;
@@ -248,6 +249,7 @@ type VlmSettings = {
   batch_max_workers: number;
   has_api_key: boolean;
   env_path: string;
+  runtime_settings_writable: boolean;
 };
 
 type HomeWorkflowRun = {
@@ -870,9 +872,16 @@ export default function App() {
   }, [batchPollingActive, shouldPollActiveBatch, activeBatchId, activeBatchItemId, job?.job_id, job?.result_id]);
 
   async function bootstrapWorkspace() {
-    await refreshAll(false);
-    await restoreWorkspaceState();
-    setWorkspaceRestored(true);
+    try {
+      await exchangeAccessFragment();
+      await refreshAuthSession();
+      await refreshAll(false);
+      await restoreWorkspaceState();
+      setWorkspaceRestored(true);
+    } catch (err) {
+      setError(toFriendlyError(err));
+      setWorkspaceRestored(true);
+    }
   }
 
   async function refreshAll(reloadCurrent = true) {
@@ -2015,6 +2024,7 @@ export default function App() {
         </div>
         <div className="status-strip">
           <ProviderPill status={systemStatus} />
+          <WorkerPill workers={vlmSettings?.batch_max_workers} />
           {mode !== "home" && (
             <button type="button" className="secondary compact" onClick={() => navigateMode("home")}>
               홈
@@ -2492,45 +2502,30 @@ function HomeScreen(props: {
       <section className="home-hero home-hero-workflow">
         <div>
           <p className="eyebrow">작업 공간</p>
-          <h2>문서 접수부터 export까지 하나의 흐름으로</h2>
-          <p>분류, 핵심값 추출, 필수 항목 확인을 파이프라인으로 묶고 배치 실행 결과를 문서 이미지와 함께 바로 검수합니다.</p>
+          <h2>문서 검수를 한 번에 자동화하세요</h2>
+          <p>분류, 필수 항목 확인, 핵심 정보 추출, export를 하나의 워크플로우로 연결합니다.</p>
           <div className="home-hero-actions">
             <button type="button" className="primary home-workflow-cta" onClick={props.onWorkflow}>
               <FileJson size={18} />
               워크플로우 빌더 열기
             </button>
-            <div className="home-ops-row" aria-label="운영 상태">
-              <span><strong>{props.systemStatus?.is_mock ? "Mock" : props.systemStatus?.has_vlm_credentials ? "Ready" : "Setup"}</strong> VLM</span>
-              <span><strong>{props.vlmSettings?.batch_max_workers ?? "-"}</strong> Workers</span>
-            </div>
           </div>
         </div>
-        <div className="home-workflow-panel">
-          <div className="home-workflow-panel-head">
-            <span>예시 파이프라인</span>
-            <strong>혼합 접수 서류 자동 처리</strong>
+        <div className="home-value-panel" aria-label="핵심 가치">
+          <div className="home-value-card">
+            <span>01</span>
+            <strong>반복 분류 감소</strong>
+            <p>문서 class 후보를 정해두고 접수 문서를 같은 기준으로 나눕니다.</p>
           </div>
-          <div className="home-pipeline-preview" aria-hidden="true">
-            {["업로드", "분류", "분기", "추출", "검수", "Export"].map((item, index) => (
-              <span key={item}>
-                <i>{index + 1}</i>
-                {item}
-              </span>
-            ))}
+          <div className="home-value-card">
+            <span>02</span>
+            <strong>누락 검수 빠르게</strong>
+            <p>서명, 날짜, 체크박스처럼 빠지면 안 되는 항목을 먼저 확인합니다.</p>
           </div>
-          <div className="home-example-branches">
-            <div>
-              <strong>신청서</strong>
-              <span>KIE schema 실행</span>
-            </div>
-            <div>
-              <strong>동의서</strong>
-              <span>필수 서명/체크 확인</span>
-            </div>
-            <div>
-              <strong>unknown</strong>
-              <span>분류만 export</span>
-            </div>
+          <div className="home-value-card">
+            <span>03</span>
+            <strong>검수 결과 export</strong>
+            <p>문서 이미지와 결과 table을 검수한 뒤 CSV/JSON으로 내보냅니다.</p>
           </div>
         </div>
       </section>
@@ -2541,43 +2536,51 @@ function HomeScreen(props: {
       <section className="feature-grid">
         <button className="feature-card active-feature" onClick={props.onRaw}>
           <span className="feature-icon"><FileUp size={26} /></span>
-          <strong>원문 데이터 추출</strong>
+          <div className="feature-heading">
+            <strong>원문 데이터 추출</strong>
+            <span>Raw Data Extraction</span>
+          </div>
           <span>DOCX, XLSX, PPTX, PDF를 PDF 미리보기와 HTML 원문으로 변환합니다.</span>
           <div className="feature-points">
             <small>Office preview</small>
             <small>HTML 원문 확인</small>
           </div>
-          <em>RAW workspace 열기</em>
         </button>
         <button className="feature-card active-feature" onClick={props.onKie}>
           <span className="feature-icon"><Sparkles size={26} /></span>
-          <strong>핵심 정보 추출</strong>
+          <div className="feature-heading">
+            <strong>핵심 정보 추출</strong>
+            <span>Key Information Extraction</span>
+          </div>
           <span>저장된 schema와 region 기준으로 필요한 field/value/evidence만 구조화합니다.</span>
           <div className="feature-points">
             <small>Schema library</small>
             <small>Region crop</small>
           </div>
-          <em>KIE workspace 열기</em>
         </button>
         <button className="feature-card active-feature" onClick={props.onClassifier}>
           <span className="feature-icon"><ClipboardList size={26} /></span>
-          <strong>문서 분류</strong>
-          <span>사용자가 정의한 class 후보로 문서 종류를 판단하고 branch 실행의 기준을 만듭니다.</span>
+          <div className="feature-heading">
+            <strong>문서 분류</strong>
+            <span>Document Classification</span>
+          </div>
+          <span>정의한 class 후보 기준으로 문서를 분류합니다.</span>
           <div className="feature-points">
             <small>Class 후보 관리</small>
-            <small>unknown 허용</small>
+            <small>분류 결과 검수</small>
           </div>
-          <em>Classifier 열기</em>
         </button>
         <button className="feature-card active-feature" onClick={props.onRequiredChecker}>
           <span className="feature-icon"><CheckSquare size={26} /></span>
-          <strong>필수 항목 확인</strong>
+          <div className="feature-heading">
+            <strong>필수 항목 확인</strong>
+            <span>Required Field Check</span>
+          </div>
           <span>서명, 날짜, 체크박스, 도장처럼 빠지면 안 되는 항목의 존재 여부를 확인합니다.</span>
           <div className="feature-points">
             <small>AI checklist 추천</small>
             <small>누락/불확실 검수</small>
           </div>
-          <em>Required Checker 열기</em>
         </button>
       </section>
     </main>
@@ -2903,11 +2906,26 @@ function KieUploadPanel(props: {
         </section>
 
         <label className="upload-zone unified-upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
-          <UploadCloud size={32} />
-          <strong>파일 또는 폴더를 끌어오세요</strong>
-          <span>지원 파일 1개는 단일 실행, 2개 이상은 배치 실행으로 처리합니다.</span>
+          <SampleUploadPreview />
+          <div className="sample-upload-cta">
+            <UploadCloud size={32} />
+            <strong>파일 또는 폴더를 끌어오세요</strong>
+            <span>지원 파일 1개는 단일 실행, 2개 이상은 배치 실행으로 처리합니다.</span>
+          </div>
           <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
         </label>
+      </div>
+    </div>
+  );
+}
+
+function SampleUploadPreview() {
+  return (
+    <div className="sample-upload-preview" aria-label="샘플 문서 미리보기">
+      <img src="/sample/bank_00070.jpg" alt="샘플 신청서 문서" />
+      <div>
+        <span>샘플 문서</span>
+        <strong>bank_00070.jpg</strong>
       </div>
     </div>
   );
@@ -3181,6 +3199,7 @@ function SettingsDialog(props: {
   onClearParsingHistory: () => void;
   onClose: () => void;
 }) {
+  const settingsWritable = props.vlmSettings?.runtime_settings_writable ?? true;
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="settings-panel modal-panel" role="dialog" aria-modal="true" aria-labelledby="vlm-settings-title">
@@ -3200,6 +3219,7 @@ function SettingsDialog(props: {
               type="password"
               value={props.vlmApiKey}
               placeholder={props.vlmSettings?.has_api_key ? "저장된 key 유지" : "VLM_API_KEY"}
+              disabled={!settingsWritable}
               onChange={(event) => props.onVlmApiKey(event.target.value)}
             />
           </label>
@@ -3208,6 +3228,7 @@ function SettingsDialog(props: {
             <input
               value={props.vlmModelName}
               placeholder="gpt-4.1-mini"
+              disabled={!settingsWritable}
               onChange={(event) => props.onVlmModelName(event.target.value)}
             />
           </label>
@@ -3216,12 +3237,13 @@ function SettingsDialog(props: {
             <input
               value={props.libreOfficePath}
               placeholder="/Applications/LibreOffice.app/Contents/MacOS/soffice"
+              disabled={!settingsWritable}
               onChange={(event) => props.onLibreOfficePath(event.target.value)}
             />
           </label>
           <label>
             <span>Reasoning effort</span>
-            <select value={props.reasoningEffort} onChange={(event) => props.onReasoningEffort(event.target.value)}>
+            <select value={props.reasoningEffort} disabled={!settingsWritable} onChange={(event) => props.onReasoningEffort(event.target.value)}>
               <option value="">기본값</option>
               <option value="minimal">minimal</option>
               <option value="low">low</option>
@@ -3231,7 +3253,7 @@ function SettingsDialog(props: {
           </label>
           <label>
             <span>Verbosity</span>
-            <select value={props.verbosity} onChange={(event) => props.onVerbosity(event.target.value)}>
+            <select value={props.verbosity} disabled={!settingsWritable} onChange={(event) => props.onVerbosity(event.target.value)}>
               <option value="">기본값</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
@@ -3244,16 +3266,17 @@ function SettingsDialog(props: {
               inputMode="numeric"
               value={props.maxCompletionTokens}
               placeholder="비워두기"
+              disabled={!settingsWritable}
               onChange={(event) => props.onMaxCompletionTokens(event.target.value)}
             />
           </label>
           <label>
             <span>Top P</span>
-            <input value={props.topP} placeholder="비워두기" onChange={(event) => props.onTopP(event.target.value)} />
+            <input value={props.topP} placeholder="비워두기" disabled={!settingsWritable} onChange={(event) => props.onTopP(event.target.value)} />
           </label>
           <label>
             <span>Service tier</span>
-            <input value={props.serviceTier} placeholder="비워두기" onChange={(event) => props.onServiceTier(event.target.value)} />
+            <input value={props.serviceTier} placeholder="비워두기" disabled={!settingsWritable} onChange={(event) => props.onServiceTier(event.target.value)} />
           </label>
           <label>
             <span>배치 worker 수</span>
@@ -3261,10 +3284,11 @@ function SettingsDialog(props: {
               inputMode="numeric"
               value={props.batchMaxWorkers}
               placeholder="4"
+              disabled={!settingsWritable}
               onChange={(event) => props.onBatchMaxWorkers(event.target.value)}
             />
           </label>
-          <button type="button" className="primary compact" disabled={Boolean(props.busy)} onClick={props.onSave}>
+          <button type="button" className="primary compact" disabled={Boolean(props.busy) || !settingsWritable} onClick={props.onSave}>
             <Save size={16} />
             저장
           </button>
@@ -3285,6 +3309,7 @@ function SettingsDialog(props: {
         <div className="settings-status">
           <span>{props.vlmSettings?.has_api_key ? "API key 저장됨" : "API key 미설정"}</span>
           <span>env: {props.vlmSettings?.env_path || ".env"}</span>
+          {!settingsWritable && <span className="warning-text">호스팅 환경 변수로 관리됨</span>}
           {props.settingsMessage && <span className="success-text">{props.settingsMessage}</span>}
         </div>
       </section>
@@ -3729,6 +3754,28 @@ function UploadNotes({ onSampleSchema }: { onSampleSchema: () => void }) {
         <ClipboardList size={16} />
         샘플 schema 사용
       </button>
+      <div className="sample-schema-panel" aria-label="샘플 schema 필드">
+        <div>
+          <span>예시 schema</span>
+          <strong>sample_document_schema</strong>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>필드</th>
+              <th>출력</th>
+            </tr>
+          </thead>
+          <tbody>
+            {SAMPLE_SCHEMA_FIELDS.map((field) => (
+              <tr key={field.key_name}>
+                <td>{field.key_name}</td>
+                <td>{field.output_format}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <div className="note-list">
         <span>지원 형식: PDF, PNG, JPG, JPEG, DOCX, PPTX</span>
         <span>Schema 필드: 필드명, 설명, 출력 형식</span>
@@ -4624,20 +4671,20 @@ function StepPill({ label, active, done }: { label: string; active: boolean; don
 
 function ProviderPill({ status }: { status: SystemStatus | null }) {
   if (!status) return <span className="provider-pill warning">API 상태 알 수 없음</span>;
-  const label = status.is_mock ? "Mock 모드" : status.vlm_provider === "google_genai" ? "Gemini 모드" : "OpenAI 호환 모드";
-  const detail = status.vlm_model_name || (status.has_vlm_credentials ? "모델 준비됨" : "모델 미설정");
+  const detail = status.vlm_model_name || (status.is_mock ? "Mock" : status.has_vlm_credentials ? "모델 준비됨" : "모델 미설정");
   return (
     <span className={`provider-pill ${status.is_mock ? "mock" : status.has_vlm_credentials ? "ready" : "warning"}`}>
-      {label} · {detail}
+      VLM · {detail}
     </span>
   );
 }
 
+function WorkerPill({ workers }: { workers?: number }) {
+  return <span className="provider-pill worker-pill">Workers · {workers ?? "-"}</span>;
+}
+
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    cache: "no-store",
-    ...options
-  });
+  const response = await apiFetch(path, options);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {

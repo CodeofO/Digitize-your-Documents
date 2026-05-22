@@ -334,8 +334,6 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
                 status = "failed"
                 error_message = node_result.get("error_message")
                 break
-            if node_result.get("classification", {}).get("status") != "classified":
-                status = "needs_review"
             completed_node_ids.append(current_id)
             _save_workflow_item_progress(
                 db,
@@ -731,12 +729,8 @@ def _workflow_warnings(graph: WorkflowGraph, db: Session) -> list[str]:
         edge_keys = {_branch_edge_key(edge) for edge in graph.outgoing.get(node_id, [])}
         if not edge_keys:
             warnings.append(f"Branch node {node_id} has no outgoing branch path; documents stop after classification")
-        if "default" not in edge_keys:
-            warnings.append(f"Branch node {node_id} has no default fallback")
         if "unknown" not in edge_keys:
             warnings.append(f"Branch node {node_id} has no unknown fallback")
-        if "needs_review" not in edge_keys:
-            warnings.append(f"Branch node {node_id} has no needs_review fallback")
         incoming = graph.incoming.get(node_id, [])
         if not incoming:
             continue
@@ -748,7 +742,7 @@ def _workflow_warnings(graph: WorkflowGraph, db: Session) -> list[str]:
         config = _json_or_empty(classifier.config_json)
         for candidate in config.get("classes", []):
             class_name = candidate.get("class_name") if isinstance(candidate, dict) else None
-            if class_name and f"class:{class_name}" not in edge_keys and "default" not in edge_keys:
+            if class_name and f"class:{class_name}" not in edge_keys:
                 warnings.append(f"Branch node {node_id} has no path for class {class_name}")
     return warnings
 
@@ -847,9 +841,8 @@ def _branch_candidate_keys(node_results: dict[str, Any]) -> list[str]:
     candidates: list[str] = []
     if status == "classified" and class_name:
         candidates.append(f"class:{class_name}")
-    elif status in {"unknown", "needs_review"}:
-        candidates.append(str(status))
-    candidates.append("default")
+    else:
+        candidates.append("unknown")
     return candidates
 
 

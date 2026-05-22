@@ -27,7 +27,6 @@ import {
   Library,
   Loader2,
   Maximize2,
-  Minimize2,
   PanelRightClose,
   PanelRightOpen,
   Play,
@@ -35,11 +34,13 @@ import {
   Save,
   Sparkles,
   Unlink2,
-  UploadCloud
+  UploadCloud,
+  X
 } from "lucide-react";
 import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { apiFetch } from "./apiClient";
+import { API_BASE } from "./apiConfig";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const WORKFLOW_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 
 type WorkflowNodeKind = "input" | "classifier" | "branch" | "kie" | "required-checker" | "merge" | "export";
@@ -152,10 +153,11 @@ type WorkflowDraft = {
 
 const WORKFLOW_DRAFT_KEY = "digitize_workflow_builder_draft_v1";
 const TERMINAL_RUN_STATUSES = ["completed", "completed_with_errors", "needs_review", "failed", "canceled"];
+const UNKNOWN_BRANCH_KEY = "unknown";
 
 const nodePalette: { kind: WorkflowNodeKind; label: string; description: string }[] = [
   { kind: "input", label: "문서 입력", description: "단일/배치 문서를 자동 판단합니다." },
-  { kind: "classifier", label: "문서 분류", description: "저장된 classifier를 실행합니다." },
+  { kind: "classifier", label: "문서 분류", description: "결과는 정의한 class 또는 unknown입니다." },
   { kind: "branch", label: "분기", description: "분류 class별 경로를 나눕니다." },
   { kind: "kie", label: "핵심 정보 추출", description: "저장된 schema로 값을 추출합니다." },
   { kind: "required-checker", label: "필수 항목 확인", description: "저장된 checklist를 확인합니다." },
@@ -166,7 +168,7 @@ const nodePalette: { kind: WorkflowNodeKind; label: string; description: string 
 const defaultNodes: WorkflowNode[] = [
   workflowNode("input", "문서 입력", 0, 150, {}, undefined, "input"),
   workflowNode("classifier", "문서 분류", 230, 150, {}, undefined, "classifier"),
-  workflowNode("branch", "분기", 470, 150, {}, ["default", "unknown", "needs_review"], "branch"),
+  workflowNode("branch", "분기", 470, 150, {}, [UNKNOWN_BRANCH_KEY], "branch"),
   workflowNode("kie", "핵심 정보 추출", 730, 70, {}, undefined, "kie_contract"),
   workflowNode("required-checker", "필수 항목 확인", 970, 70, {}, undefined, "required_contract"),
   workflowNode("merge", "결과 병합", 1210, 150, {}, undefined, "merge"),
@@ -176,7 +178,7 @@ const defaultNodes: WorkflowNode[] = [
 const defaultEdges: WorkflowEdge[] = [
   workflowEdge("input", "classifier"),
   workflowEdge("classifier", "branch"),
-  workflowEdge("branch", "kie_contract", "default"),
+  workflowEdge("branch", "kie_contract", UNKNOWN_BRANCH_KEY),
   workflowEdge("kie_contract", "required_contract"),
   workflowEdge("required_contract", "merge"),
   workflowEdge("merge", "export")
@@ -193,7 +195,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [workflowName, setWorkflowName] = useState(initialDraft?.workflowName ?? "문서 자동화 워크플로우");
   const [workflowDescription, setWorkflowDescription] = useState(initialDraft?.workflowDescription ?? "");
   const [nodes, setNodes] = useState<WorkflowNode[]>(() => initialDraft?.nodes ?? defaultNodes);
-  const [edges, setEdges] = useState<WorkflowEdge[]>(() => initialDraft?.edges ?? defaultEdges.map(normalizeWorkflowEdge));
+  const [edges, setEdges] = useState<WorkflowEdge[]>(() => normalizeWorkflowEdges(initialDraft?.edges ?? defaultEdges));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(initialDraft?.selectedNodeId ?? defaultNodes[1]?.id ?? null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [settingsCollapsed, setSettingsCollapsed] = useState(Boolean(initialDraft?.settingsCollapsed));
@@ -212,7 +214,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [selectedDocument, setSelectedDocument] = useState<WorkflowDocument | null>(null);
   const [documentLoading, setDocumentLoading] = useState(false);
   const [activeDocumentPage, setActiveDocumentPage] = useState(0);
-  const [resultsFocused, setResultsFocused] = useState(false);
+  const [resultsOverlayOpen, setResultsOverlayOpen] = useState(false);
 
   const activeWorkflow = workflows.find((workflow) => workflow.id === activeWorkflowId) ?? null;
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
@@ -224,6 +226,11 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const validation = useMemo(() => validateWorkflow(nodes, edges), [nodes, edges]);
   const uploadMode = files.length > 1 ? "배치 실행" : files.length === 1 ? "단일 실행" : "파일 없음";
   const isRunningRun = Boolean(activeRun && !TERMINAL_RUN_STATUSES.includes(activeRun.status));
+  const runButtonTitle = validation.errors.length
+    ? `실행할 수 없습니다: ${validation.errors[0]}`
+    : activeWorkflowId
+      ? "현재 워크플로우를 저장한 뒤 실행합니다."
+      : "워크플로우를 자동 저장한 뒤 실행합니다.";
 
   useEffect(() => {
     void refreshAll();
@@ -272,12 +279,23 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
     };
   }, [selectedRunItem?.document_id]);
 
+  useEffect(() => {
+    if (!resultsOverlayOpen) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setResultsOverlayOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [resultsOverlayOpen]);
+
   const onNodesChange = useCallback((changes: NodeChange<WorkflowNode>[]) => {
     setNodes((current) => applyNodeChanges(changes, current));
   }, []);
 
   const onEdgesChange = useCallback((changes: EdgeChange<WorkflowEdge>[]) => {
-    setEdges((current) => applyEdgeChanges(changes, current).map(normalizeWorkflowEdge));
+    setEdges((current) => normalizeWorkflowEdges(applyEdgeChanges(changes, current)));
     if (selectedEdgeId && changes.some((change) => change.type === "remove" && change.id === selectedEdgeId)) {
       setSelectedEdgeId(null);
     }
@@ -337,7 +355,6 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       if (!activeRunId && loadedRuns[0]) {
         setActiveRunId(loadedRuns[0].id);
         setSelectedItemId(loadedRuns[0].items[0]?.id ?? null);
-        setResultsFocused(true);
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 데이터를 불러오지 못했습니다.");
@@ -349,7 +366,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
     setWorkflowName(workflow.name);
     setWorkflowDescription(workflow.description ?? "");
     setNodes((workflow.definition.nodes?.length ? workflow.definition.nodes : defaultNodes).map(normalizeWorkflowNode));
-    setEdges((workflow.definition.edges?.length ? workflow.definition.edges : defaultEdges).map(normalizeWorkflowEdge));
+    setEdges(normalizeWorkflowEdges(workflow.definition.edges?.length ? workflow.definition.edges : defaultEdges));
     setSelectedNodeId(workflow.definition.nodes?.[0]?.id ?? defaultNodes[0].id);
     setMessage(`불러온 워크플로우: ${workflow.name}`);
   }
@@ -359,33 +376,37 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
     setWorkflowName("문서 자동화 워크플로우");
     setWorkflowDescription("");
     setNodes(defaultNodes.map(normalizeWorkflowNode));
-    setEdges(defaultEdges.map(normalizeWorkflowEdge));
+    setEdges(normalizeWorkflowEdges(defaultEdges));
     setSelectedNodeId(defaultNodes[1]?.id ?? defaultNodes[0]?.id ?? null);
     setMessage("새 워크플로우를 시작합니다.");
   }
 
-  async function saveWorkflow() {
+  async function persistWorkflow() {
     if (validation.errors.length) {
-      setError(validation.errors[0]);
-      return;
+      throw new Error(validation.errors[0]);
     }
+    const payload = {
+      name: workflowName.trim() || "문서 자동화 워크플로우",
+      description: workflowDescription || null,
+      definition: serializeDefinition(nodes, edges)
+    };
+    const saved = await api<WorkflowDefinition>(activeWorkflowId ? `/api/workflows/${activeWorkflowId}` : "/api/workflows", {
+      method: activeWorkflowId ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    setActiveWorkflowId(saved.id);
+    setWorkflows((current) => [saved, ...current.filter((workflow) => workflow.id !== saved.id)]);
+    setDraftSavedAt("저장됨");
+    return saved;
+  }
+
+  async function saveWorkflow() {
     setIsSaving(true);
     setError(null);
     try {
-      const payload = {
-        name: workflowName.trim() || "문서 자동화 워크플로우",
-        description: workflowDescription || null,
-        definition: serializeDefinition(nodes, edges)
-      };
-      const saved = await api<WorkflowDefinition>(activeWorkflowId ? `/api/workflows/${activeWorkflowId}` : "/api/workflows", {
-        method: activeWorkflowId ? "PATCH" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      setActiveWorkflowId(saved.id);
-      setWorkflows((current) => [saved, ...current.filter((workflow) => workflow.id !== saved.id)]);
+      await persistWorkflow();
       setMessage("워크플로우를 저장했습니다.");
-      setDraftSavedAt("저장됨");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 저장에 실패했습니다.");
     } finally {
@@ -394,21 +415,23 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   }
 
   async function runWorkflow() {
-    if (!activeWorkflowId) {
-      setError("먼저 워크플로우를 저장하세요.");
-      return;
-    }
     const runFiles = [...files];
     if (!runFiles.length) {
       setError("실행할 문서를 업로드하세요.");
       return;
     }
+    if (validation.errors.length) {
+      setError(`워크플로우를 실행할 수 없습니다. ${validation.errors[0]}`);
+      return;
+    }
     setIsStartingRun(true);
+    setIsSaving(true);
     setError(null);
     try {
+      const saved = await persistWorkflow();
       const form = new FormData();
       runFiles.forEach((file) => form.append("files", file));
-      const run = await api<WorkflowRun>(`/api/workflows/${activeWorkflowId}/runs`, {
+      const run = await api<WorkflowRun>(`/api/workflows/${saved.id}/runs`, {
         method: "POST",
         body: form
       });
@@ -417,13 +440,14 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       setSelectedItemId(run.items[0]?.id ?? null);
       setSelectedDocument(null);
       setActiveDocumentPage(0);
-      setResultsFocused(true);
-      setMessage(`${uploadMode}을 시작했습니다.`);
+      setResultsOverlayOpen(false);
+      setMessage(`${uploadMode}을 시작했습니다. 실행 전에 워크플로우를 저장했습니다.`);
       void refreshRun(run.id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 실행에 실패했습니다.");
     } finally {
       setIsStartingRun(false);
+      setIsSaving(false);
     }
   }
 
@@ -465,7 +489,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
 
   return (
     <ReactFlowProvider>
-      <main className={`workflow-builder ${settingsCollapsed ? "settings-collapsed" : ""} ${resultsFocused && activeRun ? "results-focused" : ""}`}>
+      <main className={`workflow-builder ${settingsCollapsed ? "settings-collapsed" : ""}`}>
         <aside className="workflow-palette" aria-label="워크플로우 모듈">
           <div className="workflow-panel-header">
             <p className="eyebrow">Builder</p>
@@ -496,7 +520,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
           </div>
         </aside>
 
-        <section className={`workflow-canvas-shell ${resultsFocused && activeRun ? "results-focused" : ""}`}>
+        <section className="workflow-canvas-shell">
           <div className="workflow-toolbar">
             <div className="workflow-title-fields">
               <input value={workflowName} onChange={(event) => setWorkflowName(event.target.value)} aria-label="워크플로우 이름" />
@@ -537,9 +561,9 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
               </div>
             )}
             {activeRun && (
-              <button type="button" className="secondary" onClick={() => setResultsFocused((current) => !current)}>
-                {resultsFocused ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-                {resultsFocused ? "캔버스 보기" : "결과만 보기"}
+              <button type="button" className="secondary" onClick={() => setResultsOverlayOpen((current) => !current)}>
+                {resultsOverlayOpen ? <X size={16} /> : <Maximize2 size={16} />}
+                {resultsOverlayOpen ? "결과 닫기" : "결과 상세보기"}
               </button>
             )}
             <span className="workflow-autosave">
@@ -547,7 +571,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             </span>
           </div>
 
-          <div className="workflow-canvas">
+          <div className={`workflow-canvas ${resultsOverlayOpen && activeRun ? "results-overlay-open" : ""}`}>
             <ReactFlow
               nodes={canvasNodes}
               edges={edges}
@@ -571,6 +595,15 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
               <Controls />
               <MiniMap pannable zoomable />
             </ReactFlow>
+
+            {activeRun && (
+              <WorkflowRunProgressDock
+                run={activeRun}
+                onOpen={() => setResultsOverlayOpen(true)}
+                onRefresh={() => void refreshRun(activeRun.id)}
+              />
+            )}
+
           </div>
 
           <div className="workflow-run-bar">
@@ -579,7 +612,13 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
               <span>{files.length ? `${files.length}개 파일 선택됨 · ${uploadMode}` : "문서 업로드"}</span>
               <input type="file" multiple accept={WORKFLOW_FILE_ACCEPT} onChange={onFileInput} disabled={isStartingRun || isRunningRun} />
             </label>
-            <button type="button" onClick={() => void runWorkflow()} disabled={isStartingRun || isRunningRun || !activeWorkflowId || !files.length}>
+            <button
+              type="button"
+              className="primary workflow-run-primary-button"
+              onClick={() => void runWorkflow()}
+              disabled={isStartingRun || isRunningRun || !files.length}
+              title={runButtonTitle}
+            >
               {isStartingRun || isRunningRun ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
               {isStartingRun ? "시작 중" : isRunningRun ? "실행 중" : "실행"}
             </button>
@@ -605,20 +644,6 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             </div>
           )}
 
-          {activeRun && (
-            <WorkflowRunResults
-              run={activeRun}
-              selectedItem={selectedRunItem}
-              document={selectedDocument}
-              documentLoading={documentLoading}
-              activePage={activeDocumentPage}
-              focused={resultsFocused}
-              onSelectItem={(itemId) => setSelectedItemId(itemId)}
-              onPage={setActiveDocumentPage}
-              onRefresh={() => void refreshRun(activeRun.id)}
-              onToggleFocus={() => setResultsFocused((current) => !current)}
-            />
-          )}
         </section>
 
         <button
@@ -645,6 +670,30 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             />
           </aside>
         )}
+
+        {activeRun && resultsOverlayOpen && (
+          <div className="workflow-results-overlay" role="dialog" aria-modal="true" aria-label="워크플로우 실행 결과 상세">
+            <button
+              type="button"
+              className="workflow-results-backdrop"
+              aria-label="결과 상세 닫기"
+              onClick={() => setResultsOverlayOpen(false)}
+            />
+            <div className="workflow-results-modal">
+              <WorkflowRunResults
+                run={activeRun}
+                selectedItem={selectedRunItem}
+                document={selectedDocument}
+                documentLoading={documentLoading}
+                activePage={activeDocumentPage}
+                onSelectItem={(itemId) => setSelectedItemId(itemId)}
+                onPage={setActiveDocumentPage}
+                onRefresh={() => void refreshRun(activeRun.id)}
+                onClose={() => setResultsOverlayOpen(false)}
+              />
+            </div>
+          </div>
+        )}
       </main>
     </ReactFlowProvider>
   );
@@ -652,7 +701,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
 
 function WorkflowCanvasNode({ data, selected }: NodeProps<WorkflowNode>) {
   const kind = data.kind;
-  const branchKeys = data.branchKeys?.length ? data.branchKeys : ["default", "unknown", "needs_review"];
+  const branchKeys = normalizeBranchKeys(data.branchKeys);
   const connectedBranchKeys = new Set(data.connectedBranchKeys ?? []);
   return (
     <div className={`workflow-node workflow-node-${kind} ${selected ? "selected" : ""}`}>
@@ -747,7 +796,7 @@ function NodeSettings(props: {
       {kind === "branch" && (
         <div className="branch-rule-panel">
           <strong>Branch handles</strong>
-          {(props.node.data.branchKeys ?? ["default", "unknown", "needs_review"]).map((key) => (
+          {normalizeBranchKeys(props.node.data.branchKeys).map((key) => (
             <span key={key}>{branchKeyLabel(key)}</span>
           ))}
         </div>
@@ -781,25 +830,57 @@ function ConfigSelect(props: {
   );
 }
 
+function WorkflowRunProgressDock(props: {
+  run: WorkflowRun;
+  onOpen: () => void;
+  onRefresh: () => void;
+}) {
+  const finishedCount = workflowRunFinishedCount(props.run);
+  const runningCount = props.run.items.filter((item) => item.status === "running").length;
+  const queuedCount = props.run.items.filter((item) => item.status === "queued").length;
+  const percent = Math.round(props.run.progress * 100);
+  return (
+    <div className="workflow-progress-dock" aria-label="워크플로우 실행 진행상황">
+      <div className="workflow-progress-dock-head">
+        <div>
+          <p className="eyebrow">Run</p>
+          <h3>{workflowRunHeadline(props.run)} · {percent}%</h3>
+        </div>
+        <div className="workflow-run-kpis">
+          <span><strong>{finishedCount}</strong> 완료/검토/실패</span>
+          <span><strong>{runningCount}</strong> 실행 중</span>
+          <span><strong>{queuedCount}</strong> 대기</span>
+        </div>
+        <div className="workflow-progress-dock-actions">
+          <button type="button" className="secondary" onClick={props.onOpen}>
+            <Maximize2 size={15} /> 결과 상세보기
+          </button>
+          <button type="button" className="secondary" onClick={props.onRefresh}>갱신</button>
+        </div>
+      </div>
+      <progress className="workflow-run-progress" value={props.run.progress} max={1} />
+    </div>
+  );
+}
+
 function WorkflowRunResults(props: {
   run: WorkflowRun;
   selectedItem: WorkflowRunItem | null;
   document: WorkflowDocument | null;
   documentLoading: boolean;
   activePage: number;
-  focused: boolean;
   onSelectItem: (itemId: string) => void;
   onPage: (page: number) => void;
   onRefresh: () => void;
-  onToggleFocus: () => void;
+  onClose: () => void;
 }) {
-  const finishedCount = props.run.completed_count + props.run.failed_count + props.run.needs_review_count;
+  const finishedCount = workflowRunFinishedCount(props.run);
   return (
     <section className="workflow-results">
       <div className="workflow-results-header">
         <div>
           <p className="eyebrow">Run</p>
-          <h2>{props.run.status} · {Math.round(props.run.progress * 100)}%</h2>
+          <h2>{workflowRunHeadline(props.run)} · {Math.round(props.run.progress * 100)}%</h2>
         </div>
         <div className="workflow-run-kpis">
           <span><strong>{finishedCount}</strong> 완료/검토/실패</span>
@@ -807,9 +888,8 @@ function WorkflowRunResults(props: {
           <span><strong>{props.run.items.filter((item) => item.status === "queued").length}</strong> 대기</span>
         </div>
         <div className="workflow-results-actions">
-          <button type="button" className="secondary" onClick={props.onToggleFocus}>
-            {props.focused ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-            {props.focused ? "캔버스 보기" : "결과만 보기"}
+          <button type="button" className="secondary" onClick={props.onClose}>
+            <X size={15} /> 닫기
           </button>
           <button type="button" className="secondary" onClick={props.onRefresh}>갱신</button>
         </div>
@@ -822,6 +902,15 @@ function WorkflowRunResults(props: {
       </div>
     </section>
   );
+}
+
+function workflowRunFinishedCount(run: WorkflowRun) {
+  return run.completed_count + run.failed_count + run.needs_review_count;
+}
+
+function workflowRunHeadline(run: WorkflowRun) {
+  if (!TERMINAL_RUN_STATUSES.includes(run.status) && run.progress < 1) return "작업 진행 중";
+  return "작업 완료";
 }
 
 function WorkflowRunRail(props: { run: WorkflowRun; selectedItem: WorkflowRunItem | null; onSelectItem: (itemId: string) => void }) {
@@ -1005,7 +1094,7 @@ function workflowEdge(source: string, target: string, sourceHandle?: string): Wo
 }
 
 function normalizeWorkflowEdge(edge: WorkflowEdge): WorkflowEdge {
-  const sourceHandle = typeof edge.sourceHandle === "string" ? edge.sourceHandle : undefined;
+  const sourceHandle = normalizeBranchHandle(typeof edge.sourceHandle === "string" ? edge.sourceHandle : undefined);
   return {
     ...edge,
     id: edge.id || `${edge.source}-${sourceHandle || "out"}-${edge.target}`,
@@ -1015,13 +1104,31 @@ function normalizeWorkflowEdge(edge: WorkflowEdge): WorkflowEdge {
   };
 }
 
+function normalizeWorkflowEdges(edges: WorkflowEdge[]): WorkflowEdge[] {
+  const seenRouteKeys = new Set<string>();
+  return edges.map(normalizeWorkflowEdge).filter((edge) => {
+    if (!edge.sourceHandle) return true;
+    const routeKey = `${edge.source}:${edge.sourceHandle}`;
+    if (seenRouteKeys.has(routeKey)) return false;
+    seenRouteKeys.add(routeKey);
+    return true;
+  });
+}
+
+function normalizeBranchHandle(handle: string | undefined) {
+  if (handle === "default" || handle === "needs_review") return UNKNOWN_BRANCH_KEY;
+  return handle;
+}
+
 function normalizeWorkflowNode(node: WorkflowNode): WorkflowNode {
   const { connectedBranchKeys: _connectedBranchKeys, ...data } = node.data;
+  const branchKeys = data.kind === "branch" ? normalizeBranchKeys(data.branchKeys) : data.branchKeys;
   return {
     ...node,
     type: "workflow",
     data: {
       ...data,
+      branchKeys,
       config: data.config ?? {}
     }
   };
@@ -1075,9 +1182,7 @@ function syncBranchKeys(nodes: WorkflowNode[], classifierId: string, classifiers
   const classifier = classifiers.find((item) => item.id === classifierId);
   const branchKeys = [
     ...(classifier?.classes.map((item) => `class:${item.class_name}`) ?? []),
-    "unknown",
-    "needs_review",
-    "default"
+    UNKNOWN_BRANCH_KEY
   ];
   return nodes.map((node) => {
     if (node.data.kind !== "branch") return node;
@@ -1096,7 +1201,7 @@ function readWorkflowDraft(): WorkflowDraft | null {
       workflowName: typeof parsed.workflowName === "string" && parsed.workflowName.trim() ? parsed.workflowName : "문서 자동화 워크플로우",
       workflowDescription: typeof parsed.workflowDescription === "string" ? parsed.workflowDescription : "",
       nodes: parsed.nodes.map(normalizeWorkflowNode),
-      edges: parsed.edges.map(normalizeWorkflowEdge),
+      edges: normalizeWorkflowEdges(parsed.edges as WorkflowEdge[]),
       selectedNodeId: typeof parsed.selectedNodeId === "string" ? parsed.selectedNodeId : parsed.nodes[0]?.id ?? null,
       settingsCollapsed: Boolean(parsed.settingsCollapsed)
     };
@@ -1143,7 +1248,7 @@ function validateConnection(connection: Connection, nodes: WorkflowNode[], edges
   if (source.data.kind === "export") return "Export 뒤에는 노드를 연결할 수 없습니다.";
   if (target.data.kind === "input") return "Input 앞에는 노드를 연결할 수 없습니다.";
   if (target.data.kind === "branch" && source.data.kind !== "classifier") return "Branch 앞에는 Document Classifier만 연결하세요.";
-  if (source.data.kind === "branch" && !connection.sourceHandle) return "Branch는 default/unknown/class handle에서 연결하세요.";
+  if (source.data.kind === "branch" && !connection.sourceHandle) return "Branch는 class 또는 unknown handle에서 연결하세요.";
   if (source.data.kind === "branch" && edges.some((edge) => edge.source === connection.source && edge.sourceHandle === connection.sourceHandle)) {
     return "이 branch route는 이미 후속 노드가 있습니다. 기존 선을 삭제한 뒤 다시 연결하세요.";
   }
@@ -1187,8 +1292,8 @@ function validateWorkflow(nodes: WorkflowNode[], edges: WorkflowEdge[]) {
     if (node.data.kind === "branch") {
       const incoming = edges.filter((edge) => edge.target === node.id);
       if (!incoming.some((edge) => byId.get(edge.source)?.data.kind === "classifier")) errors.push("Branch 노드는 classifier 바로 뒤에 연결하세요.");
-      const sourceHandles = edges.filter((edge) => edge.source === node.id).map((edge) => edge.sourceHandle || "default");
-      const branchKeys = node.data.branchKeys?.length ? node.data.branchKeys : ["default", "unknown", "needs_review"];
+      const sourceHandles = edges.filter((edge) => edge.source === node.id).map((edge) => edge.sourceHandle || UNKNOWN_BRANCH_KEY);
+      const branchKeys = normalizeBranchKeys(node.data.branchKeys);
       branchKeys.forEach((key) => {
         if (!sourceHandles.includes(key)) {
           warnings.push(`Branch ${branchKeyLabel(key)} 경로가 없습니다. 해당 문서는 분류 결과만 export됩니다.`);
@@ -1218,8 +1323,14 @@ function nodeKindDescription(kind: WorkflowNodeKind) {
 
 function branchKeyLabel(key: string) {
   if (key.startsWith("class:")) return key.replace("class:", "class · ");
-  if (key === "needs_review") return "needs review";
   return key;
+}
+
+function normalizeBranchKeys(keys: string[] | undefined) {
+  const normalized = (keys?.length ? keys : [UNKNOWN_BRANCH_KEY])
+    .filter((key) => key && key !== "default" && key !== "needs_review");
+  if (!normalized.includes(UNKNOWN_BRANCH_KEY)) normalized.push(UNKNOWN_BRANCH_KEY);
+  return [...new Set(normalized)];
 }
 
 function workflowStatusLabel(status: string | null | undefined) {
@@ -1248,7 +1359,7 @@ function formatWorkflowValue(value: unknown) {
 }
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...options });
+  const response = await apiFetch(path, options);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {

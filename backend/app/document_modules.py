@@ -2,7 +2,6 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from app.audit import log_audit_event
@@ -21,6 +20,7 @@ from app.models import (
     RequiredFieldChecklist,
 )
 from app.schemas import ClassCandidate, RequiredFieldItem, SchemaRegion
+from app.storage import scratch_dir_for_ref
 from app.vlm import classify_document_with_vlm, check_required_fields_with_vlm, format_vlm_exception
 
 
@@ -210,7 +210,7 @@ def _save_classification_result(job_id: str, context: ClassificationContext, raw
         db.add(result)
         db.flush()
         job.result_id = result.id
-        job.status = validated["status"] if validated["status"] == "needs_review" else "completed"
+        job.status = "completed"
         job.completed_at = datetime.utcnow()
         log_audit_event(
             db,
@@ -258,15 +258,13 @@ def _save_required_field_result(job_id: str, context: RequiredFieldContext, raw_
 
 def _validate_classification_output(raw_values: dict[str, Any], context: ClassificationContext) -> dict[str, Any]:
     class_names = {item.class_name for item in context.classes}
-    status = raw_values.get("status") if raw_values.get("status") in {"classified", "unknown", "needs_review"} else "needs_review"
+    status = raw_values.get("status") if raw_values.get("status") in {"classified", "unknown"} else "unknown"
     class_name = raw_values.get("class_name")
     if status == "classified" and class_name not in class_names:
-        status = "needs_review"
+        status = "unknown"
         class_name = None
     if status == "unknown":
         class_name = None
-    if status == "unknown" and not context.allow_unknown:
-        status = "needs_review"
     confidence = raw_values.get("confidence")
     if not isinstance(confidence, (int, float)):
         confidence = None
@@ -396,8 +394,7 @@ def _required_field_image_inputs(
     if not region_ids:
         return inputs
     page_map = {page.page_number: page for page in document.pages}
-    crop_dir = Path(document.storage_path).parent / "required_regions" / job_id
-    crop_dir.mkdir(parents=True, exist_ok=True)
+    crop_dir = scratch_dir_for_ref(document.storage_path, "required_regions", job_id)
     for index, region in enumerate([region for region in regions if region.id in region_ids]):
         page = page_map.get(region.page)
         if not page:

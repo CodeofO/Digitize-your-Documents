@@ -207,6 +207,7 @@ class VlmSettingsRead(BaseModel):
     batch_max_workers: int
     has_api_key: bool
     env_path: str
+    runtime_settings_writable: bool
 
 
 class VlmSettingsUpdate(BaseModel):
@@ -271,7 +272,7 @@ class SchemaDescriptionRecommendationRead(BaseModel):
     reasoning: str | None = None
 
 
-ClassificationStatus = Literal["classified", "unknown", "needs_review"]
+ClassificationStatus = Literal["classified", "unknown"]
 RequiredFieldEvidenceType = Literal["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"]
 RequiredFieldItemStatus = Literal["present", "missing", "uncertain", "not_applicable"]
 RequiredFieldOverallStatus = Literal["complete", "incomplete", "needs_review"]

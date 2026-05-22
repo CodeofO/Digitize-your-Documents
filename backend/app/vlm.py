@@ -1,11 +1,11 @@
 import base64
 import json
 import mimetypes
-from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
 from app.schemas import ClassCandidate, FieldDefinition, RequiredFieldItem, SchemaRegion
+from app.storage import read_storage_bytes, storage_ref_name
 
 
 SYSTEM_PROMPT = """You are a key information extraction engine.
@@ -32,8 +32,7 @@ Use the document's primary language. One or two sentences are enough."""
 
 DOCUMENT_CLASSIFIER_PROMPT = """You are a document classification engine.
 Choose only from the user-defined candidate classes.
-If none of the classes fit and unknown is allowed, return status unknown with class_name null.
-If the document is ambiguous, return needs_review.
+If none of the classes fit, or the document is ambiguous, return status unknown with class_name null.
 Use visual evidence and visible text only.
 Return data that matches the requested structured output schema."""
 
@@ -330,8 +329,8 @@ def _invoke_google_genai(
         label = image_input.get("label")
         if label:
             contents.append(label)
-        image_path = Path(image_input["path"])
-        contents.append(types.Part.from_bytes(data=image_path.read_bytes(), mime_type=_mime_type_for_path(image_path)))
+        image_ref = image_input["path"]
+        contents.append(types.Part.from_bytes(data=read_storage_bytes(image_ref), mime_type=_mime_type_for_ref(image_ref)))
 
     config = _build_google_generation_config(system_prompt, output_schema)
     client = genai.Client(api_key=settings.resolved_vlm_api_key)
@@ -483,8 +482,8 @@ def _sanitize_provider_error(exc: Exception) -> str:
     return message
 
 
-def _mime_type_for_path(path: Path) -> str:
-    return mimetypes.guess_type(path.name)[0] or "image/png"
+def _mime_type_for_ref(ref: str) -> str:
+    return mimetypes.guess_type(storage_ref_name(ref))[0] or "image/png"
 
 
 def _json_schema_for_field(field: FieldDefinition) -> dict[str, Any]:
@@ -566,7 +565,7 @@ def _classification_output_schema(classes: list[ClassCandidate], allow_unknown: 
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "status": {"type": "string", "enum": ["classified", "unknown", "needs_review"]},
+            "status": {"type": "string", "enum": ["classified", "unknown"]},
             "class_name": class_schema,
             "confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
             "reason": {"type": "string"},
@@ -657,8 +656,8 @@ def _build_classification_prompt(classes: list[ClassCandidate], allow_unknown: b
     for item in classes:
         signals = ", ".join(item.signals) if item.signals else "(no explicit signals)"
         lines.append(f"- {item.class_name}: {item.description}. Signals: {signals}")
-    lines.append(f"Unknown allowed: {'yes' if allow_unknown else 'no'}")
     lines.append("Return classified only when visible evidence supports one candidate class.")
+    lines.append("Return unknown when no candidate class is clearly supported.")
     return "\n".join(lines)
 
 
@@ -736,7 +735,7 @@ def _build_multimodal_content(prompt: str, image_inputs: list[dict[str, str]]) -
         content.append(
             {
                 "type": "image_url",
-                "image_url": {"url": _image_to_data_url(Path(image_input["path"]))},
+                "image_url": {"url": _image_to_data_url(image_input["path"])},
             }
         )
     return content
@@ -746,9 +745,9 @@ def _image_inputs_from_paths(image_paths: list[str]) -> list[dict[str, str]]:
     return [{"path": image_path, "label": f"Full document page {index + 1}"} for index, image_path in enumerate(image_paths)]
 
 
-def _image_to_data_url(path: Path) -> str:
-    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+def _image_to_data_url(ref: str) -> str:
+    mime_type = _mime_type_for_ref(ref)
+    encoded = base64.b64encode(read_storage_bytes(ref)).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
 
 
@@ -829,7 +828,7 @@ def _mock_classification(classes: list[ClassCandidate], allow_unknown: bool) -> 
             "evidence": selected.signals[:3] or [selected.description],
         }
     return {
-        "status": "unknown" if allow_unknown else "needs_review",
+        "status": "unknown",
         "class_name": None,
         "confidence": 0.0,
         "reason": "Mock mode found no candidate classes.",

@@ -2,22 +2,32 @@ import csv
 import io
 import json
 import shutil
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
-from app.config import DEFAULT_LIBREOFFICE_PATH, ROOT_ENV_PATH, get_settings, upsert_root_env
-from app.database import get_db, init_db
+from app.auth import (
+    authenticate_access_code,
+    clear_session,
+    create_session,
+    is_public_api_path,
+    read_session,
+    require_session_for_request,
+)
+from app.config import DEFAULT_LIBREOFFICE_PATH, ROOT_ENV_PATH, get_settings, parse_cors_allowed_origins, resolved_cors_allow_origin_regex, upsert_root_env
+from app.database import SessionLocal, get_db, init_db
 from app.document_processor import (
     DocumentProcessingError,
     is_supported_image,
@@ -127,29 +137,73 @@ from app.workflows import (
     workflow_run_export_payload,
     workflow_run_to_read,
 )
+from app.storage import delete_local_tree, delete_storage_ref, is_s3_ref, materialize_storage_ref, persist_artifact, scratch_dir_for_ref
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_db()
+    stop_cleanup = _start_retention_cleanup_worker()
     yield
+    if stop_cleanup:
+        stop_cleanup.set()
 
 
 app = FastAPI(title="Digitize Your Document API", version="0.1.0", lifespan=lifespan)
 
+settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
+    allow_origins=parse_cors_allowed_origins(settings.cors_allowed_origins),
+    allow_origin_regex=resolved_cors_allow_origin_regex(settings.cors_allow_origin_regex),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def auth_and_security_middleware(request: Request, call_next):
+    settings = get_settings()
+    try:
+        if request.url.path.startswith("/api/") and request.method.upper() != "OPTIONS" and not is_public_api_path(request.url.path):
+            require_session_for_request(request, settings)
+    except HTTPException as exc:
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+    response = await call_next(request)
+    if settings.security_headers_enabled:
+        _apply_security_headers(response)
+    return response
+
+
+@app.get("/api/auth/session")
+def get_auth_session(request: Request) -> dict[str, Any]:
+    settings = get_settings()
+    if not settings.auth_required:
+        return {"authenticated": True, "csrf_token": None, "expires_at": None, "auth_required": False}
+    session = read_session(request, settings)
+    return {
+        "authenticated": bool(session),
+        "csrf_token": session.csrf_token if session else None,
+        "expires_at": session.expires_at if session else None,
+        "auth_required": True,
+    }
+
+
+@app.post("/api/auth/session")
+def create_auth_session(payload: dict[str, str], response: Response) -> dict[str, Any]:
+    settings = get_settings()
+    if not settings.auth_required:
+        return {"authenticated": True, "csrf_token": None, "expires_at": None, "auth_required": False}
+    if not authenticate_access_code(payload.get("access_code", ""), settings):
+        raise HTTPException(status_code=401, detail="Invalid access code")
+    return create_session(response, settings)
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response) -> dict[str, Any]:
+    return clear_session(response, get_settings())
 
 
 @app.get("/api/health")
@@ -185,11 +239,16 @@ def get_vlm_settings() -> VlmSettingsRead:
         batch_max_workers=settings.batch_max_workers,
         has_api_key=bool(settings.resolved_vlm_api_key),
         env_path=str(ROOT_ENV_PATH),
+        runtime_settings_writable=settings.runtime_settings_writable,
     )
 
 
 @app.put("/api/settings/vlm", response_model=VlmSettingsRead)
 def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
+    settings = get_settings()
+    if not settings.runtime_settings_writable:
+        raise HTTPException(status_code=403, detail="Runtime settings are disabled in production. Use hosting environment variables.")
+
     provider = payload.provider.strip().lower() or "auto"
     if provider not in {"auto", "openai", "openai_compatible", "google", "gemini", "google_genai", "mock"}:
         raise HTTPException(status_code=400, detail="Use auto, mock, openai_compatible, or google_genai")
@@ -223,7 +282,7 @@ def upload_raw_extraction(
     try:
         source_format = validate_raw_upload(file.filename or "")[1:]
     except RawExtractionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     raw = RawExtraction(
         filename=file.filename or "uploaded_document",
@@ -245,11 +304,19 @@ def upload_raw_extraction(
             source_format,
             RawExtractionOptions(include_images=include_images, include_formulas=include_formulas),
         )
-        raw.pdf_path = str(pdf_path)
-        raw.html_path = str(html_path)
+        if get_settings().storage_backend.strip().lower() == "s3":
+            raw.storage_path = persist_artifact(original_path, f"raw/{raw.id}/original.{source_format}")
+            raw.pdf_path = persist_artifact(pdf_path, f"raw/{raw.id}/preview.pdf", "application/pdf")
+            raw.html_path = persist_artifact(html_path, f"raw/{raw.id}/content.html", "text/html; charset=utf-8")
+        else:
+            raw.pdf_path = str(pdf_path)
+            raw.html_path = str(html_path)
         raw.warnings = json.dumps(warnings, ensure_ascii=False)
         raw.status = "completed"
         raw.error_message = None
+    except RawExtractionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
         raw.status = "failed"
         raw.error_message = str(exc)
@@ -274,7 +341,7 @@ def get_raw_extraction_pdf(raw_id: str, db: Session = Depends(get_db)) -> FileRe
         raise HTTPException(status_code=404, detail="Raw extraction not found")
     if not raw.pdf_path:
         raise HTTPException(status_code=404, detail="Raw extraction PDF preview is not available")
-    path = Path(raw.pdf_path)
+    path = materialize_storage_ref(raw.pdf_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Raw extraction PDF preview is missing")
     return FileResponse(path, media_type="application/pdf")
@@ -287,7 +354,7 @@ def get_raw_extraction_html(raw_id: str, db: Session = Depends(get_db)) -> FileR
         raise HTTPException(status_code=404, detail="Raw extraction not found")
     if not raw.html_path:
         raise HTTPException(status_code=404, detail="Raw extraction HTML is not available")
-    path = Path(raw.html_path)
+    path = materialize_storage_ref(raw.html_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Raw extraction HTML is missing")
     return FileResponse(path, media_type="text/html")
@@ -348,7 +415,7 @@ def get_document_page_image(document_id: str, page_number: int, db: Session = De
     if document:
         _repair_image_document_if_needed(document, db)
         db.refresh(page)
-    path = Path(page.image_path)
+    path = materialize_storage_ref(page.image_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Document page image missing")
     return FileResponse(path, media_type="image/png")
@@ -372,7 +439,7 @@ def get_document_page_thumbnail(
     if document:
         _repair_image_document_if_needed(document, db)
         db.refresh(page)
-    source_path = Path(page.image_path)
+    source_path = materialize_storage_ref(page.image_path)
     if not source_path.exists():
         raise HTTPException(status_code=404, detail="Document page image missing")
 
@@ -1298,6 +1365,7 @@ def create_workflow_run(
         raise HTTPException(status_code=404, detail="Workflow not found")
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
+    _validate_upload_file_count(files)
     try:
         validate_workflow_definition(json.loads(workflow.definition_json), db)
     except WorkflowDefinitionError as exc:
@@ -1392,6 +1460,7 @@ def create_batch(
         raise HTTPException(status_code=404, detail="Schema not found")
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
+    _validate_upload_file_count(files)
 
     batch = Batch(schema_id=schema.id, schema_version=1, status="running", total_count=len(files))
     db.add(batch)
@@ -1568,6 +1637,7 @@ def create_classification_batch(
         raise HTTPException(status_code=404, detail="Document classifier not found")
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
+    _validate_upload_file_count(files)
 
     batch = ClassificationBatch(classifier_id=classifier.id, status="running", total_count=len(files))
     db.add(batch)
@@ -1702,6 +1772,7 @@ def create_required_field_check_batch(
         raise HTTPException(status_code=404, detail="Required field checklist not found")
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
+    _validate_upload_file_count(files)
 
     batch = RequiredFieldCheckBatch(checklist_id=checklist.id, status="running", total_count=len(files))
     db.add(batch)
@@ -1896,6 +1967,11 @@ def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
     return {"status": "cleared", "counts": counts, "removed_paths": removed_paths}
 
 
+@app.post("/api/maintenance/retention-cleanup")
+def run_retention_cleanup() -> dict[str, Any]:
+    return _cleanup_expired_upload_data()
+
+
 @app.get("/api/audit-events", response_model=list[AuditEventRead])
 def list_audit_events(
     entity_type: str | None = None,
@@ -1939,7 +2015,7 @@ def _document_read(document: Document) -> DocumentRead:
 
 
 def _repair_image_document_if_needed(document: Document, db: Session) -> None:
-    source_path = Path(document.storage_path)
+    source_path = materialize_storage_ref(document.storage_path)
     if not is_supported_image(source_path) or not source_path.exists() or not document.pages:
         return
 
@@ -1948,20 +2024,25 @@ def _repair_image_document_if_needed(document: Document, db: Session) -> None:
         source_width, source_height = read_image_size(source_path)
     except DocumentProcessingError:
         return
-    if page.width == source_width and page.height == source_height and Path(page.image_path).exists():
+    page_path = materialize_storage_ref(page.image_path)
+    if page.width == source_width and page.height == source_height and page_path.exists():
         return
 
     try:
-        page_info = rasterize_image_page(source_path, Path(page.image_path).parent)
+        page_info = rasterize_image_page(source_path, scratch_dir_for_ref(page.image_path, "repair"))
     except DocumentProcessingError:
         return
 
     next_width = int(page_info["width"])
     next_height = int(page_info["height"])
-    if page.width == next_width and page.height == next_height and Path(page.image_path).exists():
+    if page.width == next_width and page.height == next_height and page_path.exists():
         return
 
-    page.image_path = str(page_info["image_path"])
+    if get_settings().storage_backend.strip().lower() == "s3":
+        image_path = Path(str(page_info["image_path"]))
+        page.image_path = persist_artifact(image_path, f"documents/{document.id}/pages/{image_path.name}", "image/png")
+    else:
+        page.image_path = str(page_info["image_path"])
     page.width = next_width
     page.height = next_height
     document.page_count = 1
@@ -1989,8 +2070,9 @@ def _create_document_from_upload(file: UploadFile, db: Session) -> Document:
     try:
         filename, original_path, size_bytes = save_upload_file(file)
         pages = rasterize_document(original_path)
+        storage_ref, pages = _persist_document_artifacts(original_path, pages)
     except DocumentProcessingError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Failed to process uploaded document") from exc
 
@@ -1999,7 +2081,7 @@ def _create_document_from_upload(file: UploadFile, db: Session) -> Document:
         mime_type=file.content_type or "application/octet-stream",
         size_bytes=size_bytes,
         page_count=len(pages),
-        storage_path=str(original_path),
+        storage_path=storage_ref,
         status="ready",
     )
     db.add(document)
@@ -2015,6 +2097,20 @@ def _create_document_from_upload(file: UploadFile, db: Session) -> Document:
             )
         )
     return document
+
+
+def _persist_document_artifacts(original_path: Path, pages: list[dict[str, int | str]]) -> tuple[str, list[dict[str, int | str]]]:
+    settings = get_settings()
+    if settings.storage_backend.strip().lower() != "s3":
+        return str(original_path), pages
+    document_key = original_path.parent.name
+    original_ref = persist_artifact(original_path, f"documents/{document_key}/original{original_path.suffix}")
+    persisted_pages: list[dict[str, int | str]] = []
+    for page in pages:
+        image_path = Path(str(page["image_path"]))
+        page_ref = persist_artifact(image_path, f"documents/{document_key}/pages/{image_path.name}", "image/png")
+        persisted_pages.append({**page, "image_path": page_ref})
+    return original_ref, persisted_pages
 
 
 def _schema_read(schema: Schema) -> SchemaRead:
@@ -2441,6 +2537,12 @@ def _upload_file_sort_key(file: UploadFile) -> tuple[str, str]:
     return (filename.casefold(), filename)
 
 
+def _validate_upload_file_count(files: list[UploadFile]) -> None:
+    limit = get_settings().upload_max_batch_files
+    if limit > 0 and len(files) > limit:
+        raise HTTPException(status_code=413, detail=f"Batch file count exceeds the configured limit of {limit}")
+
+
 def _batch_export_row(item: BatchItem, field_names: list[str]) -> dict[str, Any]:
     job = item.job
     row: dict[str, Any] = {
@@ -2652,3 +2754,159 @@ def _audit_event_read(event: AuditEvent) -> AuditEventRead:
         metadata=json.loads(event.metadata_json),
         created_at=event.created_at,
     )
+
+
+def _apply_security_headers(response: Response) -> None:
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://localhost:* http://127.0.0.1:*",
+    )
+
+
+def _start_retention_cleanup_worker() -> threading.Event | None:
+    settings = get_settings()
+    retention_hours = settings.resolved_upload_retention_hours
+    if retention_hours <= 0:
+        return None
+
+    stop_event = threading.Event()
+
+    def _run() -> None:
+        while not stop_event.is_set():
+            try:
+                _cleanup_expired_upload_data()
+            except Exception:
+                pass
+            interval = max(60, int(get_settings().retention_cleanup_interval_seconds or 86400))
+            stop_event.wait(interval)
+
+    thread = threading.Thread(target=_run, name="upload-retention-cleanup", daemon=True)
+    thread.start()
+    return stop_event
+
+
+def _cleanup_expired_upload_data() -> dict[str, Any]:
+    settings = get_settings()
+    retention_hours = settings.resolved_upload_retention_hours
+    if retention_hours <= 0:
+        return {"status": "disabled"}
+    cutoff = datetime.utcnow() - timedelta(hours=retention_hours)
+    db = SessionLocal()
+    try:
+        documents = db.query(Document).filter(Document.created_at < cutoff).all()
+        raw_rows = db.query(RawExtraction).filter(RawExtraction.created_at < cutoff).all()
+        paths = _storage_paths_for_cleanup(documents, raw_rows)
+        counts = _delete_history_before(db, cutoff)
+        db.commit()
+    finally:
+        db.close()
+
+    removed_paths: list[str] = []
+    for path in paths:
+        try:
+            delete_storage_ref(path)
+            removed_paths.append(str(path))
+        except Exception:
+            pass
+    return {"status": "cleaned", "cutoff": cutoff.isoformat(), "counts": counts, "removed_paths": removed_paths}
+
+
+def _storage_paths_for_cleanup(documents: list[Document], raw_rows: list[RawExtraction]) -> set[str]:
+    paths: set[str] = set()
+    for document in documents:
+        if document.storage_path:
+            paths.add(_artifact_root(document.storage_path))
+        for page in document.pages:
+            if page.image_path and is_s3_ref(page.image_path):
+                paths.add(page.image_path)
+    for raw in raw_rows:
+        for ref in [raw.storage_path, raw.pdf_path, raw.html_path]:
+            if ref:
+                paths.add(_artifact_root(ref))
+    return paths
+
+
+def _artifact_root(ref: str) -> str:
+    if is_s3_ref(ref):
+        return ref
+    path = Path(ref)
+    return str(path.parent if path.name.startswith(("original", "preview", "content")) else path)
+
+
+def _delete_history_before(db: Session, cutoff: datetime) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    expired_document_ids = [row[0] for row in db.query(Document.id).filter(Document.created_at < cutoff).all()]
+    expired_extraction_job_ids = [row[0] for row in db.query(ExtractionJob.id).filter(ExtractionJob.created_at < cutoff).all()]
+    expired_classification_job_ids = [row[0] for row in db.query(ClassificationJob.id).filter(ClassificationJob.created_at < cutoff).all()]
+    expired_required_job_ids = [row[0] for row in db.query(RequiredFieldCheckJob.id).filter(RequiredFieldCheckJob.created_at < cutoff).all()]
+
+    counts["classification_batch_items"] = db.query(ClassificationBatchItem).filter(ClassificationBatchItem.created_at < cutoff).delete(synchronize_session=False)
+    counts["classification_batches"] = db.query(ClassificationBatch).filter(ClassificationBatch.created_at < cutoff).delete(synchronize_session=False)
+    if expired_classification_job_ids:
+        counts["classification_results"] = db.query(ClassificationResult).filter(ClassificationResult.job_id.in_(expired_classification_job_ids)).delete(synchronize_session=False)
+    counts["classification_jobs"] = db.query(ClassificationJob).filter(ClassificationJob.created_at < cutoff).delete(synchronize_session=False)
+
+    counts["required_field_check_batch_items"] = db.query(RequiredFieldCheckBatchItem).filter(RequiredFieldCheckBatchItem.created_at < cutoff).delete(synchronize_session=False)
+    counts["required_field_check_batches"] = db.query(RequiredFieldCheckBatch).filter(RequiredFieldCheckBatch.created_at < cutoff).delete(synchronize_session=False)
+    if expired_required_job_ids:
+        counts["required_field_check_results"] = db.query(RequiredFieldCheckResult).filter(RequiredFieldCheckResult.job_id.in_(expired_required_job_ids)).delete(synchronize_session=False)
+    counts["required_field_check_jobs"] = db.query(RequiredFieldCheckJob).filter(RequiredFieldCheckJob.created_at < cutoff).delete(synchronize_session=False)
+
+    counts["workflow_run_items"] = db.query(WorkflowRunItem).filter(WorkflowRunItem.created_at < cutoff).delete(synchronize_session=False)
+    counts["workflow_runs"] = db.query(WorkflowRun).filter(WorkflowRun.created_at < cutoff).delete(synchronize_session=False)
+    counts["batch_items"] = db.query(BatchItem).filter(BatchItem.created_at < cutoff).delete(synchronize_session=False)
+    counts["batches"] = db.query(Batch).filter(Batch.created_at < cutoff).delete(synchronize_session=False)
+    if expired_extraction_job_ids:
+        counts["extraction_results"] = db.query(ExtractionResult).filter(ExtractionResult.job_id.in_(expired_extraction_job_ids)).delete(synchronize_session=False)
+    counts["extraction_jobs"] = db.query(ExtractionJob).filter(ExtractionJob.created_at < cutoff).delete(synchronize_session=False)
+    if expired_document_ids:
+        counts["document_pages"] = db.query(DocumentPage).filter(DocumentPage.document_id.in_(expired_document_ids)).delete(synchronize_session=False)
+    counts["documents"] = db.query(Document).filter(Document.created_at < cutoff).delete(synchronize_session=False)
+    counts["raw_extractions"] = db.query(RawExtraction).filter(RawExtraction.created_at < cutoff).delete(synchronize_session=False)
+    counts["audit_events"] = db.query(AuditEvent).filter(AuditEvent.created_at < cutoff).delete(synchronize_session=False)
+    counts["draft_schemas"] = db.query(Schema).filter(Schema.ephemeral == True, Schema.created_at < cutoff).delete(synchronize_session=False)  # noqa: E712
+    return counts
+
+
+def _configure_frontend_static() -> None:
+    settings = get_settings()
+    if not settings.serve_frontend:
+        return
+
+    dist_dir = settings.resolved_frontend_dist_dir
+    index_path = dist_dir / "index.html"
+    if not index_path.exists():
+        return
+
+    assets_dir = dist_dir / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend_assets")
+
+    @app.get("/", include_in_schema=False)
+    def _frontend_index() -> FileResponse:
+        return FileResponse(index_path)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def _frontend_spa(full_path: str) -> FileResponse:
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        requested = (dist_dir / full_path).resolve()
+        if requested.is_file() and _is_relative_to(requested, dist_dir.resolve()):
+            return FileResponse(requested)
+        return FileResponse(index_path)
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+_configure_frontend_static()

@@ -1,4 +1,5 @@
 import shutil
+import zipfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,7 +20,9 @@ OFFICE_EXTENSIONS = {".docx", ".pptx"}
 
 
 class DocumentProcessingError(ValueError):
-    pass
+    def __init__(self, message: str, status_code: int = 400):
+        self.status_code = status_code
+        super().__init__(message)
 
 
 def validate_upload(filename: str) -> str:
@@ -43,8 +46,11 @@ def save_upload_file(upload: UploadFile) -> tuple[str, Path, int]:
             if not chunk:
                 break
             size += len(chunk)
+            if size > settings.upload_max_file_bytes:
+                raise DocumentProcessingError("Uploaded file is too large", status_code=413)
             destination.write(chunk)
 
+    _validate_file_content(original_path, suffix)
     return upload.filename or original_path.name, original_path, size
 
 
@@ -116,6 +122,9 @@ def _rasterize_pdf(source_path: Path, page_dir: Path) -> list[dict[str, int | st
         with fitz.open(source_path) as document:
             if document.page_count == 0:
                 raise DocumentProcessingError("PDF has no pages")
+            max_pages = get_settings().upload_max_pdf_pages
+            if max_pages > 0 and document.page_count > max_pages:
+                raise DocumentProcessingError(f"PDF page count exceeds the configured limit of {max_pages}", status_code=422)
             for index, page in enumerate(document, start=1):
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
                 image_path = page_dir / f"page_{index}.png"
@@ -129,8 +138,52 @@ def _rasterize_pdf(source_path: Path, page_dir: Path) -> list[dict[str, int | st
                     }
                 )
     except fitz.FileDataError as exc:
-        raise DocumentProcessingError("Failed to read PDF") from exc
+        raise DocumentProcessingError("Failed to read PDF", status_code=415) from exc
     return pages
+
+
+def _validate_file_content(path: Path, suffix: str) -> None:
+    try:
+        header = path.read_bytes()[:16]
+    except OSError as exc:
+        raise DocumentProcessingError("Failed to read uploaded file") from exc
+
+    if suffix == ".pdf":
+        if not header.startswith(b"%PDF-"):
+            raise DocumentProcessingError("Uploaded file does not match the PDF format", status_code=415)
+        return
+    if suffix in IMAGE_EXTENSIONS:
+        _validate_image_content(path)
+        return
+    if suffix in OFFICE_EXTENSIONS:
+        if not zipfile.is_zipfile(path):
+            raise DocumentProcessingError("Uploaded file does not match the Office document format", status_code=415)
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = set(archive.namelist())
+        except zipfile.BadZipFile as exc:
+            raise DocumentProcessingError("Uploaded file does not match the Office document format", status_code=415) from exc
+        if "[Content_Types].xml" not in names:
+            raise DocumentProcessingError("Uploaded Office document is missing required metadata", status_code=415)
+        if suffix == ".docx" and not any(name.startswith("word/") for name in names):
+            raise DocumentProcessingError("Uploaded file does not match the DOCX format", status_code=415)
+        if suffix == ".pptx" and not any(name.startswith("ppt/") for name in names):
+            raise DocumentProcessingError("Uploaded file does not match the PPTX format", status_code=415)
+
+
+def _validate_image_content(path: Path) -> None:
+    try:
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source)
+            width, height = image.size
+    except UnidentifiedImageError as exc:
+        raise DocumentProcessingError("Uploaded file does not match a supported image format", status_code=415) from exc
+    except OSError as exc:
+        raise DocumentProcessingError("Failed to inspect uploaded image", status_code=415) from exc
+
+    max_pixels = get_settings().upload_max_image_pixels
+    if max_pixels > 0 and width * height > max_pixels:
+        raise DocumentProcessingError(f"Image pixel count exceeds the configured limit of {max_pixels}", status_code=422)
 
 
 def _rasterize_image(source_path: Path, page_dir: Path) -> list[dict[str, int | str]]:

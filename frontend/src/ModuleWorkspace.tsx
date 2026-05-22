@@ -17,8 +17,9 @@ import {
   X
 } from "lucide-react";
 import { ChangeEvent, DragEvent, PointerEvent, useEffect, useState } from "react";
+import { apiFetch } from "./apiClient";
+import { API_BASE } from "./apiConfig";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const MODULE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const MODULE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
 
@@ -106,7 +107,7 @@ type ModuleJob<T> = {
 type ClassificationOutput = {
   document_id: string;
   classifier_id: string;
-  status: "classified" | "unknown" | "needs_review";
+  status: "classified" | "unknown";
   class_name: string | null;
   confidence: number | null;
   reason: string;
@@ -718,9 +719,12 @@ function ModuleUploadDropzone(props: {
         </div>
       ) : (
         <>
-          <UploadCloud size={34} />
-          <strong>파일 또는 폴더를 업로드하세요</strong>
-          <span>PDF, 이미지, DOCX, PPTX · 자동으로 단일/배치를 판단합니다.</span>
+          <SampleUploadPreview />
+          <div className="sample-upload-cta">
+            <UploadCloud size={34} />
+            <strong>파일 또는 폴더를 업로드하세요</strong>
+            <span>PDF, 이미지, DOCX, PPTX · 자동으로 단일/배치를 판단합니다.</span>
+          </div>
           <div className="module-upload-actions">
             <label className="batch-upload">
               <FileUp size={16} />
@@ -735,6 +739,18 @@ function ModuleUploadDropzone(props: {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+function SampleUploadPreview() {
+  return (
+    <div className="sample-upload-preview" aria-label="샘플 문서 미리보기">
+      <img src="/sample/bank_00070.jpg" alt="샘플 신청서 문서" />
+      <div>
+        <span>샘플 문서</span>
+        <strong>bank_00070.jpg</strong>
+      </div>
     </div>
   );
 }
@@ -873,10 +889,10 @@ function ClassifierConfigEditor(props: { draft: DocumentClassifier; onDraft: (dr
           <span>설정 이름</span>
           <input value={draft.name} onChange={(event) => props.onDraft({ ...draft, name: event.target.value })} />
         </label>
-        <label className="module-toggle-row">
-          <span>미분류 허용</span>
-          <input type="checkbox" checked={draft.allow_unknown} onChange={(event) => props.onDraft({ ...draft, allow_unknown: event.target.checked })} />
-        </label>
+        <div className="module-toggle-row classifier-outcome-note">
+          <span>결과 범위</span>
+          <strong>사용자 정의 class 또는 unknown</strong>
+        </div>
       </div>
       <label>
         <span>설명</span>
@@ -1171,12 +1187,7 @@ function ModuleLibraryPanel(props: {
 }
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const isForm = options.body instanceof FormData;
-  const response = await fetch(`${API_BASE}${path}`, {
-    cache: "no-store",
-    ...options,
-    headers: isForm ? options.headers : { "Content-Type": "application/json", ...(options.headers ?? {}) }
-  });
+  const response = await apiFetch(path, options);
   if (!response.ok) {
     const detail = await response.json().catch(() => null);
     throw new Error(formatApiDetail(detail?.detail) || response.statusText);
@@ -1210,7 +1221,7 @@ function defaultClassifier(): DocumentClassifier {
   return {
     id: "",
     name: "새 문서 분류기",
-    description: "업로드 문서를 사용자가 정의한 후보 class 중 하나로 분류합니다.",
+    description: "업로드 문서를 사용자가 정의한 후보 class 중 하나 또는 unknown으로 분류합니다.",
     allow_unknown: true,
     archived: false,
     classes: [
@@ -1259,7 +1270,7 @@ function toClassifierPayload(config: DocumentClassifier) {
   return {
     name: config.name.trim(),
     description: config.description?.trim() || null,
-    allow_unknown: config.allow_unknown,
+    allow_unknown: true,
     classes
   };
 }
@@ -1329,8 +1340,7 @@ function moduleStatusLabel(status: string | null | undefined) {
 function classificationStatusLabel(status: ClassificationOutput["status"]) {
   const labels: Record<ClassificationOutput["status"], string> = {
     classified: "분류 완료",
-    unknown: "알 수 없음",
-    needs_review: "검토 필요"
+    unknown: "unknown"
   };
   return labels[status];
 }

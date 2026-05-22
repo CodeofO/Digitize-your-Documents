@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 import zipfile
 
@@ -16,7 +17,7 @@ except ImportError:  # pragma: no cover - compatibility for older PyMuPDF instal
 from PIL import Image
 
 from app.config import get_settings
-from app.models import WorkflowRunItem
+from app.models import Document, WorkflowRunItem
 from tests.conftest import get_client
 
 
@@ -89,9 +90,170 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["libreoffice_path"] == "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        assert payload["runtime_settings_writable"] is True
 
     contents = env_path.read_text(encoding="utf-8")
     assert 'LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"' in contents
+
+
+def test_vlm_settings_are_readonly_in_production(monkeypatch, tmp_path) -> None:
+    from app import config as config_module
+
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(config_module, "ROOT_ENV_PATH", env_path)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ALLOW_RUNTIME_SETTINGS", raising=False)
+    get_settings.cache_clear()
+
+    try:
+        with get_client() as client:
+            settings_response = client.get("/api/settings/vlm")
+            assert settings_response.status_code == 200
+            assert settings_response.json()["runtime_settings_writable"] is False
+
+            response = client.put(
+                "/api/settings/vlm",
+                json={
+                    "api_key": "test-secret",
+                    "model_name": "test-model",
+                    "libreoffice_path": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                    "provider": "openai",
+                },
+            )
+            assert response.status_code == 403
+            assert not env_path.exists()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_cors_origin_env_parser() -> None:
+    from app.config import parse_cors_allowed_origins
+
+    assert parse_cors_allowed_origins("https://app.example.com, https://admin.example.com") == [
+        "https://app.example.com",
+        "https://admin.example.com",
+    ]
+
+
+def test_shared_secret_auth_and_csrf(monkeypatch) -> None:
+    monkeypatch.setenv("ACCESS_CONTROL_MODE", "shared_secret")
+    monkeypatch.setenv("APP_ACCESS_SECRET", "test-access-code")
+    monkeypatch.setenv("SESSION_SECRET_KEY", "test-session-secret")
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
+    get_settings.cache_clear()
+
+    try:
+        with get_client() as client:
+            blocked = client.get("/api/documents")
+            assert blocked.status_code == 401
+
+            bad = client.post("/api/auth/session", json={"access_code": "wrong"})
+            assert bad.status_code == 401
+
+            created = client.post("/api/auth/session", json={"access_code": "test-access-code"})
+            assert created.status_code == 200, created.text
+            payload = created.json()
+            assert payload["authenticated"] is True
+            assert payload["csrf_token"]
+            assert "httponly" in created.headers["set-cookie"].lower()
+
+            allowed = client.get("/api/documents")
+            assert allowed.status_code == 200
+
+            missing_csrf = client.post("/api/schemas", json={"name": "blocked", "fields": []})
+            assert missing_csrf.status_code == 403
+
+            created_schema = client.post(
+                "/api/schemas",
+                headers={"X-CSRF-Token": payload["csrf_token"]},
+                json={
+                    "name": "csrf_allowed",
+                    "fields": [
+                        {"key_name": "field", "description": "visible field", "output_format": "string"},
+                    ],
+                },
+            )
+            assert created_schema.status_code == 200, created_schema.text
+    finally:
+        monkeypatch.delenv("ACCESS_CONTROL_MODE", raising=False)
+        monkeypatch.delenv("APP_ACCESS_SECRET", raising=False)
+        monkeypatch.delenv("SESSION_SECRET_KEY", raising=False)
+        monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+        get_settings.cache_clear()
+
+
+def test_upload_rejects_content_type_spoof() -> None:
+    with get_client() as client:
+        response = client.post(
+            "/api/documents",
+            files={"file": ("fake.png", b"not an image", "image/png")},
+        )
+        assert response.status_code == 415
+
+
+def test_upload_rejects_file_size_over_limit(monkeypatch) -> None:
+    monkeypatch.setenv("UPLOAD_MAX_FILE_BYTES", "4")
+    get_settings.cache_clear()
+    try:
+        with get_client() as client:
+            response = client.post(
+                "/api/documents",
+                files={"file": ("invoice.png", ONE_BY_ONE_PNG, "image/png")},
+            )
+            assert response.status_code == 413
+    finally:
+        monkeypatch.delenv("UPLOAD_MAX_FILE_BYTES", raising=False)
+        get_settings.cache_clear()
+
+
+def test_batch_upload_rejects_too_many_files(monkeypatch) -> None:
+    monkeypatch.setenv("UPLOAD_MAX_BATCH_FILES", "1")
+    get_settings.cache_clear()
+    try:
+        with get_client() as client:
+            schema = create_schema(client, "batch_limit_schema")
+            response = client.post(
+                "/api/batches",
+                data={"schema_id": schema["id"]},
+                files=[
+                    ("files", ("a.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("b.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert response.status_code == 413
+    finally:
+        monkeypatch.delenv("UPLOAD_MAX_BATCH_FILES", raising=False)
+        get_settings.cache_clear()
+
+
+def test_retention_cleanup_removes_expired_uploads(monkeypatch) -> None:
+    from app.database import SessionLocal
+
+    monkeypatch.setenv("UPLOAD_RETENTION_HOURS", "1")
+    get_settings.cache_clear()
+    try:
+        with get_client() as client:
+            document = upload_png(client)
+            db = SessionLocal()
+            try:
+                row = db.get(Document, document["document_id"])
+                assert row is not None
+                storage_path = row.storage_path
+                row.created_at = datetime.utcnow() - timedelta(hours=2)
+                for page in row.pages:
+                    page.created_at = datetime.utcnow() - timedelta(hours=2)
+                db.commit()
+            finally:
+                db.close()
+
+            cleaned = client.post("/api/maintenance/retention-cleanup")
+            assert cleaned.status_code == 200, cleaned.text
+            assert cleaned.json()["status"] == "cleaned"
+            assert client.get(f"/api/documents/{document['document_id']}").status_code == 404
+            assert not os.path.exists(os.path.dirname(storage_path))
+    finally:
+        monkeypatch.delenv("UPLOAD_RETENTION_HOURS", raising=False)
+        get_settings.cache_clear()
 
 
 def test_vlm_runtime_kwargs_include_speed_controls(monkeypatch) -> None:
@@ -184,7 +346,7 @@ def test_google_generation_config_uses_structured_output_and_thinking_level(monk
         get_settings.cache_clear()
 
 
-def test_classification_schema_allows_needs_review_without_class_name() -> None:
+def test_classification_schema_uses_classes_or_unknown_only() -> None:
     from app.vlm import _classification_output_schema
     from app.schemas import ClassCandidate
 
@@ -192,6 +354,7 @@ def test_classification_schema_allows_needs_review_without_class_name() -> None:
         classes=[ClassCandidate(class_name="contract", description="Contract", signals=[])],
         allow_unknown=False,
     )
+    assert schema["properties"]["status"]["enum"] == ["classified", "unknown"]
     class_name_schema = schema["properties"]["class_name"]
     assert {"type": "null"} in class_name_schema["anyOf"]
 
@@ -1334,9 +1497,9 @@ def test_workflow_branch_without_fallback_exports_classification_only(monkeypatc
             )
             assert run_response.status_code == 200, run_response.text
             run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
-            assert run["status"] == "needs_review"
+            assert run["status"] == "completed"
             item = run["items"][0]
-            assert item["status"] == "needs_review"
+            assert item["status"] == "completed"
             assert item["error_message"] is None
             assert item["result"]["branch_path"] == "unknown"
             assert item["result"]["kie_values"] == {}
@@ -1740,8 +1903,11 @@ def upload_png(client):
 
 def create_schema(client, name: str | None = None):
     global SCHEMA_COUNTER
-    SCHEMA_COUNTER += 1
-    schema_name = name or ("invoice_basic" if SCHEMA_COUNTER == 1 else f"invoice_basic_{SCHEMA_COUNTER}")
+    if name is None:
+        SCHEMA_COUNTER += 1
+        schema_name = "invoice_basic" if SCHEMA_COUNTER == 1 else f"invoice_basic_{SCHEMA_COUNTER}"
+    else:
+        schema_name = name
     response = client.post(
         "/api/schemas",
         json={
@@ -1853,9 +2019,8 @@ def workflow_definition(schema_id: str, classifier_id: str, checklist_id: str):
             {"id": "input-classifier", "source": "input", "target": "classifier"},
             {"id": "classifier-branch", "source": "classifier", "target": "branch"},
             {"id": "branch-contract", "source": "branch", "target": "kie_contract", "sourceHandle": "class:contract"},
+            {"id": "branch-consent-form", "source": "branch", "target": "merge", "sourceHandle": "class:consent_form"},
             {"id": "branch-unknown", "source": "branch", "target": "merge", "sourceHandle": "unknown"},
-            {"id": "branch-needs-review", "source": "branch", "target": "merge", "sourceHandle": "needs_review"},
-            {"id": "branch-default", "source": "branch", "target": "merge", "sourceHandle": "default"},
             {"id": "kie-required", "source": "kie_contract", "target": "required_contract"},
             {"id": "required-merge", "source": "required_contract", "target": "merge"},
             {"id": "merge-export", "source": "merge", "target": "export"},
