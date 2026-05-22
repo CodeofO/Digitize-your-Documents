@@ -24,10 +24,13 @@ import {
   GitMerge,
   Library,
   Loader2,
+  PanelRightClose,
+  PanelRightOpen,
   Play,
   Plus,
   Save,
   Sparkles,
+  Unlink2,
   UploadCloud
 } from "lucide-react";
 import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
@@ -42,6 +45,7 @@ type WorkflowNodeData = {
   label: string;
   config?: Record<string, string>;
   branchKeys?: string[];
+  connectedBranchKeys?: string[];
 };
 
 type WorkflowNode = Node<WorkflowNodeData>;
@@ -166,6 +170,8 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [nodes, setNodes] = useState<WorkflowNode[]>(() => initialDraft?.nodes ?? defaultNodes);
   const [edges, setEdges] = useState<WorkflowEdge[]>(() => initialDraft?.edges ?? defaultEdges.map(normalizeWorkflowEdge));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(initialDraft?.selectedNodeId ?? defaultNodes[1]?.id ?? null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [settingsCollapsed, setSettingsCollapsed] = useState(false);
   const [schemas, setSchemas] = useState<SchemaSummary[]>([]);
   const [classifiers, setClassifiers] = useState<ClassifierSummary[]>([]);
   const [checklists, setChecklists] = useState<ChecklistSummary[]>([]);
@@ -181,6 +187,8 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const activeWorkflow = workflows.find((workflow) => workflow.id === activeWorkflowId) ?? null;
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
+  const canvasNodes = useMemo(() => buildCanvasNodes(nodes, edges), [nodes, edges]);
   const selectedRunItem =
     activeRun?.items.find((item) => item.id === selectedItemId) ?? activeRun?.items[0] ?? null;
   const validation = useMemo(() => validateWorkflow(nodes, edges), [nodes, edges]);
@@ -216,8 +224,11 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   }, []);
 
   const onEdgesChange = useCallback((changes: EdgeChange<WorkflowEdge>[]) => {
-    setEdges((current) => applyEdgeChanges(changes, current));
-  }, []);
+    setEdges((current) => applyEdgeChanges(changes, current).map(normalizeWorkflowEdge));
+    if (selectedEdgeId && changes.some((change) => change.type === "remove" && change.id === selectedEdgeId)) {
+      setSelectedEdgeId(null);
+    }
+  }, [selectedEdgeId]);
 
   const onConnect = useCallback((connection: Connection) => {
     const validationMessage = validateConnection(connection, nodes, edges);
@@ -225,7 +236,13 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       setError(validationMessage);
       return;
     }
+    const confirmationMessage = sharedTargetConfirmation(connection, nodes, edges);
+    if (confirmationMessage && !window.confirm(confirmationMessage)) {
+      setMessage("연결을 취소했습니다.");
+      return;
+    }
     setError(null);
+    setSelectedEdgeId(null);
     setEdges((current) =>
       addEdge(
         {
@@ -238,6 +255,13 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       )
     );
   }, [edges, nodes]);
+
+  function deleteSelectedEdge() {
+    if (!selectedEdgeId) return;
+    setEdges((current) => current.filter((edge) => edge.id !== selectedEdgeId));
+    setSelectedEdgeId(null);
+    setMessage("선 연결을 삭제했습니다.");
+  }
 
   async function refreshAll() {
     setError(null);
@@ -382,7 +406,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
 
   return (
     <ReactFlowProvider>
-      <main className="workflow-builder">
+      <main className={`workflow-builder ${settingsCollapsed ? "settings-collapsed" : ""}`}>
         <aside className="workflow-palette" aria-label="워크플로우 모듈">
           <div className="workflow-panel-header">
             <p className="eyebrow">Builder</p>
@@ -445,20 +469,46 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             <button type="button" onClick={() => void saveWorkflow()} disabled={Boolean(busy) || validation.errors.length > 0}>
               <Save size={16} /> 저장
             </button>
+            {selectedEdge && (
+              <div className="workflow-edge-actions">
+                <span>{edgeLabel(selectedEdge, nodes)}</span>
+                <button type="button" className="secondary" onClick={deleteSelectedEdge}>
+                  <Unlink2 size={15} /> 선 삭제
+                </button>
+              </div>
+            )}
             <span className="workflow-autosave">
               자동 저장 {draftSavedAt ?? "대기"}
             </span>
+            <button
+              type="button"
+              className="secondary icon-only workflow-panel-toggle"
+              aria-label={settingsCollapsed ? "노드 설정 패널 펼치기" : "노드 설정 패널 접기"}
+              title={settingsCollapsed ? "노드 설정 패널 펼치기" : "노드 설정 패널 접기"}
+              onClick={() => setSettingsCollapsed((current) => !current)}
+            >
+              {settingsCollapsed ? <PanelRightOpen size={17} /> : <PanelRightClose size={17} />}
+            </button>
           </div>
 
           <div className="workflow-canvas">
             <ReactFlow
-              nodes={nodes}
+              nodes={canvasNodes}
               edges={edges}
               nodeTypes={nodeTypes}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
-              onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+              onNodeClick={(_, node) => {
+                setSelectedNodeId(node.id);
+                setSelectedEdgeId(null);
+              }}
+              onEdgeClick={(_, edge) => {
+                setSelectedEdgeId(edge.id);
+                setSelectedNodeId(null);
+              }}
+              onPaneClick={() => setSelectedEdgeId(null)}
+              deleteKeyCode={["Backspace", "Delete"]}
               fitView
             >
               <Background />
@@ -509,18 +559,20 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
           )}
         </section>
 
-        <aside className="workflow-settings" aria-label="노드 설정">
-          <NodeSettings
-            node={selectedNode}
-            schemas={schemas}
-            classifiers={classifiers}
-            checklists={checklists}
-            onConfig={updateNodeConfig}
-            onCreateSchema={onCreateSchema}
-            onCreateClassifier={onCreateClassifier}
-            onCreateChecklist={onCreateChecklist}
-          />
-        </aside>
+        {!settingsCollapsed && (
+          <aside className="workflow-settings" aria-label="노드 설정">
+            <NodeSettings
+              node={selectedNode}
+              schemas={schemas}
+              classifiers={classifiers}
+              checklists={checklists}
+              onConfig={updateNodeConfig}
+              onCreateSchema={onCreateSchema}
+              onCreateClassifier={onCreateClassifier}
+              onCreateChecklist={onCreateChecklist}
+            />
+          </aside>
+        )}
       </main>
     </ReactFlowProvider>
   );
@@ -529,6 +581,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
 function WorkflowCanvasNode({ data, selected }: NodeProps<WorkflowNode>) {
   const kind = data.kind;
   const branchKeys = data.branchKeys?.length ? data.branchKeys : ["default", "unknown", "needs_review"];
+  const connectedBranchKeys = new Set(data.connectedBranchKeys ?? []);
   return (
     <div className={`workflow-node workflow-node-${kind} ${selected ? "selected" : ""}`}>
       {kind !== "input" && <Handle className="workflow-handle workflow-handle-target" type="target" position={Position.Left} />}
@@ -541,7 +594,11 @@ function WorkflowCanvasNode({ data, selected }: NodeProps<WorkflowNode>) {
         <>
           <div className="branch-handles">
             {branchKeys.map((key) => (
-              <div key={key} className="branch-handle-row">
+              <div key={key} className={`branch-handle-row ${connectedBranchKeys.has(key) ? "connected" : "missing"}`}>
+                <span
+                  className="branch-route-dot"
+                  title={connectedBranchKeys.has(key) ? "후속 노드 연결됨" : "후속 노드 없음 · 분류 결과만 export"}
+                />
                 <small>{branchKeyLabel(key)}</small>
               </div>
             ))}
@@ -802,14 +859,40 @@ function normalizeWorkflowEdge(edge: WorkflowEdge): WorkflowEdge {
 }
 
 function normalizeWorkflowNode(node: WorkflowNode): WorkflowNode {
+  const { connectedBranchKeys: _connectedBranchKeys, ...data } = node.data;
   return {
     ...node,
     type: "workflow",
     data: {
-      ...node.data,
-      config: node.data.config ?? {}
+      ...data,
+      config: data.config ?? {}
     }
   };
+}
+
+function buildCanvasNodes(nodes: WorkflowNode[], edges: WorkflowEdge[]): WorkflowNode[] {
+  return nodes.map((node) => {
+    if (node.data.kind !== "branch") return node;
+    const connectedBranchKeys = edges
+      .filter((edge) => edge.source === node.id && edge.sourceHandle)
+      .map((edge) => String(edge.sourceHandle));
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        connectedBranchKeys
+      }
+    };
+  });
+}
+
+function edgeLabel(edge: WorkflowEdge, nodes: WorkflowNode[]) {
+  const source = nodes.find((node) => node.id === edge.source);
+  const target = nodes.find((node) => node.id === edge.target);
+  const sourceLabel = source?.data.label ?? edge.source;
+  const targetLabel = target?.data.label ?? edge.target;
+  const routeLabel = edge.sourceHandle ? ` · ${branchKeyLabel(String(edge.sourceHandle))}` : "";
+  return `${sourceLabel}${routeLabel} → ${targetLabel}`;
 }
 
 function serializeDefinition(nodes: WorkflowNode[], edges: WorkflowEdge[]) {
@@ -818,7 +901,7 @@ function serializeDefinition(nodes: WorkflowNode[], edges: WorkflowEdge[]) {
       id: node.id,
       type: "workflow",
       position: node.position,
-      data: node.data
+      data: normalizeWorkflowNode(node).data
     })),
     edges: edges.map((edge) => ({
       id: edge.id,
@@ -903,6 +986,9 @@ function validateConnection(connection: Connection, nodes: WorkflowNode[], edges
   if (target.data.kind === "input") return "Input 앞에는 노드를 연결할 수 없습니다.";
   if (target.data.kind === "branch" && source.data.kind !== "classifier") return "Branch 앞에는 Document Classifier만 연결하세요.";
   if (source.data.kind === "branch" && !connection.sourceHandle) return "Branch는 default/unknown/class handle에서 연결하세요.";
+  if (source.data.kind === "branch" && edges.some((edge) => edge.source === connection.source && edge.sourceHandle === connection.sourceHandle)) {
+    return "이 branch route는 이미 후속 노드가 있습니다. 기존 선을 삭제한 뒤 다시 연결하세요.";
+  }
   if (edges.some((edge) => edge.source === connection.source && edge.target === connection.target && edge.sourceHandle === connection.sourceHandle)) {
     return "이미 같은 연결이 있습니다.";
   }
@@ -912,14 +998,31 @@ function validateConnection(connection: Connection, nodes: WorkflowNode[], edges
   return null;
 }
 
+function sharedTargetConfirmation(connection: Connection, nodes: WorkflowNode[], edges: WorkflowEdge[]) {
+  if (!connection.source || !connection.target) return null;
+  const source = nodes.find((node) => node.id === connection.source);
+  const target = nodes.find((node) => node.id === connection.target);
+  if (!source || !target || source.data.kind !== "branch") return null;
+  const existingIncoming = edges.filter((edge) => edge.target === connection.target);
+  if (!existingIncoming.length) return null;
+  const incomingLabels = existingIncoming.map((edge) => edgeLabel(edge, nodes)).join(", ");
+  return `${target.data.label} 노드에는 이미 ${incomingLabels} 연결이 있습니다. 이 branch route도 같은 후속 노드로 연결할까요?`;
+}
+
 function validateWorkflow(nodes: WorkflowNode[], edges: WorkflowEdge[]) {
   const errors: string[] = [];
   const warnings: string[] = [];
   const byId = new Map(nodes.map((node) => [node.id, node]));
+  const inputNode = nodes.find((node) => node.data.kind === "input");
+  const activeNodeIds = inputNode ? reachableNodeIds(inputNode.id, edges) : new Set(nodes.map((node) => node.id));
   const inputCount = nodes.filter((node) => node.data.kind === "input").length;
   if (inputCount !== 1) errors.push("Input 노드는 정확히 1개여야 합니다.");
   if (!nodes.some((node) => node.data.kind === "export")) errors.push("Export 노드가 필요합니다.");
   nodes.forEach((node) => {
+    if (!activeNodeIds.has(node.id)) {
+      warnings.push(`${node.data.label} 노드는 현재 실행 경로에 연결되어 있지 않습니다.`);
+      return;
+    }
     if (node.data.kind === "classifier" && !node.data.config?.classifier_id) errors.push("문서 분류 노드에 classifier를 선택하세요.");
     if (node.data.kind === "kie" && !node.data.config?.schema_id) errors.push("KIE 노드에 schema를 선택하세요.");
     if (node.data.kind === "required-checker" && !node.data.config?.checklist_id) errors.push("필수 항목 확인 노드에 checklist를 선택하세요.");
@@ -927,12 +1030,27 @@ function validateWorkflow(nodes: WorkflowNode[], edges: WorkflowEdge[]) {
       const incoming = edges.filter((edge) => edge.target === node.id);
       if (!incoming.some((edge) => byId.get(edge.source)?.data.kind === "classifier")) errors.push("Branch 노드는 classifier 바로 뒤에 연결하세요.");
       const sourceHandles = edges.filter((edge) => edge.source === node.id).map((edge) => edge.sourceHandle || "default");
-      if (!sourceHandles.includes("default")) warnings.push("Branch default fallback이 없습니다.");
-      if (!sourceHandles.includes("unknown")) warnings.push("Branch unknown fallback이 없습니다.");
-      if (!sourceHandles.includes("needs_review")) warnings.push("Branch needs_review fallback이 없습니다.");
+      const branchKeys = node.data.branchKeys?.length ? node.data.branchKeys : ["default", "unknown", "needs_review"];
+      branchKeys.forEach((key) => {
+        if (!sourceHandles.includes(key)) {
+          warnings.push(`Branch ${branchKeyLabel(key)} 경로가 없습니다. 해당 문서는 분류 결과만 export됩니다.`);
+        }
+      });
     }
   });
   return { errors: [...new Set(errors)], warnings: [...new Set(warnings)] };
+}
+
+function reachableNodeIds(startNodeId: string, edges: WorkflowEdge[]) {
+  const visited = new Set<string>();
+  const stack = [startNodeId];
+  while (stack.length) {
+    const nodeId = stack.pop();
+    if (!nodeId || visited.has(nodeId)) continue;
+    visited.add(nodeId);
+    edges.filter((edge) => edge.source === nodeId).forEach((edge) => stack.push(edge.target));
+  }
+  return visited;
 }
 
 function nodeKindDescription(kind: WorkflowNodeKind) {

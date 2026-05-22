@@ -1301,7 +1301,7 @@ def test_workflow_definition_validation_and_branch_run_mock_mode() -> None:
         get_settings.cache_clear()
 
 
-def test_workflow_branch_without_fallback_marks_item_needs_review(monkeypatch) -> None:
+def test_workflow_branch_without_fallback_exports_classification_only(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.document_modules.classify_document_with_vlm",
         lambda classes, allow_unknown, image_paths: {
@@ -1334,8 +1334,41 @@ def test_workflow_branch_without_fallback_marks_item_needs_review(monkeypatch) -
             assert run["status"] == "needs_review"
             item = run["items"][0]
             assert item["status"] == "needs_review"
-            assert item["result"]["error_message"] == "No branch path matched this document"
+            assert item["error_message"] is None
+            assert item["result"]["branch_path"] == "unknown"
             assert item["result"]["kie_values"] == {}
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_branch_without_downstream_path_completes_classification_only() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="workflow_no_downstream_schema")
+            classifier = create_document_classifier(client, name="workflow_no_downstream_classifier")
+            checklist = create_required_field_checklist(client, name="workflow_no_downstream_checklist")
+            definition = workflow_definition(schema["id"], classifier["id"], checklist["id"])
+            definition["edges"] = [edge for edge in definition["edges"] if edge["source"] != "branch"]
+            workflow = client.post("/api/workflows", json={"name": "classification_only", "definition": definition})
+            assert workflow.status_code == 200, workflow.text
+            assert workflow.json()["validation_warnings"]
+
+            run_response = client.post(
+                f"/api/workflows/{workflow.json()['id']}/runs",
+                files=[("files", ("contract.png", ONE_BY_ONE_PNG, "image/png"))],
+            )
+            assert run_response.status_code == 200, run_response.text
+            run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
+            item = run["items"][0]
+            assert item["status"] == "completed"
+            assert item["error_message"] is None
+            assert item["result"]["classification"]["class_name"] == "contract"
+            assert item["result"]["branch_path"] == "class:contract"
+            assert item["result"]["kie_values"] == {}
+            assert item["result"]["required_items"] == {}
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()

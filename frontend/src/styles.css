@@ -219,6 +219,10 @@ textarea {
   padding-top: 16px;
 }
 
+.workflow-builder.settings-collapsed {
+  grid-template-columns: minmax(210px, 250px) minmax(0, 1fr);
+}
+
 .workflow-palette,
 .workflow-settings,
 .workflow-canvas-shell,
@@ -227,6 +231,12 @@ textarea {
   background: #ffffff;
   border: 1px solid #d8dfd9;
   border-radius: 8px;
+}
+
+.workflow-palette,
+.workflow-settings,
+.workflow-canvas-shell {
+  box-shadow: 0 10px 28px rgba(31, 45, 41, 0.06);
 }
 
 .workflow-palette,
@@ -259,10 +269,16 @@ textarea {
 .workflow-palette-item {
   align-items: flex-start;
   background: #fbfcfa;
+  border-color: #d9e1db;
   justify-content: space-between;
   min-height: 74px;
   text-align: left;
   width: 100%;
+}
+
+.workflow-palette-item:hover {
+  background: #f3f7f4;
+  border-color: #aebfb4;
 }
 
 .workflow-palette-item span {
@@ -277,7 +293,7 @@ textarea {
 .workflow-node span,
 .workflow-node-settings p {
   color: #657269;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.35;
 }
 
@@ -292,6 +308,7 @@ textarea {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  position: relative;
 }
 
 .workflow-toolbar,
@@ -306,7 +323,7 @@ textarea {
 
 .workflow-toolbar {
   border-bottom: 1px solid #e1e7e2;
-  padding: 12px;
+  padding: 10px 12px;
 }
 
 .workflow-title-fields {
@@ -323,8 +340,7 @@ textarea {
 
 .workflow-canvas {
   background:
-    linear-gradient(rgba(35, 54, 49, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(35, 54, 49, 0.04) 1px, transparent 1px),
+    radial-gradient(circle at 1px 1px, rgba(35, 54, 49, 0.16) 1px, transparent 0),
     #fbfcfa;
   background-size: 24px 24px;
   flex: 1;
@@ -335,15 +351,15 @@ textarea {
   background: #ffffff;
   border: 1px solid #bfcac2;
   border-radius: 8px;
-  box-shadow: 0 8px 20px rgba(31, 45, 41, 0.08);
-  min-width: 180px;
-  padding: 10px 12px;
+  box-shadow: 0 8px 20px rgba(31, 45, 41, 0.07);
+  min-width: 166px;
+  padding: 8px 10px;
   position: relative;
 }
 
 .workflow-node-branch {
-  min-height: 158px;
-  min-width: 210px;
+  min-height: 150px;
+  min-width: 196px;
 }
 
 .workflow-node.selected {
@@ -354,24 +370,45 @@ textarea {
 .workflow-node-title {
   align-items: center;
   display: flex;
-  gap: 7px;
-  margin-bottom: 5px;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.workflow-node-title strong {
+  font-size: 15px;
+  line-height: 1.2;
 }
 
 .branch-handles {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
+  gap: 7px;
+  margin-top: 10px;
   padding-right: 16px;
 }
 
 .branch-handle-row {
   align-items: center;
   display: flex;
+  gap: 7px;
   height: 18px;
   justify-content: flex-end;
   position: relative;
+}
+
+.branch-route-dot {
+  border-radius: 999px;
+  display: inline-flex;
+  height: 8px;
+  width: 8px;
+}
+
+.branch-handle-row.connected .branch-route-dot {
+  background: #147a74;
+}
+
+.branch-handle-row.missing .branch-route-dot {
+  background: #d88922;
 }
 
 .workflow-handle {
@@ -403,7 +440,41 @@ textarea {
 
 .react-flow__edge-text {
   fill: #33423c;
-  font-size: 11px;
+  font-size: 10px;
+}
+
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: #147a74;
+  stroke-width: 2.4;
+}
+
+.workflow-edge-actions {
+  align-items: center;
+  background: #f3f8f6;
+  border: 1px solid #cbded7;
+  border-radius: 8px;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 34px;
+  padding: 4px 6px 4px 10px;
+}
+
+.workflow-edge-actions span {
+  color: #33423c;
+  font-size: 12px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-edge-actions button {
+  min-height: 28px;
+  padding: 5px 8px;
+}
+
+.workflow-panel-toggle {
+  margin-left: auto;
 }
 
 .workflow-run-bar {

@@ -249,9 +249,13 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
         if kind == "branch":
             branch_edge = _select_branch_edge(graph, current_id, node_results)
             if not branch_edge:
-                status = "needs_review"
-                error_message = "No branch path matched this document"
-                node_results[current_id] = {"kind": kind, "status": "needs_review", "branch_key": None}
+                branch_path = _branch_candidate_key(node_results)
+                node_results[current_id] = {
+                    "kind": kind,
+                    "status": "completed",
+                    "branch_key": branch_path,
+                    "downstream_skipped": True,
+                }
                 break
             branch_path = _branch_edge_key(branch_edge)
             node_results[current_id] = {"kind": kind, "status": "completed", "branch_key": branch_path}
@@ -519,11 +523,6 @@ def _validate_graph_shape(graph: WorkflowGraph) -> list[str]:
     for edge in graph.edges:
         if edge["source"] not in graph.nodes or edge["target"] not in graph.nodes:
             errors.append(f"Edge {edge['id']} references a missing node")
-    if input_nodes:
-        reachable = _reachable_node_ids(graph, input_nodes[0])
-        disconnected = sorted(set(graph.nodes) - reachable)
-        if disconnected:
-            errors.append(f"Workflow has disconnected node(s): {', '.join(disconnected)}")
     if _has_cycle(graph):
         errors.append("Workflow graph cannot contain a cycle")
     for node_id, node in graph.nodes.items():
@@ -537,7 +536,11 @@ def _validate_graph_shape(graph: WorkflowGraph) -> list[str]:
 
 def _validate_config_references(graph: WorkflowGraph, db: Session) -> list[str]:
     errors: list[str] = []
+    input_nodes = [node_id for node_id, node in graph.nodes.items() if _node_kind(node) == "input"]
+    active_node_ids = _reachable_node_ids(graph, input_nodes[0]) if input_nodes else set(graph.nodes)
     for node_id, node in graph.nodes.items():
+        if node_id not in active_node_ids:
+            continue
         kind = _node_kind(node)
         if kind == "classifier":
             classifier_id = _node_config_value(node, "classifier_id")
@@ -569,17 +572,22 @@ def _validate_branch_shape(graph: WorkflowGraph) -> list[str]:
         source_node = graph.nodes.get(incoming[0]["source"])
         if not source_node or _node_kind(source_node) != "classifier":
             errors.append(f"Branch node {node_id} must be connected directly after a classifier")
-        if not graph.outgoing.get(node_id):
-            errors.append(f"Branch node {node_id} must have at least one outgoing branch path")
     return errors
 
 
 def _workflow_warnings(graph: WorkflowGraph, db: Session) -> list[str]:
     warnings: list[str] = []
+    input_nodes = [node_id for node_id, node in graph.nodes.items() if _node_kind(node) == "input"]
+    if input_nodes:
+        disconnected = sorted(set(graph.nodes) - _reachable_node_ids(graph, input_nodes[0]))
+        if disconnected:
+            warnings.append(f"Workflow has disconnected node(s): {', '.join(disconnected)}")
     for node_id, node in graph.nodes.items():
         if _node_kind(node) != "branch":
             continue
         edge_keys = {_branch_edge_key(edge) for edge in graph.outgoing.get(node_id, [])}
+        if not edge_keys:
+            warnings.append(f"Branch node {node_id} has no outgoing branch path; documents stop after classification")
         if "default" not in edge_keys:
             warnings.append(f"Branch node {node_id} has no default fallback")
         if "unknown" not in edge_keys:
@@ -671,6 +679,19 @@ def _single_next_node_id(graph: WorkflowGraph, node_id: str) -> str | None:
 
 
 def _select_branch_edge(graph: WorkflowGraph, branch_node_id: str, node_results: dict[str, Any]) -> dict[str, Any] | None:
+    candidates = _branch_candidate_keys(node_results)
+    by_key = {_branch_edge_key(edge): edge for edge in graph.outgoing.get(branch_node_id, [])}
+    for key in candidates:
+        if key in by_key:
+            return by_key[key]
+    return None
+
+
+def _branch_candidate_key(node_results: dict[str, Any]) -> str:
+    return _branch_candidate_keys(node_results)[0]
+
+
+def _branch_candidate_keys(node_results: dict[str, Any]) -> list[str]:
     classification = _latest_classification(node_results)
     status = classification.get("status")
     class_name = classification.get("class_name")
@@ -680,11 +701,7 @@ def _select_branch_edge(graph: WorkflowGraph, branch_node_id: str, node_results:
     elif status in {"unknown", "needs_review"}:
         candidates.append(str(status))
     candidates.append("default")
-    by_key = {_branch_edge_key(edge): edge for edge in graph.outgoing.get(branch_node_id, [])}
-    for key in candidates:
-        if key in by_key:
-            return by_key[key]
-    return None
+    return candidates
 
 
 def _branch_edge_key(edge: dict[str, Any]) -> str:
