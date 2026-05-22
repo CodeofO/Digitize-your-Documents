@@ -1,1 +1,1 @@
-"""Digitize Your Document backend package."""
+"""Document Automation Workspace backend package."""

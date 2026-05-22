@@ -149,7 +149,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         stop_cleanup.set()
 
 
-app = FastAPI(title="Digitize Your Document API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Document Automation Workspace API", version="0.1.0", lifespan=lifespan)
 
 settings = get_settings()
 app.add_middleware(

@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>Digitize Your Documents</h1>
+  <h1>Document Automation Workspace</h1>
   <p><b>문서 접수, 분류, 필수 항목 검수, 핵심 정보 추출, 결과 export를 하나의 워크플로우로 자동화하는 로컬 문서 처리 앱입니다.</b></p>
   <p>
     <code>Workflow Builder</code>
@@ -10,11 +10,11 @@
   </p>
 </div>
 
-![Digitize Your Documents overview](assets/readme/overview.png)
+![Document Automation Workspace overview](assets/readme/overview.png)
 
 ## 이게 뭔가요
 
-`Digitize Your Documents`는 사람이 문서를 열어 보고, 종류를 나누고, 빠진 항목을 확인하고, 필요한 값을 엑셀로 옮기는 반복 업무를 줄이기 위한 React + FastAPI 기반 문서 자동화 워크스페이스입니다.
+`Document Automation Workspace`는 사람이 문서를 열어 보고, 종류를 나누고, 빠진 항목을 확인하고, 필요한 값을 엑셀로 옮기는 반복 업무를 줄이기 위한 React + FastAPI 기반 문서 자동화 워크스페이스입니다.
 
 PDF, 이미지, DOCX, PPTX, XLSX 같은 업무 문서를 업로드하면 문서 preview를 만들고, 저장된 schema/classifier/checklist를 기준으로 VLM이 구조화된 결과를 생성합니다. 결과는 화면에서 검수한 뒤 CSV/JSON으로 내보낼 수 있습니다.
 

@@ -1968,7 +1968,7 @@ export default function App() {
   }
 
   function modeTitle(currentMode: AppMode) {
-    if (currentMode === "home") return "Digitize Your Document";
+    if (currentMode === "home") return "Document Automation Workspace";
     if (currentMode === "raw") return "원문 데이터 추출";
     if (currentMode === "classifier") return "문서 분류";
     if (currentMode === "required-checker") return "필수 항목 확인";
@@ -2019,7 +2019,7 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">Digitize Your Document</p>
+          <p className="eyebrow">Document Automation Workspace</p>
           <h1>{modeTitle(mode)}</h1>
         </div>
         <div className="status-strip">
@@ -3775,11 +3775,6 @@ function UploadNotes({ onSampleSchema }: { onSampleSchema: () => void }) {
             ))}
           </tbody>
         </table>
-      </div>
-      <div className="note-list">
-        <span>지원 형식: PDF, PNG, JPG, JPEG, DOCX, PPTX</span>
-        <span>Schema 필드: 필드명, 설명, 출력 형식</span>
-        <span>설정 버튼에서 API key와 model name을 저장하세요.</span>
       </div>
     </div>
   );

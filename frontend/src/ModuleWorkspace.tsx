@@ -289,6 +289,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
   }
 
   function startNewConfig() {
+    setError(null);
     setActiveConfigId(null);
     if (isClassifier) {
       setClassifierDraft(defaultClassifier());
@@ -643,6 +644,8 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
           kind={kind}
           configs={isClassifier ? classifiers : checklists}
           activeId={activeConfigId}
+          draftName={isClassifier ? classifierDraft.name : checklistDraft.name}
+          isDraftActive={!activeConfigId}
           onNew={startNewConfig}
           onLoad={(config) => {
             if (isClassifier) loadClassifier(config as DocumentClassifier);
@@ -1149,6 +1152,8 @@ function ModuleLibraryPanel(props: {
   kind: ModuleKind;
   configs: Array<DocumentClassifier | RequiredFieldChecklist>;
   activeId: string | null;
+  draftName: string;
+  isDraftActive: boolean;
   onNew: () => void;
   onLoad: (config: DocumentClassifier | RequiredFieldChecklist) => void;
   onDelete: (id: string) => void;
@@ -1170,6 +1175,15 @@ function ModuleLibraryPanel(props: {
         새 설정
       </button>
       <div className="module-library-list">
+        {props.isDraftActive && (
+          <div className="module-library-item module-library-draft active" aria-current="true">
+            <div className="module-library-draft-body">
+              <strong>{props.draftName || "새 설정 초안"}</strong>
+              <span>저장 전 초안 · 편집 중</span>
+            </div>
+            <span className="module-library-draft-pill">초안</span>
+          </div>
+        )}
         {props.configs.map((config) => (
           <div key={config.id} className={config.id === props.activeId ? "module-library-item active" : "module-library-item"}>
             <button type="button" onClick={() => props.onLoad(config)}>

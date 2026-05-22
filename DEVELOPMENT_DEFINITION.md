@@ -1,10 +1,10 @@
-# Digitize Your Document 개발정의서
+# Document Automation Workspace 개발정의서
 
-문서 목적: `Digitize Your Document`로 대량 문서 추출 업무를 자동화하기 위한 현재 MVP 범위, UX, API, 데이터 처리 방식, 검증 기준을 정의한다.
+문서 목적: `Document Automation Workspace`로 대량 문서 추출 업무를 자동화하기 위한 현재 MVP 범위, UX, API, 데이터 처리 방식, 검증 기준을 정의한다.
 
 ## 1. 제품 정의
 
-Digitize Your Document는 사람이 대량 문서에서 반복적으로 확인하던 값을 자동 추출, 검토, export할 수 있게 만드는 React + FastAPI 워크스페이스이다.
+Document Automation Workspace는 사람이 대량 문서에서 반복적으로 확인하던 값을 자동 추출, 검토, export할 수 있게 만드는 React + FastAPI 워크스페이스이다.
 
 핵심 자동화 가치:
 
@@ -380,7 +380,7 @@ GET /api/workflow-runs/{run_id}/export?format=csv|json
 
 ## 6. Frontend
 
-첫 화면은 `Digitize Your Document` Home이다.
+첫 화면은 `Document Automation Workspace` Home이다.
 
 기능 카드:
 

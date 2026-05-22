@@ -1,6 +1,6 @@
 # Toss Design Benchmark
 
-이 문서는 `Digitize Your Documents`의 UI 톤을 정리하기 위해 Toss Design System 문서를 벤치마크한 기록이다. 공식 TDS UI Kit, 패키지, 컴포넌트, 브랜드 자산을 포함하거나 재배포하지 않고, 공개 문서에서 확인한 디자인 방향을 자체 CSS와 React 컴포넌트로 해석해 적용한다.
+이 문서는 `Document Automation Workspace`의 UI 톤을 정리하기 위해 Toss Design System 문서를 벤치마크한 기록이다. 공식 TDS UI Kit, 패키지, 컴포넌트, 브랜드 자산을 포함하거나 재배포하지 않고, 공개 문서에서 확인한 디자인 방향을 자체 CSS와 React 컴포넌트로 해석해 적용한다.
 
 ## 참고 문서
 
