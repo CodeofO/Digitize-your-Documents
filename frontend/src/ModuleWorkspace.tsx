@@ -471,7 +471,10 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
 
   return (
     <main className={libraryOpen ? "module-shell library-open" : "module-shell"}>
-      <div className="module-main-grid resize-scope" style={{ gridTemplateColumns: `minmax(320px, ${leftPanePercent}%) 12px minmax(420px, 1fr)` }}>
+      <div
+        className="module-main-grid resize-scope"
+        style={{ "--left-pane-percent": `${leftPanePercent}%` } as React.CSSProperties}
+      >
         <section className="document-pane module-document-pane">
           <ModuleUploadHeader
             title={document?.filename ?? selectedFile?.name ?? title}

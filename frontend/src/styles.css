@@ -636,6 +636,7 @@ textarea {
 .module-main-grid {
   display: grid;
   gap: 10px;
+  grid-template-columns: minmax(320px, var(--left-pane-percent, 52%)) 12px minmax(420px, 1fr);
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -3014,6 +3015,19 @@ pre {
     width: 100%;
   }
 
+  .module-shell,
+  .module-shell.library-open {
+    grid-template-columns: 1fr;
+    overflow: visible;
+    width: 100%;
+  }
+
+  .module-main-grid {
+    grid-template-columns: 1fr;
+    overflow: visible;
+    width: 100%;
+  }
+
   .schema-name-banner {
     align-items: flex-start;
     flex-direction: column;
@@ -3140,5 +3154,14 @@ pre {
 
   .topbar h1 {
     font-size: 23px;
+  }
+
+  .help-panel {
+    left: 12px;
+    max-width: calc(100vw - 24px);
+    position: fixed;
+    right: 12px;
+    top: 128px;
+    width: auto;
   }
 }
