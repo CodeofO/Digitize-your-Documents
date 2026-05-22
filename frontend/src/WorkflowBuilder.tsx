@@ -539,7 +539,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             {activeRun && (
               <button type="button" className="secondary" onClick={() => setResultsFocused((current) => !current)}>
                 {resultsFocused ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-                {resultsFocused ? "캔버스 보기" : "결과 크게"}
+                {resultsFocused ? "캔버스 보기" : "결과만 보기"}
               </button>
             )}
             <span className="workflow-autosave">

@@ -2492,8 +2492,8 @@ function HomeScreen(props: {
       <section className="home-hero home-hero-workflow">
         <div>
           <p className="eyebrow">작업 공간</p>
-          <h2>워크플로우로 문서 처리를 한 번에 연결하세요</h2>
-          <p>분류, 핵심값 추출, 필수 항목 확인을 하나의 파이프라인으로 묶고 배치 실행 결과를 한 화면에서 검수합니다.</p>
+          <h2>문서 접수부터 export까지 하나의 흐름으로</h2>
+          <p>분류, 핵심값 추출, 필수 항목 확인을 파이프라인으로 묶고 배치 실행 결과를 문서 이미지와 함께 바로 검수합니다.</p>
           <div className="home-hero-actions">
             <button type="button" className="primary home-workflow-cta" onClick={props.onWorkflow}>
               <FileJson size={18} />
@@ -2508,10 +2508,10 @@ function HomeScreen(props: {
         <div className="home-workflow-panel">
           <div className="home-workflow-panel-head">
             <span>예시 파이프라인</span>
-            <strong>혼합 서류 접수 자동화</strong>
+            <strong>혼합 접수 서류 자동 처리</strong>
           </div>
           <div className="home-pipeline-preview" aria-hidden="true">
-            {["Upload", "Classify", "Branch", "Extract", "Check", "Export"].map((item, index) => (
+            {["업로드", "분류", "분기", "추출", "검수", "Export"].map((item, index) => (
               <span key={item}>
                 <i>{index + 1}</i>
                 {item}
