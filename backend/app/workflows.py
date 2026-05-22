@@ -1,0 +1,803 @@
+import csv
+import io
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.audit import log_audit_event
+from app.database import SessionLocal
+from app.document_modules import classification_result_to_dict, required_field_result_to_dict, run_classification_job, run_required_field_check_job
+from app.extraction import result_to_dict, run_extraction_job
+from app.models import (
+    ClassificationJob,
+    DocumentClassifier,
+    ExportPreset,
+    ExtractionJob,
+    RequiredFieldCheckJob,
+    RequiredFieldChecklist,
+    Schema,
+    WorkflowDefinition,
+    WorkflowRun,
+    WorkflowRunItem,
+)
+
+
+WORKFLOW_NODE_KINDS = {"input", "classifier", "branch", "kie", "required-checker", "merge", "export"}
+WORKFLOW_TERMINAL_STATUSES = {"completed", "needs_review", "failed", "canceled"}
+
+
+class WorkflowDefinitionError(ValueError):
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+@dataclass(frozen=True)
+class WorkflowGraph:
+    definition: dict[str, Any]
+    nodes: dict[str, dict[str, Any]]
+    edges: list[dict[str, Any]]
+    outgoing: dict[str, list[dict[str, Any]]]
+    incoming: dict[str, list[dict[str, Any]]]
+    warnings: list[str]
+
+
+def workflow_definition_to_read(workflow: WorkflowDefinition, db: Session) -> dict[str, Any]:
+    definition = _workflow_definition_json(workflow)
+    warnings: list[str] = []
+    try:
+        warnings = validate_workflow_definition(definition, db).warnings
+    except WorkflowDefinitionError:
+        warnings = []
+    return {
+        "id": workflow.id,
+        "name": workflow.name,
+        "description": workflow.description,
+        "definition": definition,
+        "archived": workflow.archived,
+        "validation_warnings": warnings,
+        "created_at": workflow.created_at,
+        "updated_at": workflow.updated_at,
+    }
+
+
+def workflow_run_to_read(run: WorkflowRun) -> dict[str, Any]:
+    items = sorted(run.items, key=lambda item: (item.filename.casefold(), item.id))
+    completed = [item for item in items if item.status in WORKFLOW_TERMINAL_STATUSES]
+    failed = [item for item in items if item.status == "failed"]
+    needs_review = [item for item in items if item.status == "needs_review"]
+    return {
+        "id": run.id,
+        "workflow_id": run.workflow_id,
+        "status": _workflow_run_status(run, items),
+        "total_count": run.total_count,
+        "completed_count": len(completed),
+        "failed_count": len(failed),
+        "needs_review_count": len(needs_review),
+        "progress": len(completed) / run.total_count if run.total_count else 0,
+        "error_message": run.error_message,
+        "items": [workflow_run_item_to_read(item) for item in items],
+        "created_at": run.created_at,
+        "completed_at": run.completed_at,
+    }
+
+
+def workflow_run_item_to_read(item: WorkflowRunItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "run_id": item.run_id,
+        "document_id": item.document_id,
+        "filename": item.filename,
+        "status": item.status,
+        "error_message": item.error_message,
+        "result": _json_or_empty(item.result_json),
+        "created_at": item.created_at,
+        "completed_at": item.completed_at,
+    }
+
+
+def validate_workflow_definition(definition: dict[str, Any], db: Session) -> WorkflowGraph:
+    graph = _build_graph(definition)
+    errors = _validate_graph_shape(graph)
+    errors.extend(_validate_config_references(graph, db))
+    errors.extend(_validate_branch_shape(graph))
+    warnings = _workflow_warnings(graph, db)
+    if errors:
+        raise WorkflowDefinitionError(errors)
+    return WorkflowGraph(
+        definition=graph.definition,
+        nodes=graph.nodes,
+        edges=graph.edges,
+        outgoing=graph.outgoing,
+        incoming=graph.incoming,
+        warnings=warnings,
+    )
+
+
+def run_workflow_run(run_id: str) -> None:
+    db = SessionLocal()
+    try:
+        run = db.get(WorkflowRun, run_id)
+        if not run:
+            return
+        workflow = db.get(WorkflowDefinition, run.workflow_id)
+        if not workflow or workflow.archived:
+            _fail_run(db, run, "Workflow definition not found")
+            return
+        try:
+            graph = validate_workflow_definition(_workflow_definition_json(workflow), db)
+        except WorkflowDefinitionError as exc:
+            _fail_run(db, run, "; ".join(exc.errors))
+            return
+        run.status = "running"
+        db.commit()
+        item_ids = [item.id for item in sorted(run.items, key=lambda item: (item.filename.casefold(), item.id))]
+    finally:
+        db.close()
+
+    for item_id in item_ids:
+        _run_workflow_item(item_id, graph)
+
+    _finalize_workflow_run(run_id)
+
+
+def workflow_run_export_payload(run: WorkflowRun) -> dict[str, Any]:
+    items = sorted(run.items, key=lambda item: (item.filename.casefold(), item.id))
+    rows = [_workflow_export_row(item) for item in items]
+    return {
+        "workflow_run_id": run.id,
+        "workflow_id": run.workflow_id,
+        "status": _workflow_run_status(run, items),
+        "total_count": run.total_count,
+        "rows": rows,
+    }
+
+
+def workflow_run_export_csv(run: WorkflowRun) -> str:
+    rows = workflow_run_export_payload(run)["rows"]
+    fieldnames = _workflow_export_fieldnames(rows)
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({field: _csv_cell(row.get(field)) for field in fieldnames})
+    return output.getvalue()
+
+
+def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
+    db = SessionLocal()
+    try:
+        item = db.get(WorkflowRunItem, item_id)
+        if not item:
+            return
+        item.status = "running"
+        item.error_message = None
+        item.result_json = _json_dumps(
+            {
+                "document_id": item.document_id,
+                "filename": item.filename,
+                "node_results": {},
+                "branch_path": None,
+            },
+        )
+        db.commit()
+
+        result = _execute_graph_for_item(db, item, graph)
+        item.status = result["status"]
+        item.error_message = result.get("error_message")
+        item.result_json = _json_dumps(result)
+        item.completed_at = datetime.utcnow()
+        log_audit_event(
+            db,
+            entity_type="workflow_run_item",
+            entity_id=item.id,
+            action=item.status,
+            message=f"Workflow item finished with status {item.status}",
+            metadata={"document_id": item.document_id, "workflow_run_id": item.run_id},
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        failed = db.get(WorkflowRunItem, item_id)
+        if failed:
+            failed.status = "failed"
+            failed.error_message = str(exc)
+            failed.completed_at = datetime.utcnow()
+            failed.result_json = _json_dumps(
+                {
+                    "document_id": failed.document_id,
+                    "filename": failed.filename,
+                    "node_results": {},
+                    "branch_path": None,
+                    "error_message": str(exc),
+                },
+            )
+            db.commit()
+    finally:
+        db.close()
+
+
+def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowGraph) -> dict[str, Any]:
+    input_node_id = _single_node_id(graph, "input")
+    current_id = _single_next_node_id(graph, input_node_id)
+    node_results: dict[str, Any] = {}
+    visited: list[str] = []
+    branch_path: str | None = None
+    status = "completed"
+    error_message: str | None = None
+
+    while current_id:
+        if current_id in visited:
+            raise RuntimeError("Workflow cycle detected during execution")
+        visited.append(current_id)
+        node = graph.nodes[current_id]
+        kind = _node_kind(node)
+        if kind == "classifier":
+            node_result = _execute_classifier_node(db, item.document_id, node)
+            node_results[current_id] = node_result
+            if node_result["status"] == "failed":
+                status = "failed"
+                error_message = node_result.get("error_message")
+                break
+            if node_result.get("classification", {}).get("status") != "classified":
+                status = "needs_review"
+            current_id = _single_next_node_id(graph, current_id)
+            continue
+        if kind == "branch":
+            branch_edge = _select_branch_edge(graph, current_id, node_results)
+            if not branch_edge:
+                status = "needs_review"
+                error_message = "No branch path matched this document"
+                node_results[current_id] = {"kind": kind, "status": "needs_review", "branch_key": None}
+                break
+            branch_path = _branch_edge_key(branch_edge)
+            node_results[current_id] = {"kind": kind, "status": "completed", "branch_key": branch_path}
+            current_id = branch_edge["target"]
+            continue
+        if kind == "kie":
+            node_result = _execute_kie_node(db, item.document_id, node)
+            node_results[current_id] = node_result
+            if node_result["status"] == "failed":
+                status = "failed"
+                error_message = node_result.get("error_message")
+                break
+            if node_result["status"] == "needs_review":
+                status = "needs_review"
+            current_id = _single_next_node_id(graph, current_id)
+            continue
+        if kind == "required-checker":
+            node_result = _execute_required_node(db, item.document_id, node)
+            node_results[current_id] = node_result
+            if node_result["status"] == "failed":
+                status = "failed"
+                error_message = node_result.get("error_message")
+                break
+            overall = node_result.get("required_check", {}).get("overall_status")
+            if node_result["status"] == "needs_review" or overall in {"incomplete", "needs_review"}:
+                status = "needs_review"
+            current_id = _single_next_node_id(graph, current_id)
+            continue
+        if kind == "merge":
+            node_results[current_id] = {"kind": kind, "status": "completed"}
+            current_id = _single_next_node_id(graph, current_id)
+            continue
+        if kind == "export":
+            node_results[current_id] = {"kind": kind, "status": "completed"}
+            break
+        current_id = _single_next_node_id(graph, current_id)
+
+    summary = _workflow_summary(node_results, branch_path)
+    return {
+        "document_id": item.document_id,
+        "filename": item.filename,
+        "status": status,
+        "error_message": error_message,
+        "branch_path": branch_path,
+        "path_node_ids": visited,
+        "node_results": node_results,
+        **summary,
+    }
+
+
+def _execute_classifier_node(db: Session, document_id: str, node: dict[str, Any]) -> dict[str, Any]:
+    classifier_id = _node_config_value(node, "classifier_id")
+    job = ClassificationJob(document_id=document_id, classifier_id=classifier_id, status="queued")
+    db.add(job)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="classification_job",
+        entity_id=job.id,
+        action="queued",
+        message="Queued workflow classification job",
+        metadata={"document_id": document_id, "classifier_id": classifier_id},
+    )
+    db.commit()
+    run_classification_job(job.id)
+    db.expire_all()
+    loaded = db.get(ClassificationJob, job.id)
+    if not loaded:
+        return {"kind": "classifier", "status": "failed", "job_id": job.id, "error_message": "Classification job disappeared"}
+    if loaded.status == "failed":
+        return {
+            "kind": "classifier",
+            "status": "failed",
+            "job_id": loaded.id,
+            "result_id": loaded.result_id,
+            "error_message": loaded.error_message,
+        }
+    output = classification_result_to_dict(loaded.result) if loaded.result else None
+    classification = output["corrected_output"] if output and output.get("corrected_output") else output.get("validated_output") if output else {}
+    return {
+        "kind": "classifier",
+        "status": loaded.status,
+        "job_id": loaded.id,
+        "result_id": loaded.result_id,
+        "classifier_id": classifier_id,
+        "classification": classification,
+        "result": output,
+    }
+
+
+def _execute_kie_node(db: Session, document_id: str, node: dict[str, Any]) -> dict[str, Any]:
+    schema_id = _node_config_value(node, "schema_id")
+    job = ExtractionJob(document_id=document_id, schema_id=schema_id, schema_version=1, status="queued")
+    db.add(job)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="extraction_job",
+        entity_id=job.id,
+        action="queued",
+        message="Queued workflow KIE job",
+        metadata={"document_id": document_id, "schema_id": schema_id},
+    )
+    db.commit()
+    run_extraction_job(job.id)
+    db.expire_all()
+    loaded = db.get(ExtractionJob, job.id)
+    if not loaded:
+        return {"kind": "kie", "status": "failed", "job_id": job.id, "error_message": "Extraction job disappeared"}
+    if loaded.status == "failed":
+        return {
+            "kind": "kie",
+            "status": "failed",
+            "job_id": loaded.id,
+            "result_id": loaded.result_id,
+            "error_message": loaded.error_message,
+        }
+    output = result_to_dict(loaded.result) if loaded.result else None
+    payload = output["corrected_output"] if output and output.get("corrected_output") else output.get("validated_output") if output else {}
+    return {
+        "kind": "kie",
+        "status": loaded.status,
+        "job_id": loaded.id,
+        "result_id": loaded.result_id,
+        "schema_id": schema_id,
+        "values": payload.get("values", {}),
+        "result": output,
+    }
+
+
+def _execute_required_node(db: Session, document_id: str, node: dict[str, Any]) -> dict[str, Any]:
+    checklist_id = _node_config_value(node, "checklist_id")
+    job = RequiredFieldCheckJob(document_id=document_id, checklist_id=checklist_id, status="queued")
+    db.add(job)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="required_field_check_job",
+        entity_id=job.id,
+        action="queued",
+        message="Queued workflow required field check job",
+        metadata={"document_id": document_id, "checklist_id": checklist_id},
+    )
+    db.commit()
+    run_required_field_check_job(job.id)
+    db.expire_all()
+    loaded = db.get(RequiredFieldCheckJob, job.id)
+    if not loaded:
+        return {"kind": "required-checker", "status": "failed", "job_id": job.id, "error_message": "Required check job disappeared"}
+    if loaded.status == "failed":
+        return {
+            "kind": "required-checker",
+            "status": "failed",
+            "job_id": loaded.id,
+            "result_id": loaded.result_id,
+            "error_message": loaded.error_message,
+        }
+    output = required_field_result_to_dict(loaded.result) if loaded.result else None
+    payload = output["corrected_output"] if output and output.get("corrected_output") else output.get("validated_output") if output else {}
+    return {
+        "kind": "required-checker",
+        "status": loaded.status,
+        "job_id": loaded.id,
+        "result_id": loaded.result_id,
+        "checklist_id": checklist_id,
+        "required_check": payload,
+        "result": output,
+    }
+
+
+def _finalize_workflow_run(run_id: str) -> None:
+    db = SessionLocal()
+    try:
+        run = db.get(WorkflowRun, run_id)
+        if not run:
+            return
+        statuses = [item.status for item in run.items]
+        if not statuses:
+            run.status = "failed"
+            run.error_message = "Workflow run has no items"
+        elif any(status == "failed" for status in statuses):
+            run.status = "completed_with_errors"
+        elif any(status == "needs_review" for status in statuses):
+            run.status = "needs_review"
+        elif all(status == "canceled" for status in statuses):
+            run.status = "canceled"
+        else:
+            run.status = "completed"
+        run.completed_at = datetime.utcnow()
+        log_audit_event(
+            db,
+            entity_type="workflow_run",
+            entity_id=run.id,
+            action=run.status,
+            message=f"Workflow run finished with status {run.status}",
+            metadata={"total_count": run.total_count},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _fail_run(db: Session, run: WorkflowRun, message: str) -> None:
+    now = datetime.utcnow()
+    run.status = "failed"
+    run.error_message = message
+    run.completed_at = now
+    for item in run.items:
+        item.status = "failed"
+        item.error_message = message
+        item.completed_at = now
+    db.commit()
+
+
+def _workflow_definition_json(workflow: WorkflowDefinition) -> dict[str, Any]:
+    return _json_or_empty(workflow.definition_json)
+
+
+def _json_or_empty(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _json_dumps(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _build_graph(definition: dict[str, Any]) -> WorkflowGraph:
+    nodes_raw = definition.get("nodes") if isinstance(definition.get("nodes"), list) else []
+    edges_raw = definition.get("edges") if isinstance(definition.get("edges"), list) else []
+    nodes = {str(node.get("id")): node for node in nodes_raw if isinstance(node, dict) and node.get("id")}
+    edges = [
+        {"id": str(edge.get("id") or f"{edge.get('source')}->{edge.get('target')}"), **edge}
+        for edge in edges_raw
+        if isinstance(edge, dict) and edge.get("source") and edge.get("target")
+    ]
+    outgoing: dict[str, list[dict[str, Any]]] = {node_id: [] for node_id in nodes}
+    incoming: dict[str, list[dict[str, Any]]] = {node_id: [] for node_id in nodes}
+    for edge in edges:
+        source = str(edge["source"])
+        target = str(edge["target"])
+        outgoing.setdefault(source, []).append(edge)
+        incoming.setdefault(target, []).append(edge)
+    return WorkflowGraph(definition=definition, nodes=nodes, edges=edges, outgoing=outgoing, incoming=incoming, warnings=[])
+
+
+def _validate_graph_shape(graph: WorkflowGraph) -> list[str]:
+    errors: list[str] = []
+    if not graph.nodes:
+        return ["Workflow must include at least one node"]
+    invalid = [node_id for node_id, node in graph.nodes.items() if _node_kind(node) not in WORKFLOW_NODE_KINDS]
+    if invalid:
+        errors.append(f"Unsupported workflow node kind: {', '.join(invalid)}")
+    input_nodes = [node_id for node_id, node in graph.nodes.items() if _node_kind(node) == "input"]
+    export_nodes = [node_id for node_id, node in graph.nodes.items() if _node_kind(node) == "export"]
+    if len(input_nodes) != 1:
+        errors.append("Workflow must have exactly one Input node")
+    if not export_nodes:
+        errors.append("Workflow must include an Export node")
+    for edge in graph.edges:
+        if edge["source"] not in graph.nodes or edge["target"] not in graph.nodes:
+            errors.append(f"Edge {edge['id']} references a missing node")
+    if input_nodes:
+        reachable = _reachable_node_ids(graph, input_nodes[0])
+        disconnected = sorted(set(graph.nodes) - reachable)
+        if disconnected:
+            errors.append(f"Workflow has disconnected node(s): {', '.join(disconnected)}")
+    if _has_cycle(graph):
+        errors.append("Workflow graph cannot contain a cycle")
+    for node_id, node in graph.nodes.items():
+        kind = _node_kind(node)
+        if kind not in {"branch", "export"} and len(graph.outgoing.get(node_id, [])) > 1:
+            errors.append(f"Node {node_id} can only have one outgoing edge in v1")
+        if kind == "export" and graph.outgoing.get(node_id):
+            errors.append(f"Export node {node_id} cannot have outgoing edges")
+    return errors
+
+
+def _validate_config_references(graph: WorkflowGraph, db: Session) -> list[str]:
+    errors: list[str] = []
+    for node_id, node in graph.nodes.items():
+        kind = _node_kind(node)
+        if kind == "classifier":
+            classifier_id = _node_config_value(node, "classifier_id")
+            classifier = db.get(DocumentClassifier, classifier_id) if classifier_id else None
+            if not classifier or classifier.archived:
+                errors.append(f"Classifier node {node_id} must select a saved classifier")
+        if kind == "kie":
+            schema_id = _node_config_value(node, "schema_id")
+            schema = db.get(Schema, schema_id) if schema_id else None
+            if not schema or schema.archived or schema.ephemeral:
+                errors.append(f"KIE node {node_id} must select a saved schema")
+        if kind == "required-checker":
+            checklist_id = _node_config_value(node, "checklist_id")
+            checklist = db.get(RequiredFieldChecklist, checklist_id) if checklist_id else None
+            if not checklist or checklist.archived:
+                errors.append(f"Required Field Checker node {node_id} must select a saved checklist")
+    return errors
+
+
+def _validate_branch_shape(graph: WorkflowGraph) -> list[str]:
+    errors: list[str] = []
+    for node_id, node in graph.nodes.items():
+        if _node_kind(node) != "branch":
+            continue
+        incoming = graph.incoming.get(node_id, [])
+        if len(incoming) != 1:
+            errors.append(f"Branch node {node_id} must have one incoming classifier edge")
+            continue
+        source_node = graph.nodes.get(incoming[0]["source"])
+        if not source_node or _node_kind(source_node) != "classifier":
+            errors.append(f"Branch node {node_id} must be connected directly after a classifier")
+        if not graph.outgoing.get(node_id):
+            errors.append(f"Branch node {node_id} must have at least one outgoing branch path")
+    return errors
+
+
+def _workflow_warnings(graph: WorkflowGraph, db: Session) -> list[str]:
+    warnings: list[str] = []
+    for node_id, node in graph.nodes.items():
+        if _node_kind(node) != "branch":
+            continue
+        edge_keys = {_branch_edge_key(edge) for edge in graph.outgoing.get(node_id, [])}
+        if "default" not in edge_keys:
+            warnings.append(f"Branch node {node_id} has no default fallback")
+        if "unknown" not in edge_keys:
+            warnings.append(f"Branch node {node_id} has no unknown fallback")
+        if "needs_review" not in edge_keys:
+            warnings.append(f"Branch node {node_id} has no needs_review fallback")
+        incoming = graph.incoming.get(node_id, [])
+        if not incoming:
+            continue
+        classifier_node = graph.nodes.get(incoming[0]["source"])
+        classifier_id = _node_config_value(classifier_node or {}, "classifier_id")
+        classifier = db.get(DocumentClassifier, classifier_id) if classifier_id else None
+        if not classifier:
+            continue
+        config = _json_or_empty(classifier.config_json)
+        for candidate in config.get("classes", []):
+            class_name = candidate.get("class_name") if isinstance(candidate, dict) else None
+            if class_name and f"class:{class_name}" not in edge_keys and "default" not in edge_keys:
+                warnings.append(f"Branch node {node_id} has no path for class {class_name}")
+    return warnings
+
+
+def _reachable_node_ids(graph: WorkflowGraph, start_id: str) -> set[str]:
+    visited: set[str] = set()
+    stack = [start_id]
+    while stack:
+        node_id = stack.pop()
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        stack.extend(str(edge["target"]) for edge in graph.outgoing.get(node_id, []))
+    return visited
+
+
+def _has_cycle(graph: WorkflowGraph) -> bool:
+    visited: set[str] = set()
+    active: set[str] = set()
+
+    def visit(node_id: str) -> bool:
+        if node_id in active:
+            return True
+        if node_id in visited:
+            return False
+        active.add(node_id)
+        for edge in graph.outgoing.get(node_id, []):
+            if visit(str(edge["target"])):
+                return True
+        active.remove(node_id)
+        visited.add(node_id)
+        return False
+
+    return any(visit(node_id) for node_id in graph.nodes)
+
+
+def _node_kind(node: dict[str, Any]) -> str:
+    data = node.get("data") if isinstance(node.get("data"), dict) else {}
+    kind = node.get("kind") or data.get("kind") or node.get("type") or ""
+    aliases = {
+        "document-classifier": "classifier",
+        "classification": "classifier",
+        "key-info": "kie",
+        "required": "required-checker",
+        "required_field_checker": "required-checker",
+    }
+    return aliases.get(str(kind), str(kind))
+
+
+def _node_config_value(node: dict[str, Any], key: str) -> str | None:
+    data = node.get("data") if isinstance(node.get("data"), dict) else {}
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    value = config.get(key) or data.get(key) or node.get(key)
+    return str(value).strip() if value else None
+
+
+def _single_node_id(graph: WorkflowGraph, kind: str) -> str:
+    matches = [node_id for node_id, node in graph.nodes.items() if _node_kind(node) == kind]
+    if len(matches) != 1:
+        raise RuntimeError(f"Workflow must have exactly one {kind} node")
+    return matches[0]
+
+
+def _single_next_node_id(graph: WorkflowGraph, node_id: str) -> str | None:
+    outgoing = graph.outgoing.get(node_id, [])
+    if not outgoing:
+        return None
+    if len(outgoing) > 1:
+        raise RuntimeError(f"Node {node_id} has multiple outgoing edges")
+    return str(outgoing[0]["target"])
+
+
+def _select_branch_edge(graph: WorkflowGraph, branch_node_id: str, node_results: dict[str, Any]) -> dict[str, Any] | None:
+    classification = _latest_classification(node_results)
+    status = classification.get("status")
+    class_name = classification.get("class_name")
+    candidates: list[str] = []
+    if status == "classified" and class_name:
+        candidates.append(f"class:{class_name}")
+    elif status in {"unknown", "needs_review"}:
+        candidates.append(str(status))
+    candidates.append("default")
+    by_key = {_branch_edge_key(edge): edge for edge in graph.outgoing.get(branch_node_id, [])}
+    for key in candidates:
+        if key in by_key:
+            return by_key[key]
+    return None
+
+
+def _branch_edge_key(edge: dict[str, Any]) -> str:
+    data = edge.get("data") if isinstance(edge.get("data"), dict) else {}
+    raw = data.get("branchKey") or data.get("branch_key") or edge.get("sourceHandle") or edge.get("branch_key") or "default"
+    key = str(raw).strip()
+    if key.startswith("class-"):
+        return f"class:{key.removeprefix('class-')}"
+    if key.startswith("class:"):
+        return key
+    if key in {"unknown", "needs_review", "default"}:
+        return key
+    return f"class:{key}" if key else "default"
+
+
+def _latest_classification(node_results: dict[str, Any]) -> dict[str, Any]:
+    for result in reversed(list(node_results.values())):
+        classification = result.get("classification") if isinstance(result, dict) else None
+        if isinstance(classification, dict):
+            return classification
+    return {}
+
+
+def _workflow_summary(node_results: dict[str, Any], branch_path: str | None) -> dict[str, Any]:
+    classification = _latest_classification(node_results)
+    kie_values: dict[str, Any] = {}
+    required_items: dict[str, Any] = {}
+    required_overall: str | None = None
+    for result in node_results.values():
+        if not isinstance(result, dict):
+            continue
+        if result.get("kind") == "kie" and isinstance(result.get("values"), dict):
+            for key, value in result["values"].items():
+                kie_values[key] = value
+        if result.get("kind") == "required-checker" and isinstance(result.get("required_check"), dict):
+            required_overall = result["required_check"].get("overall_status")
+            for item in result["required_check"].get("items", []):
+                if isinstance(item, dict) and item.get("item_name"):
+                    required_items[item["item_name"]] = item
+    return {
+        "classification": classification,
+        "branch_path": branch_path,
+        "kie_values": kie_values,
+        "required_overall_status": required_overall,
+        "required_items": required_items,
+    }
+
+
+def _workflow_run_status(run: WorkflowRun, items: list[WorkflowRunItem]) -> str:
+    if run.status in WORKFLOW_TERMINAL_STATUSES or run.status in {"completed_with_errors", "running", "queued", "failed"}:
+        return run.status
+    statuses = [item.status for item in items]
+    if not statuses:
+        return run.status
+    if any(status == "running" for status in statuses):
+        return "running"
+    if any(status == "failed" for status in statuses):
+        return "completed_with_errors"
+    if any(status == "needs_review" for status in statuses):
+        return "needs_review"
+    return "completed"
+
+
+def _workflow_export_row(item: WorkflowRunItem) -> dict[str, Any]:
+    result = _json_or_empty(item.result_json)
+    classification = result.get("classification") if isinstance(result.get("classification"), dict) else {}
+    row: dict[str, Any] = {
+        "filename": item.filename,
+        "document_id": item.document_id,
+        "workflow_run_item_id": item.id,
+        "status": item.status,
+        "error_message": item.error_message or result.get("error_message"),
+        "classification_status": classification.get("status"),
+        "class_name": classification.get("class_name"),
+        "branch_path": result.get("branch_path"),
+    }
+    kie_values = result.get("kie_values") if isinstance(result.get("kie_values"), dict) else {}
+    for key, value in kie_values.items():
+        row[f"kie_{key}"] = value.get("value") if isinstance(value, dict) else value
+    row["required_overall_status"] = result.get("required_overall_status")
+    required_items = result.get("required_items") if isinstance(result.get("required_items"), dict) else {}
+    for item_name, entry in required_items.items():
+        if isinstance(entry, dict):
+            row[f"required_{item_name}_status"] = entry.get("status")
+            row[f"required_{item_name}_evidence"] = entry.get("evidence")
+    return row
+
+
+def _workflow_export_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    base = [
+        "filename",
+        "document_id",
+        "workflow_run_item_id",
+        "status",
+        "error_message",
+        "classification_status",
+        "class_name",
+        "branch_path",
+        "required_overall_status",
+    ]
+    extras: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in base and key not in extras:
+                extras.append(key)
+    return base + sorted(extras)
+
+
+def _csv_cell(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ";".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return value

@@ -18,10 +18,11 @@ Digitize Your Document는 사람이 대량 문서에서 반복적으로 확인�
 - **Key Information Extractor**: 사용자가 정의한 schema 기준으로 PDF/image/DOCX/PPTX에서 key information 추출
 - **Document Classifier**: 사용자가 정의한 후보 class와 unknown 허용 규칙으로 문서 종류 분류
 - **Required Field Checker**: 값의 정확성이 아니라 필수 항목 존재/누락/불확실 여부 확인
+- **Workflow Builder**: 모듈을 드래그 앤 드롭으로 연결하고 classifier 결과별 branch로 E2E 문서 처리 파이프라인 실행
 
 예정 기능:
 
-- **Workflow Builder**: 모듈을 드래그 앤 드롭으로 연결하는 문서 처리 파이프라인
+- Workflow publish/version, XLSX export, 임의 조건식 branch, loop/fan-out orchestration
 
 설계 원칙:
 
@@ -361,6 +362,22 @@ GET /api/required-field-check-batches/{batch_id}/export?format=csv|json
 
 두 모듈의 config 삭제는 KIE schema와 동일하게 archive 처리한다. 과거 결과는 유지한다.
 
+### 5.5 Workflow Builder API
+
+```http
+POST /api/workflows
+GET /api/workflows
+GET /api/workflows/{workflow_id}
+PATCH /api/workflows/{workflow_id}
+DELETE /api/workflows/{workflow_id}
+POST /api/workflows/{workflow_id}/runs
+GET /api/workflow-runs
+GET /api/workflow-runs/{run_id}
+GET /api/workflow-runs/{run_id}/export?format=csv|json
+```
+
+`workflow.definition`은 React Flow `nodes`/`edges`와 node config reference를 저장한다. 실행 가능한 v1 graph는 DAG이며, branch는 Document Classifier 바로 뒤에서만 동작한다.
+
 ## 6. Frontend
 
 첫 화면은 `Digitize Your Document` Home이다.
@@ -371,7 +388,7 @@ GET /api/required-field-check-batches/{batch_id}/export?format=csv|json
 - Key Information Extractor: enabled
 - Document Classifier: enabled
 - Required Field Checker: enabled
-- Workflow Builder: disabled, coming soon
+- Workflow Builder: enabled
 
 ### 6.1 디자인 원칙
 
@@ -435,6 +452,16 @@ Required Field Checker workspace:
 - 결과는 overall `complete`, `incomplete`, `needs_review`와 item별 `present`, `missing`, `uncertain`, `not_applicable`을 표시한다.
 - 값의 정확성, 날짜/금액 형식, 외부 DB 일치 여부는 확인하지 않는다.
 - 1개 파일은 single job, 2개 이상은 batch job으로 자동 실행한다.
+
+Workflow Builder workspace:
+
+- React Flow 기반 화이트보드 캔버스에서 `Input`, `Document Classifier`, `Branch`, `KIE`, `Required Field Checker`, `Merge`, `Export` 노드를 배치하고 연결한다.
+- 저장된 schema/classifier/checklist 라이브러리 항목을 노드 설정에서 선택한다. 새 항목 생성은 기존 KIE/Classifier/Required Field Checker 화면으로 이동하는 보조 동선으로 제공한다.
+- 파일 업로드는 1개면 단일 workflow run, 2개 이상이면 batch workflow run으로 자동 판단한다.
+- `Branch` 노드는 Document Classifier 바로 뒤에 연결하며 class별 path, `unknown`, `needs_review`, `default` fallback handle을 지원한다.
+- classifier 결과가 matching class/fallback에 연결되면 해당 branch path의 KIE/Required 노드를 실행한다. matching path가 없으면 해당 문서는 `needs_review`로 남기고 downstream 실행을 생략한다.
+- 결과는 문서별 matrix로 표시하며 filename, classification, branch path, KIE field count, required-field overall status, item status를 한 화면에서 확인한다.
+- CSV/JSON export는 모든 branch에서 실제 발생한 KIE field와 required item의 union column을 사용하고, 파일명 오름차순 row 순서를 유지한다.
 
 Maintenance:
 
@@ -542,7 +569,7 @@ Frontend:
 - KIE schema-level extraction region 지정/저장 및 field별 region 할당
 - Document Classifier 진입, class 후보 편집, unknown toggle, 단일/batch 실행, 결과 수정, export
 - Required Field Checker 진입, AI checklist 추천, checklist item 편집, region 표시, 단일/batch 실행, 결과 수정, export
-- Workflow Builder disabled 카드 표시
+- Workflow Builder 진입, React Flow canvas node/edge 편집, branch rule 연결, 저장/불러오기, 단일/batch 실행, matrix 결과, CSV/JSON export
 - 모바일 폭에서 layout overlap 없음
 
 Integration:
@@ -558,7 +585,7 @@ Integration:
 - 분산 queue
 - review 화면 bbox highlight overlay
 - 분산 queue 기반 대량 batch processing
-- Workflow Builder 실제 실행 엔진
+- Workflow Builder publish/version, XLSX export, loop/fan-out orchestration, 임의 조건식 branch
 
 ## 10. GitHub 문서와 저장소 정책
 

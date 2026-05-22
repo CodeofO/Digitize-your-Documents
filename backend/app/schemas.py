@@ -677,6 +677,66 @@ class ExportPresetRead(BaseModel):
     updated_at: datetime
 
 
+class WorkflowDefinitionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = None
+    definition: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class WorkflowDefinitionUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    definition: dict[str, Any] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else value
+
+
+class WorkflowDefinitionRead(BaseModel):
+    id: str
+    name: str
+    description: str | None
+    definition: dict[str, Any]
+    archived: bool = False
+    validation_warnings: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowRunItemRead(BaseModel):
+    id: str
+    run_id: str
+    document_id: str
+    filename: str
+    status: str
+    error_message: str | None = None
+    result: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class WorkflowRunRead(BaseModel):
+    id: str
+    workflow_id: str
+    status: str
+    total_count: int
+    completed_count: int
+    failed_count: int
+    needs_review_count: int
+    progress: float
+    error_message: str | None = None
+    items: list[WorkflowRunItemRead]
+    created_at: datetime
+    completed_at: datetime | None
+
+
 class ArchiveSearchResult(BaseModel):
     document_id: str
     filename: str

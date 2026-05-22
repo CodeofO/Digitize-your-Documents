@@ -1225,6 +1225,122 @@ def test_required_field_check_batch_cancel_marks_queued_jobs_canceled(monkeypatc
         assert {item["status"] for item in payload["items"]} == {"canceled"}
 
 
+def test_workflow_definition_validation_and_branch_run_mock_mode() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="workflow_invoice_schema")
+            classifier = create_document_classifier(client, name="workflow_classifier")
+            checklist = create_required_field_checklist(client, name="workflow_checklist")
+
+            invalid = client.post(
+                "/api/workflows",
+                json={
+                    "name": "invalid_workflow",
+                    "definition": {
+                        "nodes": [
+                            {"id": "input", "data": {"kind": "input"}},
+                            {"id": "classifier", "data": {"kind": "classifier", "config": {}}},
+                            {"id": "export", "data": {"kind": "export"}},
+                        ],
+                        "edges": [
+                            {"id": "e1", "source": "input", "target": "classifier"},
+                            {"id": "e2", "source": "classifier", "target": "export"},
+                        ],
+                    },
+                },
+            )
+            assert invalid.status_code == 422
+            assert "Classifier node classifier" in invalid.text
+
+            workflow = client.post(
+                "/api/workflows",
+                json={
+                    "name": "분기 워크플로우",
+                    "description": "Classifier 결과에 따라 계약서 경로를 실행합니다.",
+                    "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"]),
+                },
+            )
+            assert workflow.status_code == 200, workflow.text
+            assert workflow.json()["validation_warnings"] == []
+
+            run_response = client.post(
+                f"/api/workflows/{workflow.json()['id']}/runs",
+                files=[
+                    ("files", ("z_last.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("a_first.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert run_response.status_code == 200, run_response.text
+            run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
+            assert run["status"] in {"completed", "needs_review"}
+            assert run["total_count"] == 2
+            assert [item["filename"] for item in run["items"]] == ["a_first.png", "z_last.png"]
+            first = run["items"][0]["result"]
+            assert first["classification"]["class_name"] == "contract"
+            assert first["branch_path"] == "class:contract"
+            assert "invoice_number" in first["kie_values"]
+            assert first["required_items"]["성명"]["status"] == "present"
+
+            csv_response = client.get(f"/api/workflow-runs/{run['id']}/export?format=csv")
+            assert csv_response.status_code == 200, csv_response.text
+            assert csv_response.content.startswith(b"\xef\xbb\xbf")
+            assert "charset=utf-8" in csv_response.headers["content-type"]
+            header = csv_response.text.splitlines()[0]
+            assert "classification_status" in header
+            assert "kie_invoice_number" in header
+            assert "required_성명_status" in header
+            assert csv_response.text.index("a_first.png") < csv_response.text.index("z_last.png")
+
+            json_response = client.get(f"/api/workflow-runs/{run['id']}/export?format=json")
+            assert json_response.status_code == 200
+            assert json_response.json()["rows"][0]["class_name"] == "contract"
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_branch_without_fallback_marks_item_needs_review(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.document_modules.classify_document_with_vlm",
+        lambda classes, allow_unknown, image_paths: {
+            "status": "unknown",
+            "class_name": None,
+            "confidence": 0.2,
+            "reason": "No class matched.",
+            "evidence": [],
+        },
+    )
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="workflow_fallback_schema")
+            classifier = create_document_classifier(client, name="workflow_fallback_classifier")
+            checklist = create_required_field_checklist(client, name="workflow_fallback_checklist")
+            definition = workflow_definition(schema["id"], classifier["id"], checklist["id"])
+            definition["edges"] = [edge for edge in definition["edges"] if edge.get("sourceHandle") == "class:contract" or edge["source"] != "branch"]
+            workflow = client.post("/api/workflows", json={"name": "fallback_missing", "definition": definition})
+            assert workflow.status_code == 200, workflow.text
+            assert workflow.json()["validation_warnings"]
+
+            run_response = client.post(
+                f"/api/workflows/{workflow.json()['id']}/runs",
+                files=[("files", ("invoice.png", ONE_BY_ONE_PNG, "image/png"))],
+            )
+            assert run_response.status_code == 200, run_response.text
+            run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
+            assert run["status"] == "needs_review"
+            item = run["items"][0]
+            assert item["status"] == "needs_review"
+            assert item["result"]["error_message"] == "No branch path matched this document"
+            assert item["result"]["kie_values"] == {}
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
 def test_batch_worker_exception_does_not_leave_batch_running(monkeypatch) -> None:
     from app import extraction as extraction_module
 
@@ -1519,6 +1635,43 @@ def create_required_field_checklist(client, name: str = "required_checklist"):
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def workflow_definition(schema_id: str, classifier_id: str, checklist_id: str):
+    return {
+        "nodes": [
+            {"id": "input", "position": {"x": 0, "y": 120}, "data": {"kind": "input", "label": "Input"}},
+            {
+                "id": "classifier",
+                "position": {"x": 220, "y": 120},
+                "data": {"kind": "classifier", "label": "Classifier", "config": {"classifier_id": classifier_id}},
+            },
+            {"id": "branch", "position": {"x": 440, "y": 120}, "data": {"kind": "branch", "label": "Branch"}},
+            {
+                "id": "kie_contract",
+                "position": {"x": 680, "y": 60},
+                "data": {"kind": "kie", "label": "Contract KIE", "config": {"schema_id": schema_id}},
+            },
+            {
+                "id": "required_contract",
+                "position": {"x": 900, "y": 60},
+                "data": {"kind": "required-checker", "label": "Contract Required", "config": {"checklist_id": checklist_id}},
+            },
+            {"id": "merge", "position": {"x": 1120, "y": 120}, "data": {"kind": "merge", "label": "Merge"}},
+            {"id": "export", "position": {"x": 1340, "y": 120}, "data": {"kind": "export", "label": "Export"}},
+        ],
+        "edges": [
+            {"id": "input-classifier", "source": "input", "target": "classifier"},
+            {"id": "classifier-branch", "source": "classifier", "target": "branch"},
+            {"id": "branch-contract", "source": "branch", "target": "kie_contract", "sourceHandle": "class:contract"},
+            {"id": "branch-unknown", "source": "branch", "target": "merge", "sourceHandle": "unknown"},
+            {"id": "branch-needs-review", "source": "branch", "target": "merge", "sourceHandle": "needs_review"},
+            {"id": "branch-default", "source": "branch", "target": "merge", "sourceHandle": "default"},
+            {"id": "kie-required", "source": "kie_contract", "target": "required_contract"},
+            {"id": "required-merge", "source": "required_contract", "target": "merge"},
+            {"id": "merge-export", "source": "merge", "target": "export"},
+        ],
+    }
 
 
 def make_pdf_bytes() -> bytes:

@@ -377,6 +377,61 @@ class ExportPreset(Base):
     schema: Mapped[Schema | None] = relationship()
 
 
+class WorkflowDefinition(Base):
+    __tablename__ = "workflow_definitions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("workflow"))
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    definition_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    runs: Mapped[list["WorkflowRun"]] = relationship(back_populates="workflow")
+
+
+class WorkflowRun(Base):
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("workflow_run"))
+    workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow_definitions.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    workflow: Mapped[WorkflowDefinition] = relationship(back_populates="runs")
+    items: Mapped[list["WorkflowRunItem"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="WorkflowRunItem.filename",
+    )
+
+
+class WorkflowRunItem(Base):
+    __tablename__ = "workflow_run_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("workflow_item"))
+    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), nullable=False)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    run: Mapped[WorkflowRun] = relationship(back_populates="items")
+    document: Mapped[Document] = relationship()
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 

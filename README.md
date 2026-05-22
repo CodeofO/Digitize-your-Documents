@@ -47,6 +47,7 @@ Digitize Your Document를 사용하면 대량 문서에서 수작업으로 값�
 - Document Classifier와 Required Field Checker polling도 `cache: "no-store"`를 사용하고, 일시적 polling 실패 시 기존 batch UI 상태를 유지합니다.
 - 세 batch CSV export 모두 UTF-8 BOM과 `charset=utf-8`을 검증합니다.
 - Backend 회귀 테스트에 VLM error code/redaction, classifier null class, required-field batch cancel, module CSV encoding 검증을 추가했습니다.
+- Workflow Builder를 추가했습니다. React Flow 캔버스에서 Input/Classifier/Branch/KIE/Required/Merge/Export 노드를 연결하고, classifier 결과별 branch path를 실행한 뒤 통합 CSV/JSON으로 export합니다.
 
 ## 2026-05-21 변경 사항
 
@@ -77,13 +78,13 @@ Digitize Your Document를 사용하면 대량 문서에서 수작업으로 값�
 | Key Information Extractor | 구현 | PDF/image/DOCX/PPTX 문서를 업로드하고 사용자가 정의한 schema 기준으로 VLM structured output 값을 추출합니다. |
 | Document Classifier | 구현 | 사용자가 직접 정의한 후보 class와 unknown 허용 규칙으로 문서를 분류합니다. |
 | Required Field Checker | 구현 | 값 추출보다 단순하게 필수 항목의 존재/누락/불확실 여부만 확인합니다. |
-| Workflow Builder | 예정 | 여러 모듈을 드래그 앤 드롭으로 연결하는 파이프라인 빌더입니다. |
+| Workflow Builder | 구현 | 저장된 schema/classifier/checklist를 노드로 연결하고, classifier 결과별 branch를 실행하는 문서 처리 파이프라인 빌더입니다. |
 
 ## 기술 구성
 
 | 영역 | 도구 |
 | --- | --- |
-| Frontend | React 19, Vite 7, TypeScript, lucide-react |
+| Frontend | React 19, Vite 7, TypeScript, React Flow, lucide-react |
 | Backend API | FastAPI, Uvicorn, Pydantic Settings |
 | Database | SQLite, SQLAlchemy |
 | VLM | LangChain, langchain-openai, google-genai, structured output |
@@ -467,6 +468,7 @@ GitHub에는 핵심 변경 이력만 문서화합니다. 로컬에서 만든 실
 | 2026-05-21 | Module workspace | Document Classifier와 Required Field Checker를 추가하고, 향후 Workflow Builder를 위해 config/run/result/review/export 패턴을 맞췄습니다. |
 | 2026-05-21 | Table-first UX | 설정과 결과를 표 중심으로 통일하고, 라이브러리는 작업 화면을 밀어내는 sidebar로 정리했습니다. |
 | 2026-05-21 | Repository hygiene | `.gitignore`를 default-deny allowlist 방식으로 바꾸고, 로컬 HTML/디자인 메모/sample은 Git에서 제외했습니다. |
+| 2026-05-22 | Workflow Builder | React Flow canvas, workflow definition 저장, classifier branch 실행, 문서별 matrix 결과, CSV/JSON export를 추가했습니다. |
 
 현재 KIE 호출 수는 `full-page field가 있으면 1회 + 사용 중인 region 수`입니다.
 

@@ -33,6 +33,7 @@ import {
 import { ChangeEvent, DragEvent, PointerEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, UIEvent } from "react";
 import { ModuleWorkspace } from "./ModuleWorkspace";
+import { WorkflowBuilder } from "./WorkflowBuilder";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const WORKSPACE_STATE_KEY = "digitize_workspace_state_v1";
@@ -71,7 +72,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 ];
 
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
-type AppMode = "home" | "raw" | "key-info" | "classifier" | "required-checker";
+type AppMode = "home" | "raw" | "key-info" | "classifier" | "required-checker" | "workflow";
 type Step = "upload" | "schema" | "review";
 type ReviewFilter = "needs_review" | "all" | "warning" | "null" | "changed" | "low_confidence" | "unreviewed";
 type HistoryTab = "documents" | "schemas" | "jobs";
@@ -368,7 +369,7 @@ function modeFromLocation(): AppMode {
 }
 
 function isAppMode(value: unknown): value is AppMode {
-  return value === "home" || value === "raw" || value === "key-info" || value === "classifier" || value === "required-checker";
+  return value === "home" || value === "raw" || value === "key-info" || value === "classifier" || value === "required-checker" || value === "workflow";
 }
 
 function replaceModeHash(nextMode: AppMode) {
@@ -1942,6 +1943,7 @@ export default function App() {
     if (currentMode === "raw") return "원문 데이터 추출";
     if (currentMode === "classifier") return "문서 분류";
     if (currentMode === "required-checker") return "필수 항목 확인";
+    if (currentMode === "workflow") return "워크플로우 빌더";
     return "핵심 정보 추출";
   }
 
@@ -2052,6 +2054,7 @@ export default function App() {
           onKie={() => navigateMode("key-info")}
           onClassifier={() => navigateMode("classifier")}
           onRequiredChecker={() => navigateMode("required-checker")}
+          onWorkflow={() => navigateMode("workflow")}
         />
       ) : mode === "raw" ? (
         <RawWorkspace
@@ -2070,6 +2073,12 @@ export default function App() {
         />
       ) : mode === "classifier" || mode === "required-checker" ? (
         <ModuleWorkspace kind={mode} leftPanePercent={leftPanePercent} onResize={startResize} />
+      ) : mode === "workflow" ? (
+        <WorkflowBuilder
+          onCreateSchema={() => navigateMode("key-info")}
+          onCreateClassifier={() => navigateMode("classifier")}
+          onCreateChecklist={() => navigateMode("required-checker")}
+        />
       ) : (
         <main
           className="workspace"
@@ -2445,7 +2454,13 @@ function UtilityModal(props: { title: string; eyebrow: string; children: ReactNo
   );
 }
 
-function HomeScreen(props: { onRaw: () => void; onKie: () => void; onClassifier: () => void; onRequiredChecker: () => void }) {
+function HomeScreen(props: {
+  onRaw: () => void;
+  onKie: () => void;
+  onClassifier: () => void;
+  onRequiredChecker: () => void;
+  onWorkflow: () => void;
+}) {
   return (
     <main className="home-screen">
       <section className="home-hero">
@@ -2474,10 +2489,10 @@ function HomeScreen(props: { onRaw: () => void; onKie: () => void; onClassifier:
           <strong>필수 항목 확인</strong>
           <span>값의 정확성보다 필수 항목이 존재하는지 여부를 빠르게 확인합니다.</span>
         </button>
-        <button className="feature-card" disabled>
+        <button className="feature-card active-feature" onClick={props.onWorkflow}>
           <FileJson size={24} />
           <strong>워크플로우 빌더</strong>
-          <span>준비 중 · 여러 모듈을 연결하는 파이프라인 빌더</span>
+          <span>화이트보드에서 여러 모듈을 연결해 문서 처리 파이프라인을 실행합니다.</span>
         </button>
       </section>
     </main>

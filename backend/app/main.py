@@ -56,6 +56,9 @@ from app.models import (
     RequiredFieldCheckResult,
     RequiredFieldChecklist,
     Schema,
+    WorkflowDefinition,
+    WorkflowRun,
+    WorkflowRunItem,
 )
 from app.raw_extractor import RawExtractionError, RawExtractionOptions, create_raw_outputs, save_raw_upload, validate_raw_upload
 from app.schemas import (
@@ -103,6 +106,10 @@ from app.schemas import (
     SystemStatusRead,
     VlmSettingsRead,
     VlmSettingsUpdate,
+    WorkflowDefinitionCreate,
+    WorkflowDefinitionRead,
+    WorkflowDefinitionUpdate,
+    WorkflowRunRead,
 )
 from app.vlm import (
     recommend_required_field_checklist_with_vlm,
@@ -110,6 +117,15 @@ from app.vlm import (
     recommend_schema_with_vlm,
     resolve_vlm_api_style,
     vlm_error_detail,
+)
+from app.workflows import (
+    WorkflowDefinitionError,
+    run_workflow_run,
+    validate_workflow_definition,
+    workflow_definition_to_read,
+    workflow_run_export_csv,
+    workflow_run_export_payload,
+    workflow_run_to_read,
 )
 
 
@@ -1175,6 +1191,195 @@ def delete_export_preset(preset_id: str, db: Session = Depends(get_db)) -> dict[
     return {"status": "deleted"}
 
 
+@app.post("/api/workflows", response_model=WorkflowDefinitionRead)
+def create_workflow(payload: WorkflowDefinitionCreate, db: Session = Depends(get_db)) -> WorkflowDefinitionRead:
+    try:
+        validate_workflow_definition(payload.definition, db)
+    except WorkflowDefinitionError as exc:
+        raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
+    workflow = WorkflowDefinition(
+        name=payload.name.strip(),
+        description=payload.description,
+        definition_json=json.dumps(payload.definition, ensure_ascii=False),
+        archived=False,
+    )
+    db.add(workflow)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="workflow_definition",
+        entity_id=workflow.id,
+        action="created",
+        message=f"Created workflow {workflow.name}",
+        metadata={"node_count": len(payload.definition.get("nodes", [])), "edge_count": len(payload.definition.get("edges", []))},
+    )
+    db.commit()
+    db.refresh(workflow)
+    return WorkflowDefinitionRead(**workflow_definition_to_read(workflow, db))
+
+
+@app.get("/api/workflows", response_model=list[WorkflowDefinitionRead])
+def list_workflows(include_archived: bool = False, db: Session = Depends(get_db)) -> list[WorkflowDefinitionRead]:
+    query = db.query(WorkflowDefinition)
+    if not include_archived:
+        query = query.filter(WorkflowDefinition.archived == False)  # noqa: E712
+    workflows = query.order_by(WorkflowDefinition.created_at.desc()).all()
+    return [WorkflowDefinitionRead(**workflow_definition_to_read(workflow, db)) for workflow in workflows]
+
+
+@app.get("/api/workflows/{workflow_id}", response_model=WorkflowDefinitionRead)
+def get_workflow(workflow_id: str, db: Session = Depends(get_db)) -> WorkflowDefinitionRead:
+    workflow = db.get(WorkflowDefinition, workflow_id)
+    if not workflow or workflow.archived:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return WorkflowDefinitionRead(**workflow_definition_to_read(workflow, db))
+
+
+@app.patch("/api/workflows/{workflow_id}", response_model=WorkflowDefinitionRead)
+def update_workflow(
+    workflow_id: str,
+    payload: WorkflowDefinitionUpdate,
+    db: Session = Depends(get_db),
+) -> WorkflowDefinitionRead:
+    workflow = db.get(WorkflowDefinition, workflow_id)
+    if not workflow or workflow.archived:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if payload.definition is not None:
+        try:
+            validate_workflow_definition(payload.definition, db)
+        except WorkflowDefinitionError as exc:
+            raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
+        workflow.definition_json = json.dumps(payload.definition, ensure_ascii=False)
+    if payload.name is not None:
+        workflow.name = payload.name.strip()
+    if "description" in payload.model_fields_set:
+        workflow.description = payload.description
+    log_audit_event(
+        db,
+        entity_type="workflow_definition",
+        entity_id=workflow.id,
+        action="updated",
+        message=f"Updated workflow {workflow.name}",
+        metadata={},
+    )
+    db.commit()
+    db.refresh(workflow)
+    return WorkflowDefinitionRead(**workflow_definition_to_read(workflow, db))
+
+
+@app.delete("/api/workflows/{workflow_id}", response_model=WorkflowDefinitionRead)
+def delete_workflow(workflow_id: str, db: Session = Depends(get_db)) -> WorkflowDefinitionRead:
+    workflow = db.get(WorkflowDefinition, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    workflow.archived = True
+    log_audit_event(
+        db,
+        entity_type="workflow_definition",
+        entity_id=workflow.id,
+        action="archived",
+        message=f"Archived workflow {workflow.name}",
+        metadata={},
+    )
+    db.commit()
+    db.refresh(workflow)
+    return WorkflowDefinitionRead(**workflow_definition_to_read(workflow, db))
+
+
+@app.post("/api/workflows/{workflow_id}/runs", response_model=WorkflowRunRead)
+def create_workflow_run(
+    workflow_id: str,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+) -> WorkflowRunRead:
+    workflow = db.get(WorkflowDefinition, workflow_id)
+    if not workflow or workflow.archived:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+    try:
+        validate_workflow_definition(json.loads(workflow.definition_json), db)
+    except WorkflowDefinitionError as exc:
+        raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
+
+    run = WorkflowRun(workflow_id=workflow.id, status="running", total_count=len(files))
+    db.add(run)
+    db.flush()
+    for file in sorted(files, key=_upload_file_sort_key):
+        document = _create_document_from_upload(file, db)
+        db.flush()
+        db.add(
+            WorkflowRunItem(
+                run_id=run.id,
+                document_id=document.id,
+                filename=document.filename,
+                status="queued",
+                result_json=json.dumps({"document_id": document.id, "filename": document.filename, "node_results": {}}, ensure_ascii=False),
+            )
+        )
+        log_audit_event(
+            db,
+            entity_type="workflow_run_item",
+            entity_id=run.id,
+            action="queued",
+            message=f"Queued workflow document {document.filename}",
+            metadata={"document_id": document.id},
+        )
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="created",
+        message=f"Created workflow run with {len(files)} file(s)",
+        metadata={"workflow_id": workflow.id, "file_count": len(files)},
+    )
+    db.commit()
+    db.refresh(run)
+    response = WorkflowRunRead(**workflow_run_to_read(run))
+    db.close()
+    background_tasks.add_task(run_workflow_run, run.id)
+    return response
+
+
+@app.get("/api/workflow-runs", response_model=list[WorkflowRunRead])
+def list_workflow_runs(limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)) -> list[WorkflowRunRead]:
+    runs = db.query(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(limit).all()
+    return [WorkflowRunRead(**workflow_run_to_read(run)) for run in runs]
+
+
+@app.get("/api/workflow-runs/{run_id}", response_model=WorkflowRunRead)
+def get_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    return WorkflowRunRead(**workflow_run_to_read(run))
+
+
+@app.get("/api/workflow-runs/{run_id}/export")
+def export_workflow_run(
+    run_id: str,
+    format: str = Query(default="csv", pattern="^(json|csv)$"),
+    db: Session = Depends(get_db),
+) -> Response:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    payload = workflow_run_export_payload(run)
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="exported",
+        message=f"Exported workflow run {format.upper()}",
+        metadata={"format": format},
+    )
+    db.commit()
+    if format == "json":
+        return JSONResponse(payload, headers={"Content-Disposition": f'attachment; filename="{run.id}.json"'})
+    return _csv_download_response(workflow_run_export_csv(run), f"{run.id}.csv")
+
+
 @app.post("/api/batches", response_model=BatchRead)
 def create_batch(
     background_tasks: BackgroundTasks,
@@ -1647,6 +1852,8 @@ def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
         "required_field_check_batch_items": db.query(RequiredFieldCheckBatchItem).count(),
         "required_field_check_jobs": db.query(RequiredFieldCheckJob).count(),
         "required_field_check_results": db.query(RequiredFieldCheckResult).count(),
+        "workflow_runs": db.query(WorkflowRun).count(),
+        "workflow_run_items": db.query(WorkflowRunItem).count(),
         "documents": db.query(Document).count(),
         "document_pages": db.query(DocumentPage).count(),
         "extraction_jobs": db.query(ExtractionJob).count(),
@@ -1665,6 +1872,8 @@ def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
     db.query(RequiredFieldCheckBatch).delete(synchronize_session=False)
     db.query(RequiredFieldCheckResult).delete(synchronize_session=False)
     db.query(RequiredFieldCheckJob).delete(synchronize_session=False)
+    db.query(WorkflowRunItem).delete(synchronize_session=False)
+    db.query(WorkflowRun).delete(synchronize_session=False)
     db.query(BatchItem).delete(synchronize_session=False)
     db.query(Batch).delete(synchronize_session=False)
     db.query(ExtractionResult).delete(synchronize_session=False)
