@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1600, initial-scale=1" />
+    <title>Digitize Your Documents Core Modules</title>
+    <link rel="stylesheet" href="./readme-artboards.css" />
+  </head>
+  <body>
+    <main class="artboard tall">
+      <header style="display: flex; align-items: end; justify-content: space-between;">
+        <div>
+          <p class="eyebrow">Core Modules</p>
+          <h1 style="font-size: 58px;">단일 모듈도, 워크플로우 구성요소도 같은 방식으로</h1>
+        </div>
+        <p style="max-width: 430px; text-align: right;">
+          각 모듈은 저장된 라이브러리를 선택하고, 실행 결과를 표와 evidence 중심으로 검수합니다.
+        </p>
+      </header>
+
+      <section style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; margin-top: 42px;">
+        <article class="surface module-card" style="padding: 30px; min-height: 280px;">
+          <div style="display: flex; gap: 18px; align-items: flex-start;">
+            <i class="icon-box">R</i>
+            <div>
+              <strong style="font-size: 32px;">Raw Data Extractor</strong>
+              <span>DOCX, XLSX, PPTX, PDF를 preview와 HTML 원문으로 변환합니다.</span>
+            </div>
+          </div>
+          <div class="soft" style="margin-top: 28px; padding: 20px;">
+            <div style="display: grid; gap: 10px;">
+              <div class="paper-line" style="width: 70%;"></div>
+              <div class="paper-line" style="width: 86%;"></div>
+              <div class="paper-line" style="width: 58%;"></div>
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 18px;">
+              <span class="pill muted-pill">PDF preview</span>
+              <span class="pill muted-pill">HTML</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="surface module-card" style="padding: 30px; min-height: 280px;">
+          <div style="display: flex; gap: 18px; align-items: flex-start;">
+            <i class="icon-box">K</i>
+            <div>
+              <strong style="font-size: 32px;">Key Information Extractor</strong>
+              <span>schema와 optional region 기준으로 필요한 값만 구조화합니다.</span>
+            </div>
+          </div>
+          <div class="table" style="margin-top: 28px;">
+            <div class="table-row header"><span>필드</span><span>값</span><span>신뢰도</span></div>
+            <div class="table-row"><span>성명</span><span>이하늘</span><span>98%</span></div>
+            <div class="table-row"><span>계약일</span><span>2026-05-22</span><span>96%</span></div>
+          </div>
+        </article>
+
+        <article class="surface module-card" style="padding: 30px; min-height: 280px;">
+          <div style="display: flex; gap: 18px; align-items: flex-start;">
+            <i class="icon-box">C</i>
+            <div>
+              <strong style="font-size: 32px;">Document Classifier</strong>
+              <span>사용자가 정의한 class 후보로 문서 종류를 판단합니다.</span>
+            </div>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 28px;">
+            <div class="mini-card"><strong>신청서</strong><span>confidence 96%</span></div>
+            <div class="mini-card"><strong>동의서</strong><span>branch path</span></div>
+            <div class="mini-card"><strong>unknown</strong><span>분류만 export</span></div>
+          </div>
+        </article>
+
+        <article class="surface module-card" style="padding: 30px; min-height: 280px;">
+          <div style="display: flex; gap: 18px; align-items: flex-start;">
+            <i class="icon-box">Q</i>
+            <div>
+              <strong style="font-size: 32px;">Required Field Checker</strong>
+              <span>서명, 날짜, 체크박스처럼 빠지면 안 되는 항목의 상태를 확인합니다.</span>
+            </div>
+          </div>
+          <div class="table" style="margin-top: 28px;">
+            <div class="table-row header"><span>항목</span><span>상태</span><span>근거</span></div>
+            <div class="table-row"><span>성명</span><span>present</span><span>본문</span></div>
+            <div class="table-row"><span>서명</span><span>missing</span><span>-</span></div>
+          </div>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

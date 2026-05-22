@@ -10,7 +10,7 @@
   </p>
 </div>
 
-![Digitize Your Documents overview](assets/readme_overview.png)
+![Digitize Your Documents overview](assets/readme/overview.png)
 
 ## 이게 뭔가요
 
@@ -30,13 +30,23 @@ PDF, 이미지, DOCX, PPTX, XLSX 같은 업무 문서를 업로드하면 문서 
 
 ## 할 수 있는 일
 
+![Core modules](assets/readme/core-modules.png)
+
 ### Workflow Builder
+
+![Workflow Builder](assets/readme/workflow-builder.png)
 
 - React Flow 캔버스에서 `Input`, `Document Classifier`, `Branch`, `KIE`, `Required Field Checker`, `Merge`, `Export` 노드를 연결합니다.
 - 업로드 파일이 1개면 단일 실행, 2개 이상이면 batch 실행으로 자동 판단합니다.
 - 저장된 classifier class에 따라 branch path를 나누고, class별로 다른 KIE schema나 required checklist를 실행할 수 있습니다.
 - 후속 노드가 없는 class는 분류 결과까지만 export할 수 있습니다.
 - 실행 중에는 문서 리스트, 선택 문서 이미지 preview, 현재 실행 node, module별 결과 table을 한 화면에서 봅니다.
+
+### Workflow 실행 결과 검수
+
+![Workflow result review](assets/readme/workflow-results.png)
+
+Workflow 실행 후에는 캔버스를 접고 결과만 크게 볼 수 있습니다. 문서 리스트, 선택 문서 preview, 현재 실행 node, KIE 결과 table, 필수 항목 table을 한 화면에서 확인합니다.
 
 ### Document Classifier
 
@@ -83,7 +93,7 @@ Home과 Workflow Builder UI는 [Toss Design System Mobile](https://tossmini-docs
 
 ## VLM 실행 구조
 
-![VLM runtime overview](assets/vlm_runtime_overview.png)
+![VLM runtime overview](assets/readme/vlm-runtime.png)
 
 VLM secret은 frontend로 전달하지 않습니다. Frontend는 backend API만 호출하고, backend가 `.env` 또는 Setting 저장값을 읽어 provider별 client를 선택합니다.
 
@@ -227,6 +237,8 @@ npm run build
 
 Workflow batch 병렬 처리 설명은 `reports/workflow_parallel_before_after.html`에 정리되어 있습니다.
 
+README 이미지는 `assets/readme-src/*.html` 아트보드를 Chrome headless로 캡처해 생성합니다. 이미지가 흐려지거나 잘리지 않도록 고정 viewport와 큰 글자 크기를 유지합니다.
+
 ## 저장소 구조
 
 ```text
@@ -235,7 +247,7 @@ Workflow batch 병렬 처리 설명은 `reports/workflow_parallel_before_after.h
 ├── frontend/                 # Vite + React + TypeScript UI
 ├── scripts/run_dev.sh        # backend/frontend 동시 실행
 ├── reports/                  # 개발 검증 보고서
-├── assets/                   # README 이미지
+├── assets/                   # README 이미지와 HTML 아트보드
 ├── DEVELOPMENT_DEFINITION.md # 개발 기준과 운영 원칙
 ├── ERROR_NOTE.md             # 문제 해결 playbook
 └── README.md
