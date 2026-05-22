@@ -43,6 +43,13 @@ Do not validate whether a value is correct. Only decide whether the required mar
 Use optional region crops only for their matching items.
 Return data that matches the requested structured output schema."""
 
+REQUIRED_FIELD_CHECKLIST_RECOMMENDATION_PROMPT = """You are a required field checklist design assistant.
+Look at the uploaded document images and recommend practical presence-check items.
+This is not a key-value extraction schema. Each item should ask whether required text, handwriting, signature, stamp, checkbox, or another visible mark exists.
+Use the document's primary language for item_name and descriptions.
+For Korean documents, item_name values should be natural Korean labels such as 성명, 작성일, 서명/날인, 동의 체크.
+Recommend optional regions only when a repeated area is visually clear and likely useful."""
+
 
 class VlmRuntimeError(RuntimeError):
     def __init__(self, code: str, message: str, hint: str | None = None):
@@ -196,6 +203,27 @@ def check_required_fields_with_vlm(
         prompt,
         inputs,
         _required_field_output_schema(items),
+        api_style,
+    )
+
+
+def recommend_required_field_checklist_with_vlm(image_paths: list[str]) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_required_field_checklist_recommendation()
+
+    _ensure_vlm_credentials(settings)
+    prompt = (
+        "Recommend 4 to 8 checklist items that a user would verify before accepting this document. "
+        "Prefer visible required fields and signatures over values that require external validation. "
+        "Use concise item_name values in the document's primary language."
+    )
+    return _invoke_structured_llm(
+        REQUIRED_FIELD_CHECKLIST_RECOMMENDATION_PROMPT,
+        prompt,
+        _image_inputs_from_paths(image_paths),
+        _required_field_checklist_recommendation_output_schema(),
         api_style,
     )
 
@@ -577,6 +605,51 @@ def _required_field_output_schema(items: list[RequiredFieldItem]) -> dict[str, A
     }
 
 
+def _required_field_checklist_recommendation_output_schema() -> dict[str, Any]:
+    region_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "page": {"type": "integer", "minimum": 1},
+            "x": {"type": "number", "minimum": 0, "maximum": 1},
+            "y": {"type": "number", "minimum": 0, "maximum": 1},
+            "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+            "height": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        },
+        "required": ["id", "name", "page", "x", "y", "width", "height"],
+    }
+    item_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "item_name": {"type": "string"},
+            "description": {"type": "string"},
+            "evidence_type": {
+                "type": "string",
+                "enum": ["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"],
+            },
+            "required": {"type": "boolean"},
+            "region_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        },
+        "required": ["item_name", "description", "evidence_type", "required", "region_id"],
+    }
+    return {
+        "title": "RequiredFieldChecklistRecommendation",
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "reasoning": {"type": "string"},
+            "regions": {"type": "array", "maxItems": 8, "items": region_schema},
+            "items": {"type": "array", "minItems": 1, "maxItems": 12, "items": item_schema},
+        },
+        "required": ["name", "description", "reasoning", "regions", "items"],
+    }
+
+
 def _build_classification_prompt(classes: list[ClassCandidate], allow_unknown: bool) -> str:
     lines = [
         "Classify the document into one of these user-defined classes:",
@@ -783,4 +856,53 @@ def _mock_required_field_check(items: list[RequiredFieldItem]) -> dict[str, Any]
     return {
         "overall_status": "needs_review" if missing_required else "complete",
         "items": checked_items,
+    }
+
+
+def _mock_required_field_checklist_recommendation() -> dict[str, Any]:
+    return {
+        "name": "ai_recommended_checklist",
+        "description": "문서 접수 전에 눈으로 확인해야 하는 필수 항목 중심의 mock 체크리스트입니다.",
+        "reasoning": "Mock mode returns deterministic Korean checklist items to exercise the Required Field Checker recommendation UI.",
+        "regions": [
+            {
+                "id": "signature_area",
+                "name": "서명/날인 영역",
+                "page": 1,
+                "x": 0.55,
+                "y": 0.68,
+                "width": 0.35,
+                "height": 0.18,
+            }
+        ],
+        "items": [
+            {
+                "item_name": "성명",
+                "description": "작성자 또는 대상자의 성명이 인쇄 또는 필기로 존재하는지 확인합니다.",
+                "evidence_type": "text_or_handwriting",
+                "required": True,
+                "region_id": None,
+            },
+            {
+                "item_name": "작성일",
+                "description": "문서 작성일, 제출일, 발급일 중 업무상 필요한 날짜가 보이는지 확인합니다.",
+                "evidence_type": "text_or_handwriting",
+                "required": True,
+                "region_id": None,
+            },
+            {
+                "item_name": "서명/날인",
+                "description": "하단 서명 또는 도장 영역에 서명, 날인, 직인이 존재하는지 확인합니다.",
+                "evidence_type": "signature_or_stamp",
+                "required": True,
+                "region_id": "signature_area",
+            },
+            {
+                "item_name": "동의 체크",
+                "description": "필수 동의 또는 확인 체크박스가 선택되어 있는지 확인합니다.",
+                "evidence_type": "checkbox",
+                "required": True,
+                "region_id": None,
+            },
+        ],
     }

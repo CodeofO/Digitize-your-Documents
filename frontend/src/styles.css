@@ -676,6 +676,18 @@ textarea {
   justify-content: space-between;
 }
 
+.module-card-header {
+  flex-wrap: wrap;
+}
+
+.module-card-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .module-card-header h2,
 .module-library-header h2 {
   font-size: 18px;
@@ -738,6 +750,14 @@ textarea {
   table-layout: fixed;
   min-width: 0;
   width: 100%;
+}
+
+.classifier-table {
+  min-width: 620px;
+}
+
+.checklist-table {
+  min-width: 780px;
 }
 
 .module-result-table {
@@ -945,6 +965,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow-x: auto;
   padding: 8px;
 }
 
@@ -952,6 +973,23 @@ textarea {
   display: grid;
   gap: 6px;
   grid-template-columns: minmax(120px, 1fr) 68px repeat(4, 72px) 36px;
+  min-width: 620px;
+}
+
+.module-config-actions {
+  border-top: 1px solid #edf1ee;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.module-config-actions button {
+  min-width: 96px;
+}
+
+.module-config-actions .primary {
+  min-width: 118px;
 }
 
 .module-status-card {
@@ -3087,8 +3125,8 @@ pre {
   .side-pane,
   .key-info-main-grid,
   .schema-library-sidebar {
-    max-width: calc(100vw - 24px);
-    width: calc(100vw - 24px);
+    max-width: 100%;
+    width: 100%;
   }
 
   .schema-library-sidebar {

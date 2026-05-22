@@ -11,11 +11,12 @@ import {
   PanelRight,
   Play,
   Plus,
+  Sparkles,
   Trash2,
   UploadCloud,
   X
 } from "lucide-react";
-import { ChangeEvent, DragEvent, PointerEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, PointerEvent, useEffect, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const MODULE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
@@ -83,6 +84,14 @@ type RequiredFieldChecklist = {
   items: RequiredFieldItem[];
   created_at: string;
   updated_at: string;
+};
+
+type RequiredFieldChecklistRecommendation = {
+  name: string;
+  description: string | null;
+  reasoning: string | null;
+  regions: SchemaRegion[];
+  items: RequiredFieldItem[];
 };
 
 type ModuleJob<T> = {
@@ -180,8 +189,8 @@ const evidenceTypeLabels: Record<EvidenceType, string> = {
 
 export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorkspaceProps) {
   const isClassifier = kind === "classifier";
-  const title = isClassifier ? "Document Classifier" : "Required Field Checker";
-  const configLabel = isClassifier ? "Classifier" : "Checklist";
+  const title = isClassifier ? "문서 분류" : "필수 항목 확인";
+  const configLabel = isClassifier ? "분류 설정" : "체크리스트";
   const [classifiers, setClassifiers] = useState<DocumentClassifier[]>([]);
   const [checklists, setChecklists] = useState<RequiredFieldChecklist[]>([]);
   const [activeConfigId, setActiveConfigId] = useState<string | null>(null);
@@ -202,8 +211,6 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  const activeClassifier = activeConfigId ? classifiers.find((item) => item.id === activeConfigId) ?? null : null;
-  const activeChecklist = activeConfigId ? checklists.find((item) => item.id === activeConfigId) ?? null : null;
   const activeBatch = activeBatchId ? batches.find((batch) => batch.id === activeBatchId) ?? null : null;
   const activeBatchItem = activeBatch?.items.find((item) => item.id === activeBatchItemId) ?? activeBatch?.items[0] ?? null;
   const activeImageUrl = document?.pages[activePage]?.image_url ? `${API_BASE}${document.pages[activePage].image_url}` : null;
@@ -287,7 +294,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
     } else {
       setChecklistDraft(defaultChecklist());
     }
-    setMessage(`새 ${configLabel.toLowerCase()} 초안을 만들었습니다.`);
+    setMessage(`새 ${configLabel} 초안을 만들었습니다.`);
   }
 
   async function saveActiveConfig() {
@@ -415,6 +422,41 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
     }
   }
 
+  async function recommendChecklist() {
+    if (!document) {
+      setError("AI 추천을 사용하려면 먼저 문서를 업로드하세요.");
+      return;
+    }
+    setBusy("AI 체크리스트 추천 중");
+    setError(null);
+    setMessage(null);
+    try {
+      const recommendation = await api<RequiredFieldChecklistRecommendation>("/api/required-field-checklists/recommendations", {
+        method: "POST",
+        body: JSON.stringify({ document_id: document.document_id })
+      });
+      setActiveConfigId(null);
+      setChecklistDraft(
+        normalizeChecklist({
+          id: "",
+          name: recommendation.name || "ai_recommended_checklist",
+          description: recommendation.description,
+          archived: false,
+          regions: recommendation.regions,
+          items: recommendation.items,
+          created_at: "",
+          updated_at: ""
+        })
+      );
+      setShowRegions(Boolean(recommendation.regions.length));
+      setMessage(recommendation.reasoning || "AI 추천 체크리스트를 적용했습니다. 검토 후 저장하세요.");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function openBatchItem(item: ModuleBatchItem) {
     try {
       const [doc, loadedJob] = await Promise.all([
@@ -517,7 +559,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
             />
           )}
         </section>
-        <button className="splitter" type="button" title="Resize panes" aria-label="Resize panes" onPointerDown={onResize}>
+        <button className="splitter" type="button" title="영역 너비 조절" aria-label="영역 너비 조절" onPointerDown={onResize}>
           <GripVertical size={18} />
         </button>
         <aside className="side-pane module-side-pane">
@@ -527,23 +569,37 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
                 <p className="eyebrow">{configLabel}</p>
                 <h2>{isClassifier ? classifierDraft.name : checklistDraft.name}</h2>
               </div>
-              <button type="button" className="secondary compact" onClick={() => setLibraryOpen((open) => !open)}>
-                <Library size={16} />
-                Library
-              </button>
+              <div className="module-card-actions">
+                <button type="button" className="secondary compact" onClick={() => setLibraryOpen((open) => !open)}>
+                  <Library size={16} />
+                  설정 목록
+                </button>
+                {!isClassifier && (
+                  <button
+                    type="button"
+                    className="primary compact"
+                    disabled={Boolean(busy) || !document}
+                    title={document ? "현재 문서 이미지로 필수 항목 체크리스트를 추천합니다." : "문서를 먼저 업로드해야 AI 추천을 사용할 수 있습니다."}
+                    onClick={() => void recommendChecklist()}
+                  >
+                    <Sparkles size={15} />
+                    AI 추천
+                  </button>
+                )}
+              </div>
             </div>
             {isClassifier ? (
               <ClassifierConfigEditor draft={classifierDraft} onDraft={setClassifierDraft} />
             ) : (
               <RequiredChecklistEditor draft={checklistDraft} onDraft={setChecklistDraft} showRegions={showRegions} onShowRegions={setShowRegions} />
             )}
-            <div className="action-row">
+            <div className="action-row module-config-actions">
               <button type="button" className="secondary" onClick={() => void saveActiveConfig()}>
-                Save
+                저장
               </button>
               <button type="button" className="primary" disabled={Boolean(busy) || (!selectedFiles.length && !document)} onClick={() => void run()}>
                 <Play size={16} />
-                {selectedFiles.length > 1 ? "Run batch" : "Run"}
+                {selectedFiles.length > 1 ? "배치 실행" : "실행"}
               </button>
             </div>
           </section>
@@ -564,8 +620,8 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
           <section className="module-card">
             <div className="module-card-header">
               <div>
-                <p className="eyebrow">Result</p>
-                <h2>{currentJob?.status ?? "대기 중"}</h2>
+                <p className="eyebrow">결과</p>
+                <h2>{moduleStatusLabel(currentJob?.status)}</h2>
               </div>
               {activeBatch && <span className="module-progress">{Math.round(activeBatch.progress * 100)}%</span>}
             </div>
@@ -610,18 +666,18 @@ function ModuleUploadHeader(props: {
   return (
     <div className="pane-header">
       <div>
-        <p className="eyebrow">Document</p>
+        <p className="eyebrow">문서</p>
         <h2>{props.title}</h2>
-        <small>{props.selectedCount ? `${props.selectedCount} selected · ${props.selectedSummary}` : "파일 1개는 단일 실행, 2개 이상은 배치 실행"}</small>
+        <small>{props.selectedCount ? `${props.selectedCount}개 선택됨 · ${props.selectedSummary}` : "파일 1개는 단일 실행, 2개 이상은 배치 실행"}</small>
       </div>
       <div className="toolbar">
         <button type="button" className="primary" disabled={props.runDisabled} onClick={props.onRun}>
           <Play size={16} />
-          Run
+          실행
         </button>
         <button type="button" onClick={props.onClear}>
           <X size={16} />
-          Clear
+          비우기
         </button>
       </div>
     </div>
@@ -648,7 +704,7 @@ function ModuleUploadDropzone(props: {
         <div className="module-draft-layout">
           <aside className="module-selected-list">
             <div className="module-selected-summary">
-              <strong>{props.selectedFiles.length} files</strong>
+              <strong>{props.selectedFiles.length}개 파일</strong>
               <span>{props.selectedSummary}</span>
             </div>
             {props.selectedFiles.map((file, index) => (
@@ -668,12 +724,12 @@ function ModuleUploadDropzone(props: {
           <div className="module-upload-actions">
             <label className="batch-upload">
               <FileUp size={16} />
-              <span>Select files</span>
+              <span>파일 선택</span>
               <input type="file" accept={MODULE_FILE_ACCEPT} multiple onChange={onFileChange} />
             </label>
             <label className="batch-upload">
               <UploadCloud size={16} />
-              <span>Select folder</span>
+              <span>폴더 선택</span>
               <input type="file" accept={MODULE_FILE_ACCEPT} multiple onChange={onFileChange} {...{ webkitdirectory: "", directory: "" }} />
             </label>
           </div>
@@ -738,7 +794,7 @@ function ModuleDocumentPreview(props: {
       </div>
       <div className="module-preview-stage">
         <div className="module-preview-image-wrap">
-          {props.activeImageUrl && <img src={props.activeImageUrl} alt={`Page ${props.activePage + 1}`} />}
+          {props.activeImageUrl && <img src={props.activeImageUrl} alt={`${props.activePage + 1}페이지`} />}
           {props.showRegions && visibleRegions.length > 0 && (
             <div className="document-region-layer">
               {visibleRegions.map((region) => (
@@ -774,11 +830,11 @@ function ModuleBatchRail(props: {
     <aside className="module-batch-rail">
       <div className="module-batch-head">
         <div>
-          <p className="eyebrow">Batch</p>
+          <p className="eyebrow">배치</p>
           <strong>{props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count} / {props.batch.total_count}</strong>
         </div>
         <button type="button" className="secondary compact danger-outline" disabled={!batchCanCancel(props.batch)} onClick={props.onCancel}>
-          Stop
+          중단
         </button>
       </div>
       <progress value={props.batch.progress} max={1} />
@@ -796,7 +852,7 @@ function ModuleBatchRail(props: {
         {props.batch.items.map((item) => (
           <button key={item.id} className={item.id === props.activeItemId ? "active" : ""} onClick={() => props.onOpen(item)}>
             <span>{item.filename}</span>
-            <small>{item.status}</small>
+            <small>{moduleStatusLabel(item.status)}</small>
           </button>
         ))}
       </div>
@@ -818,7 +874,7 @@ function ClassifierConfigEditor(props: { draft: DocumentClassifier; onDraft: (dr
           <input value={draft.name} onChange={(event) => props.onDraft({ ...draft, name: event.target.value })} />
         </label>
         <label className="module-toggle-row">
-          <span>Unknown 허용</span>
+          <span>미분류 허용</span>
           <input type="checkbox" checked={draft.allow_unknown} onChange={(event) => props.onDraft({ ...draft, allow_unknown: event.target.checked })} />
         </label>
       </div>
@@ -887,7 +943,7 @@ function RequiredChecklistEditor(props: {
           <input value={draft.name} onChange={(event) => props.onDraft({ ...draft, name: event.target.value })} />
         </label>
         <label className="module-toggle-row">
-          <span>Region 표시</span>
+          <span>영역 표시</span>
           <input type="checkbox" checked={props.showRegions} onChange={(event) => props.onShowRegions(event.target.checked)} />
         </label>
       </div>
@@ -907,7 +963,7 @@ function RequiredChecklistEditor(props: {
               <th>설명</th>
               <th>증거 유형</th>
               <th>필수</th>
-              <th>Region</th>
+              <th>영역</th>
               <th />
             </tr>
           </thead>
@@ -945,7 +1001,7 @@ function RequiredChecklistEditor(props: {
         </button>
         <button type="button" className="secondary" onClick={() => props.onDraft({ ...draft, regions: [...draft.regions, defaultRegion(draft.regions.length + 1)] })}>
           <PanelRight size={16} />
-          Region 추가
+          영역 추가
         </button>
       </div>
       {draft.regions.length > 0 && (
@@ -976,12 +1032,12 @@ function ClassificationResultPanel(props: {
   const output = props.job?.result?.corrected_output ?? props.job?.result?.validated_output ?? null;
   if (!props.job) return <div className="module-empty-result">실행 후 결과가 표시됩니다.</div>;
   if (props.job.error_message) return <div className="module-error">{props.job.error_message}</div>;
-  if (!output) return <div className="module-empty-result">{props.job.status}</div>;
+  if (!output) return <div className="module-empty-result">{moduleStatusLabel(props.job.status)}</div>;
   return (
     <div className="module-result-stack">
       <div className="module-result-kpis">
-        <span>{output.status}</span>
-        <strong>{output.class_name ?? "unknown"}</strong>
+        <span>{classificationStatusLabel(output.status)}</span>
+        <strong>{output.class_name ?? "미분류"}</strong>
         <span>{formatConfidence(output.confidence)}</span>
       </div>
       <label>
@@ -990,7 +1046,7 @@ function ClassificationResultPanel(props: {
           value={output.class_name ?? ""}
           onChange={(event) => props.onSave({ ...output, status: event.target.value ? "classified" : "unknown", class_name: event.target.value || null })}
         >
-          <option value="">unknown</option>
+          <option value="">미분류</option>
           {props.classes.filter((item) => item.class_name.trim()).map((item) => <option key={item.class_name} value={item.class_name}>{item.class_name}</option>)}
         </select>
       </label>
@@ -1007,8 +1063,8 @@ function ClassificationResultPanel(props: {
           </thead>
           <tbody>
             <tr>
-              <td>{output.class_name ?? "unknown"}</td>
-              <td>{output.status}</td>
+              <td>{output.class_name ?? "미분류"}</td>
+              <td>{classificationStatusLabel(output.status)}</td>
               <td>{formatConfidence(output.confidence)}</td>
               <td>{output.reason}</td>
               <td>{output.evidence.join(", ")}</td>
@@ -1027,7 +1083,7 @@ function RequiredFieldResultPanel(props: {
   const output = props.job?.result?.corrected_output ?? props.job?.result?.validated_output ?? null;
   if (!props.job) return <div className="module-empty-result">실행 후 결과가 표시됩니다.</div>;
   if (props.job.error_message) return <div className="module-error">{props.job.error_message}</div>;
-  if (!output) return <div className="module-empty-result">{props.job.status}</div>;
+  if (!output) return <div className="module-empty-result">{moduleStatusLabel(props.job.status)}</div>;
   function updateStatus(index: number, status: RequiredFieldOutputItem["status"]) {
     const items = output!.items.map((item, itemIndex) => (itemIndex === index ? { ...item, status } : item));
     const missing = items.some((item) => item.required && item.status === "missing");
@@ -1037,8 +1093,8 @@ function RequiredFieldResultPanel(props: {
   return (
     <div className="module-result-stack">
       <div className="module-result-kpis">
-        <span>overall</span>
-        <strong>{output.overall_status}</strong>
+        <span>전체 상태</span>
+        <strong>{requiredOverallStatusLabel(output.overall_status)}</strong>
       </div>
       <div className="module-table-wrap">
         <table className="module-result-table">
@@ -1047,7 +1103,7 @@ function RequiredFieldResultPanel(props: {
               <th>체크 항목</th>
               <th>상태</th>
               <th>근거</th>
-              <th>Page</th>
+              <th>페이지</th>
             </tr>
           </thead>
           <tbody>
@@ -1056,10 +1112,10 @@ function RequiredFieldResultPanel(props: {
                 <td>{item.item_name}</td>
                 <td>
                   <select value={item.status} onChange={(event) => updateStatus(index, event.target.value as RequiredFieldOutputItem["status"])}>
-                    <option>present</option>
-                    <option>missing</option>
-                    <option>uncertain</option>
-                    <option>not_applicable</option>
+                    <option value="present">있음</option>
+                    <option value="missing">누락</option>
+                    <option value="uncertain">확인 필요</option>
+                    <option value="not_applicable">해당 없음</option>
                   </select>
                 </td>
                 <td>{item.evidence}</td>
@@ -1086,7 +1142,7 @@ function ModuleLibraryPanel(props: {
     <aside className="module-library-panel">
       <div className="module-library-header">
         <div>
-          <p className="eyebrow">{props.kind === "classifier" ? "Classifier Library" : "Checklist Library"}</p>
+          <p className="eyebrow">{props.kind === "classifier" ? "분류 설정 목록" : "체크리스트 목록"}</p>
           <h2>설정 관리</h2>
         </div>
         <button type="button" className="icon-only secondary" onClick={props.onClose}>
@@ -1095,7 +1151,7 @@ function ModuleLibraryPanel(props: {
       </div>
       <button type="button" className="primary full-width" onClick={props.onNew}>
         <Plus size={16} />
-        New config
+        새 설정
       </button>
       <div className="module-library-list">
         {props.configs.map((config) => (
@@ -1158,8 +1214,8 @@ function defaultClassifier(): DocumentClassifier {
     allow_unknown: true,
     archived: false,
     classes: [
-      { class_name: "contract", description: "계약 조건, 당사자, 서명 또는 날인이 포함된 문서", signals: ["계약", "서명", "날인"] },
-      { class_name: "application_form", description: "신청자 정보와 동의 체크 항목이 포함된 신청서", signals: ["신청", "동의", "작성일"] }
+      { class_name: "계약서", description: "계약 조건, 당사자, 서명 또는 날인이 포함된 문서", signals: ["계약", "서명", "날인"] },
+      { class_name: "신청서", description: "신청자 정보와 동의 체크 항목이 포함된 신청서", signals: ["신청", "동의", "작성일"] }
     ],
     created_at: "",
     updated_at: ""
@@ -1198,8 +1254,8 @@ function toClassifierPayload(config: DocumentClassifier) {
       signals: item.signals.map((signal) => signal.trim()).filter(Boolean)
     }))
     .filter((item) => item.class_name && item.description);
-  if (!config.name.trim()) throw new Error("Classifier name is required.");
-  if (!classes.length) throw new Error("At least one class is required.");
+  if (!config.name.trim()) throw new Error("분류 설정 이름을 입력하세요.");
+  if (!classes.length) throw new Error("문서 클래스를 최소 1개 이상 입력하세요.");
   return {
     name: config.name.trim(),
     description: config.description?.trim() || null,
@@ -1218,8 +1274,8 @@ function toChecklistPayload(config: RequiredFieldChecklist) {
       region_id: item.region_id || null
     }))
     .filter((item) => item.item_name && item.description);
-  if (!config.name.trim()) throw new Error("Checklist name is required.");
-  if (!items.length) throw new Error("At least one required field item is required.");
+  if (!config.name.trim()) throw new Error("체크리스트 이름을 입력하세요.");
+  if (!items.length) throw new Error("체크 항목을 최소 1개 이상 입력하세요.");
   return {
     name: config.name.trim(),
     description: config.description?.trim() || null,
@@ -1235,7 +1291,7 @@ function toChecklistPayload(config: RequiredFieldChecklist) {
 }
 
 function defaultRegion(index: number): SchemaRegion {
-  return { id: `region_${Date.now()}_${index}`, name: `Region ${index}`, page: 1, x: 0.55, y: 0.55, width: 0.35, height: 0.2 };
+  return { id: `region_${Date.now()}_${index}`, name: `영역 ${index}`, page: 1, x: 0.55, y: 0.55, width: 0.35, height: 0.2 };
 }
 
 function splitSignals(value: string): string[] {
@@ -1247,12 +1303,45 @@ function documentPageThumbnailSrc(documentId: string, page: number, width: numbe
 }
 
 function configSummary(config: DocumentClassifier | RequiredFieldChecklist) {
-  if ("classes" in config) return `${config.classes.length} classes · ${new Date(config.updated_at).toLocaleDateString()}`;
-  return `${config.items.length} items · ${config.regions.length} regions · ${new Date(config.updated_at).toLocaleDateString()}`;
+  if ("classes" in config) return `${config.classes.length}개 클래스 · ${new Date(config.updated_at).toLocaleDateString()}`;
+  return `${config.items.length}개 항목 · ${config.regions.length}개 영역 · ${new Date(config.updated_at).toLocaleDateString()}`;
 }
 
 function batchCanCancel(batch: ModuleBatch) {
   return ["running", "cancel_requested", "canceling"].includes(batch.status);
+}
+
+function moduleStatusLabel(status: string | null | undefined) {
+  const labels: Record<string, string> = {
+    queued: "대기 중",
+    running: "실행 중",
+    completed: "완료",
+    completed_with_errors: "일부 실패",
+    failed: "실패",
+    canceled: "취소됨",
+    cancel_requested: "중단 요청됨",
+    canceling: "중단 중",
+    needs_review: "검토 필요"
+  };
+  return status ? labels[status] ?? status : "대기 중";
+}
+
+function classificationStatusLabel(status: ClassificationOutput["status"]) {
+  const labels: Record<ClassificationOutput["status"], string> = {
+    classified: "분류 완료",
+    unknown: "알 수 없음",
+    needs_review: "검토 필요"
+  };
+  return labels[status];
+}
+
+function requiredOverallStatusLabel(status: RequiredFieldOutput["overall_status"]) {
+  const labels: Record<RequiredFieldOutput["overall_status"], string> = {
+    complete: "완료",
+    incomplete: "누락 있음",
+    needs_review: "검토 필요"
+  };
+  return labels[status];
 }
 
 function formatBytes(bytes: number) {
@@ -1297,10 +1386,10 @@ function formatApiDetail(detail: unknown): string {
 function errorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("VLM_CREDENTIALS_MISSING") || message.includes("VLM API key and model name are required")) {
-    return "VLM credentials are missing. Go Home and use Setting to save API key and model name, or use VLM_PROVIDER=mock for a local demo.";
+    return "VLM 인증 정보가 없습니다. Home의 Setting에서 API key와 model name을 저장하거나, 로컬 데모에서는 VLM_PROVIDER=mock을 사용하세요.";
   }
   if (message.includes("VLM_PROVIDER_UNSUPPORTED") || message.includes("Unsupported VLM_PROVIDER")) {
-    return "Unsupported VLM_PROVIDER. Use auto, mock, openai_compatible, or google_genai.";
+    return "지원하지 않는 VLM_PROVIDER입니다. auto, mock, openai_compatible, google_genai 중 하나를 사용하세요.";
   }
   if (message.includes("VLM_PROVIDER_REQUEST_FAILED")) {
     return message.replace("VLM_PROVIDER_REQUEST_FAILED: ", "");

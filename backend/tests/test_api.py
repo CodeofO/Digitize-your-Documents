@@ -562,6 +562,35 @@ def test_schema_recommendation_mock_mode() -> None:
         get_settings.cache_clear()
 
 
+def test_required_field_checklist_recommendation_mock_mode() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            document = upload_png(client)
+            response = client.post(
+                "/api/required-field-checklists/recommendations",
+                json={"document_id": document["document_id"]},
+            )
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert payload["name"] == "ai_recommended_checklist"
+            assert len(payload["items"]) >= 3
+            assert {item["evidence_type"] for item in payload["items"]} <= {
+                "text_or_handwriting",
+                "checkbox",
+                "signature_or_stamp",
+                "visual_mark",
+                "other",
+            }
+            assert {item["region_id"] for item in payload["items"] if item["region_id"]} <= {
+                region["id"] for region in payload["regions"]
+            }
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
 def test_schema_description_recommendation_mock_mode() -> None:
     try:
         os.environ["VLM_PROVIDER"] = "mock"

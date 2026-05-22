@@ -89,6 +89,8 @@ from app.schemas import (
     RequiredFieldCheckResultPatch,
     RequiredFieldCheckResultRead,
     RequiredFieldChecklistCreate,
+    RequiredFieldChecklistRecommendationRead,
+    RequiredFieldChecklistRecommendationRequest,
     RequiredFieldChecklistRead,
     RequiredFieldChecklistUpdate,
     SchemaCreate,
@@ -102,7 +104,13 @@ from app.schemas import (
     VlmSettingsRead,
     VlmSettingsUpdate,
 )
-from app.vlm import recommend_schema_description_with_vlm, recommend_schema_with_vlm, resolve_vlm_api_style, vlm_error_detail
+from app.vlm import (
+    recommend_required_field_checklist_with_vlm,
+    recommend_schema_description_with_vlm,
+    recommend_schema_with_vlm,
+    resolve_vlm_api_style,
+    vlm_error_detail,
+)
 
 
 @asynccontextmanager
@@ -743,6 +751,36 @@ def list_required_field_checklists(
         query = query.filter(RequiredFieldChecklist.archived == False)  # noqa: E712
     rows = query.order_by(RequiredFieldChecklist.created_at.desc()).all()
     return [_checklist_read(row) for row in rows]
+
+
+@app.post("/api/required-field-checklists/recommendations", response_model=RequiredFieldChecklistRecommendationRead)
+def recommend_required_field_checklist(
+    payload: RequiredFieldChecklistRecommendationRequest,
+    db: Session = Depends(get_db),
+) -> RequiredFieldChecklistRecommendationRead:
+    document = db.get(Document, payload.document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        recommendation = recommend_required_field_checklist_with_vlm([page.image_path for page in document.pages])
+        recommendation_read = _required_field_checklist_recommendation_read(recommendation)
+        log_audit_event(
+            db,
+            entity_type="document",
+            entity_id=document.id,
+            action="required_field_checklist_recommended",
+            message="AI required field checklist recommendation generated",
+            metadata={
+                "item_count": len(recommendation_read.items),
+                "region_count": len(recommendation_read.regions),
+            },
+        )
+        db.commit()
+        return recommendation_read
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"VLM returned an invalid checklist recommendation: {exc}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=vlm_error_detail(exc)) from exc
 
 
 @app.get("/api/required-field-checklists/{checklist_id}", response_model=RequiredFieldChecklistRead)
@@ -1848,6 +1886,29 @@ def _checklist_data(checklist: RequiredFieldChecklist) -> dict[str, Any]:
     if not checklist.config_json or checklist.config_json == "{}":
         raise HTTPException(status_code=500, detail="Required field checklist data is missing")
     return json.loads(checklist.config_json)
+
+
+def _required_field_checklist_recommendation_read(payload: dict[str, Any]) -> RequiredFieldChecklistRecommendationRead:
+    recommendation = RequiredFieldChecklistRecommendationRead(**payload)
+    region_ids = {region.id for region in recommendation.regions}
+    seen_items: set[str] = set()
+    unique_items = []
+    for item in recommendation.items:
+        if item.item_name in seen_items:
+            continue
+        seen_items.add(item.item_name)
+        if item.region_id and item.region_id not in region_ids:
+            item = item.model_copy(update={"region_id": None})
+        unique_items.append(item)
+    if not unique_items:
+        raise ValueError("checklist recommendation must include at least one item")
+    return RequiredFieldChecklistRecommendationRead(
+        name=recommendation.name.strip() or "ai_recommended_checklist",
+        description=recommendation.description,
+        reasoning=recommendation.reasoning,
+        regions=recommendation.regions,
+        items=unique_items,
+    )
 
 
 def _validate_checklist_region_references(checklist_data: dict[str, Any]) -> None:

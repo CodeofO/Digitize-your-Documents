@@ -482,6 +482,18 @@ class RequiredFieldChecklistRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RequiredFieldChecklistRecommendationRequest(BaseModel):
+    document_id: str
+
+
+class RequiredFieldChecklistRecommendationRead(BaseModel):
+    name: str
+    description: str | None = None
+    reasoning: str | None = None
+    regions: list[SchemaRegion] = Field(default_factory=list)
+    items: list[RequiredFieldItem] = Field(min_length=1)
+
+
 class RequiredFieldCheckJobCreate(BaseModel):
     document_id: str
     checklist_id: str

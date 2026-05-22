@@ -363,6 +363,7 @@ API:
 ## Required Field Checker
 
 KIE처럼 값을 추출하지 않고, 필수 항목이 문서에 존재하는지만 확인하는 모듈입니다. 예를 들어 성명, 날짜, 서명, 체크박스, 도장 등이 비어 있는지 빠르게 거를 수 있습니다. 값의 정확성이나 외부 DB 일치 여부는 확인하지 않습니다.
+업로드된 문서를 기준으로 AI가 체크 항목과 optional region을 추천하는 `AI 추천` 버튼을 제공하며, 추천 결과는 초안으로 적용한 뒤 사용자가 저장합니다.
 
 설정 구조:
 
@@ -395,6 +396,7 @@ API:
 | Method | Path |
 | --- | --- |
 | `POST/GET/PATCH/DELETE` | `/api/required-field-checklists` |
+| `POST` | `/api/required-field-checklists/recommendations` |
 | `POST` | `/api/required-field-check-jobs` |
 | `GET` | `/api/required-field-check-jobs/{job_id}` |
 | `PATCH` | `/api/required-field-check-results/{result_id}` |

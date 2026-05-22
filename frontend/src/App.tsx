@@ -44,28 +44,28 @@ const BATCH_FILE_ROW_HEIGHT = 84;
 const BATCH_FILE_OVERSCAN = 8;
 const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
   {
-    key_name: "document_number",
-    description: "Primary document, invoice, receipt, application, or transaction number near the top.",
+    key_name: "문서번호",
+    description: "문서 상단 근처의 문서번호, 영수증 번호, 신청 번호 또는 거래 번호입니다.",
     output_format: "string"
   },
   {
-    key_name: "document_date",
-    description: "Main issued, submitted, or effective date printed on the document.",
+    key_name: "문서일자",
+    description: "문서에 인쇄된 발급일, 제출일 또는 효력 발생일입니다.",
     output_format: "date"
   },
   {
-    key_name: "issuer_name",
-    description: "Organization, bank, vendor, or authority that issued the document.",
+    key_name: "발급기관",
+    description: "문서를 발급한 기관, 은행, 업체 또는 권한 있는 조직입니다.",
     output_format: "string"
   },
   {
-    key_name: "recipient_name",
-    description: "Person or organization the document is addressed to or belongs to.",
+    key_name: "수신자",
+    description: "문서의 수신자 또는 문서가 귀속되는 사람/조직입니다.",
     output_format: "string"
   },
   {
-    key_name: "total_amount",
-    description: "Final total, balance, transaction amount, or payment amount if visible.",
+    key_name: "금액",
+    description: "보이는 경우 최종 합계, 잔액, 거래 금액 또는 결제 금액입니다.",
     output_format: "float"
   }
 ];
@@ -1114,7 +1114,7 @@ export default function App() {
   }
 
   async function uploadRawFile(file: File, options: RawExtractionOptions) {
-    setBusy("Raw extraction processing");
+    setBusy("원문 데이터 추출 중");
     setError(null);
     try {
       const form = new FormData();
@@ -1128,7 +1128,7 @@ export default function App() {
       setRawExtraction(extracted);
       await refreshRawHistory();
       if (extracted.status === "failed") {
-        setError(extracted.error_message || "Raw extraction failed.");
+        setError(extracted.error_message || "원문 데이터 추출에 실패했습니다.");
       }
     } catch (err) {
       setError(toFriendlyError(err));
@@ -1138,13 +1138,13 @@ export default function App() {
   }
 
   async function loadRawExtraction(rawId: string) {
-    setBusy("Loading raw extraction");
+    setBusy("원문 추출 결과 로드 중");
     setError(null);
     try {
       const loaded = await api<RawExtraction>(`/api/raw-extractions/${rawId}`);
       setRawExtraction(loaded);
       if (loaded.status === "failed") {
-        setError(loaded.error_message || "Raw extraction failed.");
+        setError(loaded.error_message || "원문 데이터 추출에 실패했습니다.");
       }
     } catch (err) {
       setError(toFriendlyError(err));
@@ -1182,7 +1182,7 @@ export default function App() {
   }
 
   async function uploadFile(file: File) {
-    setBusy("Uploading document");
+    setBusy("문서 업로드 중");
     setError(null);
     try {
       const form = new FormData();
@@ -1205,10 +1205,10 @@ export default function App() {
 
   async function recommendSchema() {
     if (!document) {
-      setError("Upload a document before asking AI to recommend a schema.");
+      setError("AI 추천 schema를 사용하려면 먼저 문서를 업로드하세요.");
       return;
     }
-    setBusy("Recommending schema");
+    setBusy("AI schema 추천 중");
     setError(null);
     try {
       const recommendation = await api<SchemaRecommendation>("/api/schemas/recommendations", {
@@ -1288,7 +1288,7 @@ export default function App() {
       return null;
     }
     if (!options.silent) {
-      setBusy(schema ? "Saving schema" : "Creating schema");
+      setBusy(schema ? "Schema 저장 중" : "Schema 생성 중");
       setError(null);
     }
     try {
@@ -1337,7 +1337,7 @@ export default function App() {
 
   async function runExtraction() {
     if (!document) {
-      setError("Upload a document first.");
+      setError("먼저 문서를 업로드하세요.");
       return;
     }
     const validationError = validateFields(schemaPayloadFields, schemaPayloadRegions);
@@ -1347,7 +1347,7 @@ export default function App() {
     }
     const useSavedSchema = Boolean(schema && !schemaDirty && !schema.ephemeral);
 
-    setBusy("Running extraction");
+    setBusy("핵심 정보 추출 중");
     setError(null);
     try {
       const created = useSavedSchema
@@ -1388,7 +1388,7 @@ export default function App() {
         void loadAuditEvents("extraction_result", completed.result.id);
       }
       if (completed.status === "failed") {
-        setError(completed.error_message || "Extraction failed.");
+        setError(completed.error_message || "추출에 실패했습니다.");
       }
       await refreshHistory();
     } catch (err) {
@@ -1400,7 +1400,7 @@ export default function App() {
 
   async function saveCorrections() {
     if (!result) return;
-    setBusy("Saving corrections");
+    setBusy("수정 결과 저장 중");
     setError(null);
     try {
       const correctedOutput: ValidatedOutput = {
@@ -1424,7 +1424,7 @@ export default function App() {
   }
 
   async function loadDocument(documentId: string) {
-    setBusy("Loading document");
+    setBusy("문서 로드 중");
     setError(null);
     try {
       setActiveBatchId(null);
@@ -1458,7 +1458,7 @@ export default function App() {
   }
 
   async function loadSchema(schemaId: string) {
-    setBusy("Loading schema");
+    setBusy("Schema 로드 중");
     setError(null);
     try {
       setActiveBatchId(null);
@@ -1476,7 +1476,7 @@ export default function App() {
   async function deleteSchema(schemaId: string) {
     const target = recentSchemas.find((item) => item.id === schemaId) ?? (schema?.id === schemaId ? schema : null);
     if (!target) return;
-    setBusy("Deleting schema");
+    setBusy("Schema 삭제 중");
     setError(null);
     try {
       await api<SavedSchema>(`/api/schemas/${schemaId}`, { method: "DELETE" });
@@ -1665,7 +1665,7 @@ export default function App() {
   function applySampleSchema() {
     setSchema(null);
     setSchemaName("sample_document_schema");
-    setSchemaDescription("Starter schema for common business documents.");
+    setSchemaDescription("일반 업무 문서에 바로 쓸 수 있는 시작용 schema입니다.");
     setRegions([]);
     setFields(toSchemaFields(SAMPLE_SCHEMA_FIELDS));
     setSchemaDirty(true);
@@ -1676,7 +1676,7 @@ export default function App() {
     try {
       const parsed = JSON.parse(schemaJsonInput) as Partial<SchemaRecommendation>;
       if (!parsed.name || !Array.isArray(parsed.fields)) {
-        setError("Schema JSON must include name and fields.");
+        setError("Schema JSON에는 name과 fields가 필요합니다.");
         return;
       }
       const fieldsFromJson = parsed.fields.map((field) => ({
@@ -1704,7 +1704,7 @@ export default function App() {
       setSchemaDirty(true);
       setError(null);
     } catch {
-      setError("Schema JSON could not be parsed.");
+      setError("Schema JSON을 해석할 수 없습니다.");
     }
   }
 
@@ -1768,12 +1768,12 @@ export default function App() {
     setReviewedFields((current) => (current.includes(key) ? current.filter((item) => item !== key) : [...current, key]));
   }
 
-  async function markSchemaAsTemplate(category = "General") {
+  async function markSchemaAsTemplate(category = "일반") {
     if (!schema) {
-      setError("Save the schema before adding it to templates.");
+      setError("템플릿으로 추가하기 전에 schema를 저장하세요.");
       return;
     }
-    setBusy("Saving template");
+    setBusy("템플릿 저장 중");
     setError(null);
     try {
       const updated = await api<SavedSchema>(`/api/schemas/${schema.id}`, {
@@ -1880,7 +1880,7 @@ export default function App() {
   }
 
   async function cancelBatch(batchId: string) {
-    setBusy("Canceling batch extraction");
+    setBusy("배치 추출 중단 중");
     setError(null);
     setBatchMessage(null);
     try {
@@ -1897,11 +1897,11 @@ export default function App() {
 
   async function saveDefaultExportPreset() {
     if (!schema) {
-      setError("Save the schema before creating an export preset.");
+      setError("Export preset을 만들기 전에 schema를 저장하세요.");
       return;
     }
     const name = `${schemaName || "schema"} export`;
-    setBusy("Saving export preset");
+    setBusy("Export preset 저장 중");
     setError(null);
     try {
       const preset = await api<ExportPreset>("/api/export-presets", {
@@ -1939,10 +1939,10 @@ export default function App() {
 
   function modeTitle(currentMode: AppMode) {
     if (currentMode === "home") return "Digitize Your Document";
-    if (currentMode === "raw") return "Raw Data Extractor";
-    if (currentMode === "classifier") return "Document Classifier";
-    if (currentMode === "required-checker") return "Required Field Checker";
-    return "Key Information Workspace";
+    if (currentMode === "raw") return "원문 데이터 추출";
+    if (currentMode === "classifier") return "문서 분류";
+    if (currentMode === "required-checker") return "필수 항목 확인";
+    return "핵심 정보 추출";
   }
 
   function goToPage(page: number | null) {
@@ -1995,19 +1995,19 @@ export default function App() {
           <ProviderPill status={systemStatus} />
           {mode !== "home" && (
             <button type="button" className="secondary compact" onClick={() => navigateMode("home")}>
-              Home
+              홈
             </button>
           )}
           {mode === "key-info" && (
             <>
-              <StepPill label="Upload" active={step === "upload"} done={Boolean(document)} />
+              <StepPill label="업로드" active={step === "upload"} done={Boolean(document)} />
               <StepPill label="Schema" active={step === "schema"} done={Boolean(schema) && !schemaDirty} />
-              <StepPill label="Review" active={step === "review"} done={Boolean(result)} />
+              <StepPill label="검수" active={step === "review"} done={Boolean(result)} />
             </>
           )}
-          <button type="button" className="secondary compact" onClick={() => void refreshAll()} title="Refresh workspace">
+          <button type="button" className="secondary compact" onClick={() => void refreshAll()} title="작업 화면 새로고침">
             <RefreshCw size={16} />
-            Refresh
+            새로고침
           </button>
           {mode === "home" && (
             <button
@@ -2018,21 +2018,21 @@ export default function App() {
                 setSettingsMessage(null);
                 setSettingsOpen(true);
               }}
-              title="VLM and LibreOffice setting"
+              title="VLM과 LibreOffice 설정"
             >
               <Settings size={16} />
-              Setting
+              설정
             </button>
           )}
           <div className="help-trigger">
-            <button type="button" className="help-button" aria-label="Usage guide">
+            <button type="button" className="help-button" aria-label="사용 가이드">
               <CircleHelp size={18} />
             </button>
             <div className="help-panel" role="tooltip">
-              <strong>Usage</strong>
-              <span>Upload a document, then define or ask AI to recommend a schema.</span>
-              <span>Schema changes are saved automatically after field edits.</span>
-              <span>Review warnings, nulls, edits, evidence, and page references before export.</span>
+              <strong>사용 흐름</strong>
+              <span>문서를 업로드한 뒤 직접 schema를 정의하거나 AI 추천을 사용하세요.</span>
+              <span>Schema 변경은 필드 수정 후 자동 저장됩니다.</span>
+              <span>Export 전에 경고, 누락값, 수정값, 근거, 페이지를 검수하세요.</span>
             </div>
           </div>
         </div>
@@ -2138,8 +2138,8 @@ export default function App() {
           <button
             className="splitter"
             type="button"
-            title="Resize panes"
-            aria-label="Resize panes"
+            title="영역 너비 조절"
+            aria-label="영역 너비 조절"
             onPointerDown={startResize}
           >
             <GripVertical size={18} />
@@ -2298,7 +2298,7 @@ export default function App() {
         </main>
       )}
       {archiveOpen && (
-        <UtilityModal title="Search archive" eyebrow="Saved results" onClose={() => setArchiveOpen(false)}>
+        <UtilityModal title="아카이브 검색" eyebrow="저장된 결과" onClose={() => setArchiveOpen(false)}>
           <ArchivePanel
             query={archiveQuery}
             status={archiveStatus}
@@ -2319,7 +2319,7 @@ export default function App() {
         </UtilityModal>
       )}
       {historyOpen && (
-        <UtilityModal title="Recent items" eyebrow="History" onClose={() => setHistoryOpen(false)}>
+        <UtilityModal title="최근 항목" eyebrow="기록" onClose={() => setHistoryOpen(false)}>
           <HistoryPanel
             activeTab={historyTab}
             documents={recentDocuments}
@@ -2344,7 +2344,7 @@ export default function App() {
         </UtilityModal>
       )}
       {batchOpen && (
-        <UtilityModal title="Batch upload & results" eyebrow="Multiple files" onClose={() => setBatchOpen(false)}>
+        <UtilityModal title="배치 업로드 및 결과" eyebrow="여러 파일" onClose={() => setBatchOpen(false)}>
           <BatchPanel
             batches={batches}
             selectedFiles={batchFiles}
@@ -2413,14 +2413,14 @@ export default function App() {
 
 function KieUtilityDock(props: { onArchive: () => void; onBatch: () => void }) {
   return (
-    <section className="utility-dock" aria-label="KIE utility actions">
+    <section className="utility-dock" aria-label="핵심 정보 추출 보조 작업">
       <button type="button" className="secondary" onClick={props.onArchive}>
         <FileJson size={16} />
-        Search archive
+        아카이브 검색
       </button>
       <button type="button" className="secondary" onClick={props.onBatch}>
         <FileSpreadsheet size={16} />
-        Batch results
+        배치 결과
       </button>
     </section>
   );
@@ -2435,7 +2435,7 @@ function UtilityModal(props: { title: string; eyebrow: string; children: ReactNo
             <p className="eyebrow">{props.eyebrow}</p>
             <h2>{props.title}</h2>
           </div>
-          <button type="button" className="icon-only secondary" aria-label="Close" onClick={props.onClose}>
+          <button type="button" className="icon-only secondary" aria-label="닫기" onClick={props.onClose}>
             <X size={16} />
           </button>
         </div>
@@ -2449,35 +2449,35 @@ function HomeScreen(props: { onRaw: () => void; onKie: () => void; onClassifier:
   return (
     <main className="home-screen">
       <section className="home-hero">
-        <p className="eyebrow">Workspace</p>
+        <p className="eyebrow">작업 공간</p>
         <h2>문서 처리 방식을 선택하세요</h2>
         <p>대량 문서의 원본 정보 추출, 핵심값 추출, 문서 분류, 필수 항목 확인을 하나의 workspace에서 자동화합니다.</p>
       </section>
       <section className="feature-grid">
         <button className="feature-card active-feature" onClick={props.onRaw}>
           <FileUp size={24} />
-          <strong>Raw Data Extractor</strong>
-          <span>DOCX, XLSX, PPTX, PDF를 PDF preview와 HTML로 변환합니다.</span>
+          <strong>원문 데이터 추출</strong>
+          <span>DOCX, XLSX, PPTX, PDF를 PDF 미리보기와 HTML로 변환합니다.</span>
         </button>
         <button className="feature-card active-feature" onClick={props.onKie}>
           <Sparkles size={24} />
-          <strong>Key Information Extractor</strong>
+          <strong>핵심 정보 추출</strong>
           <span>PDF, 이미지, DOCX, PPTX에서 schema에 맞는 값만 추출합니다.</span>
         </button>
         <button className="feature-card active-feature" onClick={props.onClassifier}>
           <ClipboardList size={24} />
-          <strong>Document Classifier</strong>
-          <span>사용자가 정의한 후보 class와 unknown 허용 규칙으로 문서를 자동 분류합니다.</span>
+          <strong>문서 분류</strong>
+          <span>사용자가 정의한 후보 class와 미분류 허용 규칙으로 문서를 자동 분류합니다.</span>
         </button>
         <button className="feature-card active-feature" onClick={props.onRequiredChecker}>
           <CheckSquare size={24} />
-          <strong>Required Field Checker</strong>
+          <strong>필수 항목 확인</strong>
           <span>값의 정확성보다 필수 항목이 존재하는지 여부를 빠르게 확인합니다.</span>
         </button>
         <button className="feature-card" disabled>
           <FileJson size={24} />
-          <strong>Workflow Builder</strong>
-          <span>Coming soon · 여러 모듈을 연결하는 파이프라인 빌더</span>
+          <strong>워크플로우 빌더</strong>
+          <span>준비 중 · 여러 모듈을 연결하는 파이프라인 빌더</span>
         </button>
       </section>
     </main>
@@ -2517,17 +2517,17 @@ function RawWorkspace(props: {
       <section className="document-pane">
         <div className="pane-header">
           <div>
-            <p className="eyebrow">PDF Preview</p>
-            <h2>{props.rawExtraction?.filename || "Upload raw document"}</h2>
+            <p className="eyebrow">PDF 미리보기</p>
+            <h2>{props.rawExtraction?.filename || "원문 문서 업로드"}</h2>
           </div>
         </div>
         {props.pdfUrl ? (
-          <iframe className="raw-frame" src={props.pdfUrl} title="PDF preview" />
+          <iframe className="raw-frame" src={props.pdfUrl} title="PDF 미리보기" />
         ) : (
           <label className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
             <UploadCloud size={32} />
-            <strong>Upload a raw document</strong>
-            <span>DOCX, XLSX, PPTX, or PDF</span>
+            <strong>원문 문서 업로드</strong>
+            <span>DOCX, XLSX, PPTX 또는 PDF</span>
             <input type="file" accept=".docx,.xlsx,.pptx,.pdf" onChange={onFileChange} />
           </label>
         )}
@@ -2536,8 +2536,8 @@ function RawWorkspace(props: {
       <button
         className="splitter"
         type="button"
-        title="Resize panes"
-        aria-label="Resize panes"
+        title="영역 너비 조절"
+        aria-label="영역 너비 조절"
         onPointerDown={props.onResize}
       >
         <GripVertical size={18} />
@@ -2548,17 +2548,17 @@ function RawWorkspace(props: {
           <div className="history-header">
             <div className="preview-title inline-title">
               <FileJson size={16} />
-              HTML Preview
+              HTML 미리보기
             </div>
             {props.htmlUrl && (
               <a className="secondary compact link-button" href={props.htmlUrl} target="_blank">
-                Open HTML
+                HTML 열기
               </a>
             )}
           </div>
           <label className="batch-upload">
             <UploadCloud size={16} />
-            <span>Upload Raw Data Extractor file</span>
+            <span>원문 추출 파일 업로드</span>
             <input type="file" accept=".docx,.xlsx,.pptx,.pdf" onChange={onFileChange} />
           </label>
           <div className="option-list">
@@ -2581,14 +2581,14 @@ function RawWorkspace(props: {
           </div>
           {props.rawExtraction && (
             <div className={`raw-status ${props.rawExtraction.status}`}>
-              <strong>{props.rawExtraction.status}</strong>
+              <strong>{statusLabel(props.rawExtraction.status)}</strong>
               <span>{props.rawExtraction.source_format.toUpperCase()} · {formatDate(props.rawExtraction.created_at)}</span>
               {props.rawExtraction.error_message && <span>{props.rawExtraction.error_message}</span>}
               {props.rawExtraction.warnings.length > 0 && <span>{props.rawExtraction.warnings.join(", ")}</span>}
             </div>
           )}
           {props.htmlUrl ? (
-            <iframe className="raw-frame html-frame" src={props.htmlUrl} title="HTML extraction preview" />
+            <iframe className="raw-frame html-frame" src={props.htmlUrl} title="HTML 추출 미리보기" />
           ) : (
             <div className="empty-state">업로드 후 추출 HTML이 여기에 표시됩니다.</div>
           )}
@@ -2598,11 +2598,11 @@ function RawWorkspace(props: {
           <div className="history-header">
             <div className="preview-title inline-title">
               <History size={16} />
-              Raw History
+              원문 추출 기록
             </div>
             <button type="button" className="secondary compact" onClick={props.onToggleHistory}>
               {props.historyCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
-              {props.historyCollapsed ? "Open" : "Close"}
+              {props.historyCollapsed ? "열기" : "닫기"}
             </button>
           </div>
           {!props.historyCollapsed && (
@@ -2612,12 +2612,12 @@ function RawWorkspace(props: {
                   <button key={item.id} onClick={() => props.onLoad(item.id)}>
                     <strong>{item.filename}</strong>
                     <span>
-                      {item.status} · {item.source_format.toUpperCase()} · {formatDate(item.created_at)}
+                      {statusLabel(item.status)} · {item.source_format.toUpperCase()} · {formatDate(item.created_at)}
                     </span>
                   </button>
                 ))
               ) : (
-                <span className="muted">No raw extractions yet.</span>
+                <span className="muted">아직 원문 추출 기록이 없습니다.</span>
               )}
             </div>
           )}
@@ -2664,11 +2664,11 @@ function KieUploadPanel(props: {
       <>
         <div className={props.activeSchemaReady ? "active-schema-card ready" : "active-schema-card warning"}>
           <div>
-            <span>Active schema</span>
+            <span>활성 schema</span>
             <strong>{props.activeSchemaName}</strong>
           </div>
           <p>
-            {props.activeSchemaFieldCount} fields · {props.activeSchemaRegionCount} regions · {props.activeSchemaStatus}
+            {props.activeSchemaFieldCount}개 필드 · {props.activeSchemaRegionCount}개 영역 · {props.activeSchemaStatus}
           </p>
           {props.activeSchemaMessage && <small>{props.activeSchemaMessage}</small>}
         </div>
@@ -2676,12 +2676,12 @@ function KieUploadPanel(props: {
         <div className="file-picker-grid">
           <label className="batch-upload">
             <FileUp size={16} />
-            <span>Select files</span>
+            <span>파일 선택</span>
             <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
           </label>
           <label className="batch-upload">
             <UploadCloud size={16} />
-            <span>Select folder</span>
+            <span>폴더 선택</span>
             <input
               type="file"
               accept={KIE_FILE_ACCEPT}
@@ -2696,7 +2696,7 @@ function KieUploadPanel(props: {
 
         <button className="primary run-batch-button" disabled={!props.activeSchemaReady || !props.selectedFiles.length} onClick={props.onRunBatch}>
           <Play size={16} />
-          Run batch
+          배치 실행
         </button>
       </>
     );
@@ -2707,18 +2707,18 @@ function KieUploadPanel(props: {
       <div className="kie-upload-panel" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
         <div className="pane-header">
           <div>
-            <p className="eyebrow">Batch draft</p>
+            <p className="eyebrow">배치 초안</p>
             <h2>{props.selectedFiles.length}개 파일 선택됨</h2>
           </div>
           <button type="button" className="secondary compact" onClick={props.onClearFiles}>
             <X size={16} />
-            Clear
+            비우기
           </button>
         </div>
 
         <section className="batch-main-upload draft-controls draft-controls-horizontal">
           <div className="batch-intro">
-            <strong>Batch upload</strong>
+            <strong>배치 업로드</strong>
             <p>우측에서 활성화된 schema를 기준으로 선택한 파일을 한 번에 추출합니다.</p>
           </div>
           <div className="draft-region-actions">
@@ -2727,20 +2727,20 @@ function KieUploadPanel(props: {
               className={props.showRegions ? "secondary compact active-tool" : "secondary compact"}
               disabled={!props.regions.length}
               onClick={() => props.onShowRegions(!props.showRegions)}
-              title={props.regions.length ? "선택한 이미지 위에 schema region을 표시합니다." : "저장된 region이 없습니다."}
+              title={props.regions.length ? "선택한 이미지 위에 schema 영역을 표시합니다." : "저장된 영역이 없습니다."}
             >
               <PanelLeft size={14} />
-              {props.showRegions ? "Hide regions" : "Show regions"}
+              {props.showRegions ? "영역 숨기기" : "영역 보기"}
             </button>
           </div>
           {renderBatchControls()}
         </section>
 
         <div className="draft-batch-workbench">
-          <aside className="draft-file-rail" aria-label="Selected batch files">
+          <aside className="draft-file-rail" aria-label="선택한 배치 파일">
             <div className="batch-rail-header">
               <div>
-                <p className="eyebrow">Selected</p>
+                <p className="eyebrow">선택됨</p>
                 <strong>{props.selectedFileIndex + 1} / {props.selectedFiles.length}</strong>
               </div>
             </div>
@@ -2776,7 +2776,7 @@ function KieUploadPanel(props: {
     <div className="kie-upload-panel">
       <div className="pane-header">
         <div>
-          <p className="eyebrow">KIE Upload</p>
+          <p className="eyebrow">핵심 정보 업로드</p>
           <h2>파일 또는 폴더 업로드</h2>
         </div>
       </div>
@@ -2785,7 +2785,7 @@ function KieUploadPanel(props: {
         <section className="unified-upload-actions">
           <label className="batch-upload folder-upload-action">
             <UploadCloud size={18} />
-            <span>Select folder</span>
+            <span>폴더 선택</span>
             <input
               type="file"
               accept={KIE_FILE_ACCEPT}
@@ -2796,7 +2796,7 @@ function KieUploadPanel(props: {
           </label>
           <label className="batch-upload file-upload-action">
             <FileUp size={18} />
-            <span>Select file(s)</span>
+            <span>파일 선택</span>
             <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
           </label>
           {props.message && <div className="success-card">{props.message}</div>}
@@ -2804,8 +2804,8 @@ function KieUploadPanel(props: {
 
         <label className="upload-zone unified-upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
           <UploadCloud size={32} />
-          <strong>Drop file(s) or folder</strong>
-          <span>1 supported file opens single mode. 2+ supported files open batch mode.</span>
+          <strong>파일 또는 폴더를 끌어오세요</strong>
+          <span>지원 파일 1개는 단일 실행, 2개 이상은 배치 실행으로 처리합니다.</span>
           <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
         </label>
       </div>
@@ -2821,13 +2821,13 @@ function BatchFileRail(props: {
   onRefresh: () => void;
 }) {
   return (
-    <aside className="batch-file-rail" aria-label="Batch files">
+    <aside className="batch-file-rail" aria-label="배치 파일">
       <div className="batch-rail-header">
         <div>
-          <p className="eyebrow">Batch</p>
+          <p className="eyebrow">배치</p>
           <strong>{props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count} / {props.batch.total_count}</strong>
         </div>
-        <button type="button" className="icon-only secondary compact" title="Refresh batch" onClick={props.onRefresh}>
+        <button type="button" className="icon-only secondary compact" title="배치 새로고침" onClick={props.onRefresh}>
           <RefreshCw size={14} />
         </button>
       </div>
@@ -2841,7 +2841,7 @@ function BatchFileRail(props: {
         </a>
         {batchCanCancel(props.batch) && (
           <button type="button" className="secondary compact danger-outline" onClick={() => props.onCancelBatch(props.batch.id)}>
-            Stop
+            중단
           </button>
         )}
       </div>
@@ -2966,7 +2966,7 @@ const BatchFileButton = memo(
         </span>
         <span className="batch-file-main">
           <strong>{props.item.filename}</strong>
-          <em>{props.item.status}</em>
+          <em>{statusLabel(props.item.status)}</em>
         </span>
       </button>
     );
@@ -2991,40 +2991,40 @@ function BatchItemStatusPanel(props: {
     <div className="review-panel batch-wait-panel">
       <div className="pane-header">
         <div>
-          <p className="eyebrow">Batch Review</p>
+          <p className="eyebrow">배치 검수</p>
           <h2>{props.item.filename}</h2>
         </div>
-        <span className={`status-badge ${props.item.status}`}>{props.item.status}</span>
+        <span className={`status-badge ${props.item.status}`}>{statusLabel(props.item.status)}</span>
       </div>
 
       <div className="progress-card">
-        <strong>{finishedCount} / {props.batch.total_count} files processed</strong>
+        <strong>{finishedCount} / {props.batch.total_count}개 파일 처리됨</strong>
         <progress max={1} value={props.batch.progress} />
       </div>
 
       <div className={`raw-status ${props.item.status === "failed" ? "failed" : "completed"}`}>
-        <strong>{props.item.status}</strong>
-        <span>Batch status: {props.batch.status}</span>
+        <strong>{statusLabel(props.item.status)}</strong>
+        <span>배치 상태: {statusLabel(props.batch.status)}</span>
         {props.item.error_message && <span>{props.item.error_message}</span>}
       </div>
 
       <div className="action-row">
         <button type="button" className="secondary" onClick={props.onRefresh}>
           <RefreshCw size={16} />
-          Refresh
+          새로고침
         </button>
         <a className="secondary link-button" href={batchExportHref(props.batch.id, "csv")} target="_blank">
           <FileSpreadsheet size={16} />
-          Batch CSV
+          배치 CSV
         </a>
         <a className="secondary link-button" href={batchExportHref(props.batch.id, "json")} target="_blank">
           <FileJson size={16} />
-          Batch JSON
+          배치 JSON
         </a>
         {batchCanCancel(props.batch) && (
           <button type="button" className="secondary danger-outline" onClick={() => props.onCancelBatch(props.batch.id)}>
             <X size={16} />
-            Stop batch
+            배치 중단
           </button>
         )}
       </div>
@@ -3036,7 +3036,7 @@ function RegionOverlay({ regions, page }: { regions: SchemaRegion[]; page: numbe
   const visibleRegions = regions.filter((region) => region.page === page);
   if (!visibleRegions.length) return null;
   return (
-    <div className="document-region-layer" aria-label="Schema regions">
+    <div className="document-region-layer" aria-label="Schema 영역">
       {visibleRegions.map((region) => (
         <div
           className="document-region-box"
@@ -3086,10 +3086,10 @@ function SettingsDialog(props: {
       <section className="settings-panel modal-panel" role="dialog" aria-modal="true" aria-labelledby="vlm-settings-title">
         <div className="modal-header">
           <div>
-            <p className="eyebrow">Setting</p>
-            <h2 id="vlm-settings-title">API, model, LibreOffice</h2>
+            <p className="eyebrow">설정</p>
+            <h2 id="vlm-settings-title">API, 모델, LibreOffice</h2>
           </div>
-          <button type="button" className="icon-only secondary" aria-label="Close settings" onClick={props.onClose}>
+          <button type="button" className="icon-only secondary" aria-label="설정 닫기" onClick={props.onClose}>
             <X size={16} />
           </button>
         </div>
@@ -3122,7 +3122,7 @@ function SettingsDialog(props: {
           <label>
             <span>Reasoning effort</span>
             <select value={props.reasoningEffort} onChange={(event) => props.onReasoningEffort(event.target.value)}>
-              <option value="">default</option>
+              <option value="">기본값</option>
               <option value="minimal">minimal</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
@@ -3132,7 +3132,7 @@ function SettingsDialog(props: {
           <label>
             <span>Verbosity</span>
             <select value={props.verbosity} onChange={(event) => props.onVerbosity(event.target.value)}>
-              <option value="">default</option>
+              <option value="">기본값</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
@@ -3143,20 +3143,20 @@ function SettingsDialog(props: {
             <input
               inputMode="numeric"
               value={props.maxCompletionTokens}
-              placeholder="blank"
+              placeholder="비워두기"
               onChange={(event) => props.onMaxCompletionTokens(event.target.value)}
             />
           </label>
           <label>
             <span>Top P</span>
-            <input value={props.topP} placeholder="blank" onChange={(event) => props.onTopP(event.target.value)} />
+            <input value={props.topP} placeholder="비워두기" onChange={(event) => props.onTopP(event.target.value)} />
           </label>
           <label>
             <span>Service tier</span>
-            <input value={props.serviceTier} placeholder="blank" onChange={(event) => props.onServiceTier(event.target.value)} />
+            <input value={props.serviceTier} placeholder="비워두기" onChange={(event) => props.onServiceTier(event.target.value)} />
           </label>
           <label>
-            <span>Batch workers</span>
+            <span>배치 worker 수</span>
             <input
               inputMode="numeric"
               value={props.batchMaxWorkers}
@@ -3166,10 +3166,10 @@ function SettingsDialog(props: {
           </label>
           <button type="button" className="primary compact" disabled={Boolean(props.busy)} onClick={props.onSave}>
             <Save size={16} />
-            Save
+            저장
           </button>
           <button type="button" className="secondary compact" disabled={Boolean(props.busy)} onClick={props.onClose}>
-            Close
+            닫기
           </button>
         </div>
         <div className="danger-zone">
@@ -3222,38 +3222,38 @@ function DocumentViewer(props: {
     <>
       <div className="pane-header">
         <div>
-          <p className="eyebrow">Document</p>
+          <p className="eyebrow">문서</p>
           <h2>{props.document.filename}</h2>
         </div>
         <div className="toolbar">
-          <button title="Previous page" onClick={() => props.onPage(Math.max(0, props.activePage - 1))}>
+          <button title="이전 페이지" onClick={() => props.onPage(Math.max(0, props.activePage - 1))}>
             <ChevronLeft size={18} />
           </button>
           <span className="page-count">
             {props.activePage + 1} / {props.document.page_count}
           </span>
           <button
-            title="Next page"
+            title="다음 페이지"
             onClick={() => props.onPage(Math.min(props.document.page_count - 1, props.activePage + 1))}
           >
             <ChevronRight size={18} />
           </button>
           <button
-            title="Fit width"
+            title="폭 맞춤"
             className={props.zoomMode === "fitWidth" ? "active-tool" : ""}
             onClick={() => props.onZoomMode("fitWidth")}
           >
             <PanelLeft size={18} />
           </button>
           <button
-            title="Fit page"
+            title="페이지 맞춤"
             className={props.zoomMode === "fitPage" ? "active-tool" : ""}
             onClick={() => props.onZoomMode("fitPage")}
           >
             <Maximize2 size={18} />
           </button>
           <button
-            title="Zoom out"
+            title="축소"
             onClick={() => {
               props.onZoomMode("manual");
               props.onZoom(Math.max(0.5, props.zoom - 0.1));
@@ -3262,7 +3262,7 @@ function DocumentViewer(props: {
             <ZoomOut size={18} />
           </button>
           <button
-            title="Zoom in"
+            title="확대"
             onClick={() => {
               props.onZoomMode("manual");
               props.onZoom(Math.min(2, props.zoom + 0.1));
@@ -3270,21 +3270,21 @@ function DocumentViewer(props: {
           >
             <ZoomIn size={18} />
           </button>
-          <button title="Rotate" onClick={() => props.onRotation((props.rotation + 90) % 360)}>
+          <button title="회전" onClick={() => props.onRotation((props.rotation + 90) % 360)}>
             <RotateCw size={18} />
           </button>
           <button
-            title={props.regions.length ? "Show schema regions on the document" : "No schema regions saved"}
+            title={props.regions.length ? "문서 위에 schema 영역을 표시합니다." : "저장된 schema 영역이 없습니다."}
             className={props.showRegions ? "active-tool" : ""}
             disabled={!props.regions.length}
             onClick={() => props.onShowRegions(!props.showRegions)}
           >
             <PanelLeft size={18} />
-            Regions
+            영역
           </button>
-          <label className="toolbar-upload" title="Replace document">
+          <label className="toolbar-upload" title="문서 교체">
             <FileUp size={18} />
-            <span>Replace</span>
+            <span>교체</span>
             <input
               type="file"
               accept={KIE_FILE_ACCEPT}
@@ -3295,24 +3295,24 @@ function DocumentViewer(props: {
               }}
             />
           </label>
-          <button title="Clear document" onClick={props.onClear}>
+          <button title="문서 비우기" onClick={props.onClear}>
             <X size={18} />
-            Clear
+            비우기
           </button>
         </div>
       </div>
       <div className="viewer-body">
-        <div className="thumbnail-rail" aria-label="Page thumbnails">
+        <div className="thumbnail-rail" aria-label="페이지 썸네일">
           {props.document.pages.map((page, index) => (
             <button
               key={page.id}
               className={index === props.activePage ? "active-thumb" : ""}
-              title={`Page ${page.page}`}
+              title={`${page.page}페이지`}
               onClick={() => props.onPage(index)}
             >
               <img
                 src={documentPageThumbnailSrc(props.document.document_id, page.page, 96)}
-                alt={`Page ${page.page}`}
+                alt={`${page.page}페이지`}
                 loading="lazy"
                 decoding="async"
               />
@@ -3323,9 +3323,9 @@ function DocumentViewer(props: {
         <div className="image-stage">
           {props.activeImageUrl && (
             <div className={`document-image-wrap ${props.zoomMode}`} style={imageStyle}>
-              <img className={imageClass} src={props.activeImageUrl} alt={`Page ${props.activePage + 1}`} />
+              <img className={imageClass} src={props.activeImageUrl} alt={`${props.activePage + 1}페이지`} />
               {props.showRegions && visibleRegions.length > 0 && (
-                <div className="document-region-layer" aria-label="Schema regions">
+                <div className="document-region-layer" aria-label="Schema 영역">
                   {visibleRegions.map((region) => (
                     <div
                       className="document-region-box"
@@ -3367,25 +3367,25 @@ function HistoryPanel(props: {
       <div className="history-header">
         <div className="preview-title inline-title">
           <History size={16} />
-          Recent
+          최근 항목
         </div>
         <div className="history-controls">
           {!props.collapsed && (
             <div className="segmented">
               <button className={props.activeTab === "documents" ? "active" : ""} onClick={() => props.onTab("documents")}>
-                Docs
+                문서
               </button>
               <button className={props.activeTab === "schemas" ? "active" : ""} onClick={() => props.onTab("schemas")}>
-                Schemas
+                Schema
               </button>
               <button className={props.activeTab === "jobs" ? "active" : ""} onClick={() => props.onTab("jobs")}>
-                Jobs
+                작업
               </button>
             </div>
           )}
           <button type="button" className="secondary compact" onClick={props.onToggle}>
             {props.collapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
-            {props.collapsed ? "Open" : "Close"}
+            {props.collapsed ? "열기" : "닫기"}
           </button>
         </div>
       </div>
@@ -3396,33 +3396,33 @@ function HistoryPanel(props: {
               props.documents.map((item) => (
                 <button key={item.document_id} onClick={() => props.onLoadDocument(item.document_id)}>
                   <strong>{item.filename}</strong>
-                  <span>{item.page_count} page(s) · {formatDate(item.created_at)}</span>
+                  <span>{item.page_count}페이지 · {formatDate(item.created_at)}</span>
                 </button>
               ))
             ) : (
-              <span className="muted">No documents yet.</span>
+              <span className="muted">아직 문서가 없습니다.</span>
             ))}
           {props.activeTab === "schemas" &&
             (props.schemas.length ? (
               props.schemas.map((item) => (
                 <button key={item.id} onClick={() => props.onLoadSchema(item.id)}>
                   <strong>{item.display_name || item.name}</strong>
-                  <span>{item.fields.length} field(s)</span>
+                  <span>{item.fields.length}개 필드</span>
                 </button>
               ))
             ) : (
-              <span className="muted">No schemas yet.</span>
+              <span className="muted">아직 schema가 없습니다.</span>
             ))}
           {props.activeTab === "jobs" &&
             (props.jobs.length ? (
               props.jobs.map((item) => (
                 <button key={item.job_id} onClick={() => props.onLoadJob(item.job_id)}>
-                  <strong>{item.status}</strong>
-                  <span>{item.result_id || "no result"} · {formatDate(item.created_at)}</span>
+                  <strong>{statusLabel(item.status)}</strong>
+                  <span>{item.result_id || "결과 없음"} · {formatDate(item.created_at)}</span>
                 </button>
               ))
             ) : (
-              <span className="muted">No jobs yet.</span>
+              <span className="muted">아직 작업이 없습니다.</span>
             ))}
         </div>
       )}
@@ -3443,19 +3443,19 @@ function ArchivePanel(props: {
       <div className="history-header">
         <div className="preview-title inline-title">
           <FileJson size={16} />
-          Archive
+          아카이브
         </div>
         <select value={props.status} onChange={(event) => props.onStatus(event.target.value)}>
-          <option value="">All</option>
-          <option value="completed">Completed</option>
-          <option value="needs_review">Needs review</option>
-          <option value="failed">Failed</option>
+          <option value="">전체</option>
+          <option value="completed">완료</option>
+          <option value="needs_review">검토 필요</option>
+          <option value="failed">실패</option>
         </select>
       </div>
       <input
         className="search-input"
         value={props.query}
-        placeholder="Search documents, schemas, extracted values"
+        placeholder="문서, schema, 추출값 검색"
         onChange={(event) => props.onQuery(event.target.value)}
       />
       <div className="mini-list">
@@ -3463,11 +3463,11 @@ function ArchivePanel(props: {
           props.results.slice(0, 4).map((item) => (
             <button key={`${item.document_id}_${item.job_id ?? "doc"}`} onClick={() => props.onOpen(item)}>
               <strong>{item.filename}</strong>
-              <span>{item.document_type || item.schema_name || item.status || "document"} · {formatDate(item.created_at)}</span>
+              <span>{item.document_type || item.schema_name || statusLabel(item.status) || "문서"} · {formatDate(item.created_at)}</span>
             </button>
           ))
         ) : (
-          <span className="muted">No archive matches.</span>
+          <span className="muted">일치하는 아카이브가 없습니다.</span>
         )}
       </div>
     </section>
@@ -3495,17 +3495,17 @@ function BatchPanel(props: {
     <section className="service-panel batch-panel">
       <div className="batch-create-panel">
         <div className="batch-intro">
-          <strong>Batch upload</strong>
+          <strong>배치 업로드</strong>
           <p>현재 workspace에서 활성화된 schema를 그대로 사용해 여러 문서나 폴더를 같은 기준으로 추출합니다.</p>
         </div>
 
         <div className={props.activeSchemaReady ? "active-schema-card ready" : "active-schema-card warning"}>
           <div>
-            <span>Active schema</span>
+            <span>활성 schema</span>
             <strong>{props.activeSchemaName}</strong>
           </div>
           <p>
-            {props.activeSchemaFieldCount} fields · {props.activeSchemaRegionCount} regions · {props.activeSchemaStatus}
+            {props.activeSchemaFieldCount}개 필드 · {props.activeSchemaRegionCount}개 영역 · {props.activeSchemaStatus}
           </p>
           {props.activeSchemaMessage && <small>{props.activeSchemaMessage}</small>}
         </div>
@@ -3513,7 +3513,7 @@ function BatchPanel(props: {
         <div className="file-picker-grid">
           <label className="batch-upload">
             <FileUp size={16} />
-            <span>Select files</span>
+            <span>파일 선택</span>
             <input
               type="file"
               accept={KIE_FILE_ACCEPT}
@@ -3523,7 +3523,7 @@ function BatchPanel(props: {
           </label>
           <label className="batch-upload">
             <UploadCloud size={16} />
-            <span>Select folder</span>
+            <span>폴더 선택</span>
             <input
               type="file"
               accept={KIE_FILE_ACCEPT}
@@ -3537,16 +3537,16 @@ function BatchPanel(props: {
         {props.selectedFiles.length > 0 && (
           <div className="selected-files">
             <div className="batch-top">
-              <strong>{props.selectedFiles.length} selected</strong>
+              <strong>{props.selectedFiles.length}개 선택됨</strong>
               <button type="button" className="ghost compact" onClick={props.onClearFiles}>
-                Clear
+                비우기
               </button>
             </div>
             <div className="mini-list">
               {props.selectedFiles.slice(0, 8).map((file, index) => (
                 <span key={`${fileDisplayName(file)}_${file.size}_${index}`}>{fileDisplayName(file)}</span>
               ))}
-              {props.selectedFiles.length > 8 && <span className="muted">+ {props.selectedFiles.length - 8} more</span>}
+              {props.selectedFiles.length > 8 && <span className="muted">+ {props.selectedFiles.length - 8}개 더 있음</span>}
             </div>
           </div>
         )}
@@ -3555,7 +3555,7 @@ function BatchPanel(props: {
 
         <button className="primary run-batch-button" disabled={!props.activeSchemaReady || !props.selectedFiles.length} onClick={props.onRunBatch}>
           <Play size={16} />
-          Run batch
+          배치 실행
         </button>
       </div>
 
@@ -3563,11 +3563,11 @@ function BatchPanel(props: {
         <div className="history-header">
           <div className="preview-title inline-title">
             <FileSpreadsheet size={16} />
-            Recent batch results
+            최근 배치 결과
           </div>
           <button className="secondary compact" onClick={props.onRefresh}>
             <RefreshCw size={14} />
-            Refresh
+            새로고침
           </button>
         </div>
         <div className="mini-list">
@@ -3575,7 +3575,7 @@ function BatchPanel(props: {
             props.batches.map((batch) => (
               <div className="batch-card" key={batch.id}>
                 <div className="batch-top">
-                  <strong>{batch.status}</strong>
+                  <strong>{statusLabel(batch.status)}</strong>
                   <div className="batch-actions">
                     <span>{Math.round(batch.progress * 100)}%</span>
                     <a className="secondary compact link-button" href={batchExportHref(batch.id, "csv")} target="_blank">
@@ -3589,25 +3589,25 @@ function BatchPanel(props: {
                 <progress max={1} value={batch.progress} />
                 <div className="batch-meta-row">
                   <span className="muted">
-                    {batch.completed_count} done · {batch.failed_count} failed · {batch.canceled_count} canceled · {batch.total_count} total
+                    완료 {batch.completed_count} · 실패 {batch.failed_count} · 취소 {batch.canceled_count} · 전체 {batch.total_count}
                   </span>
                   {batchCanCancel(batch) && (
                     <button type="button" className="secondary compact danger-outline" onClick={() => props.onCancelBatch(batch.id)}>
                       <X size={14} />
-                      Stop
+                      중단
                     </button>
                   )}
                 </div>
                 {batch.items.map((item) => (
                   <button key={item.id} onClick={() => props.onOpenItem(batch.id, item.id)}>
                     <strong>{item.filename}</strong>
-                    <span>{item.status} · Open review</span>
+                    <span>{statusLabel(item.status)} · 검수 열기</span>
                   </button>
                 ))}
               </div>
             ))
           ) : (
-            <span className="muted">No batch results yet.</span>
+            <span className="muted">아직 배치 결과가 없습니다.</span>
           )}
         </div>
       </div>
@@ -3620,19 +3620,19 @@ function UploadNotes({ onSampleSchema }: { onSampleSchema: () => void }) {
     <div className="upload-notes">
       <div className="pane-header">
         <div>
-          <p className="eyebrow">Start</p>
-          <h2>Upload first</h2>
+          <p className="eyebrow">시작</p>
+          <h2>먼저 업로드하세요</h2>
         </div>
       </div>
-      <p>Schema builder opens after upload. You can also prepare a sample schema now.</p>
+      <p>업로드 후 schema builder가 열립니다. 지금 샘플 schema를 먼저 준비할 수도 있습니다.</p>
       <button className="secondary" onClick={onSampleSchema}>
         <ClipboardList size={16} />
-        Use sample schema
+        샘플 schema 사용
       </button>
       <div className="note-list">
-        <span>Supported: PDF, PNG, JPG, JPEG, DOCX, PPTX</span>
-        <span>Schema fields: key name, description, output format</span>
-        <span>Use the Setting button to save API key and model name.</span>
+        <span>지원 형식: PDF, PNG, JPG, JPEG, DOCX, PPTX</span>
+        <span>Schema 필드: 필드명, 설명, 출력 형식</span>
+        <span>설정 버튼에서 API key와 model name을 저장하세요.</span>
       </div>
     </div>
   );
@@ -3685,9 +3685,9 @@ function SchemaBuilder(props: {
       <div className="pane-header schema-main-header">
         <div>
           <p className="eyebrow">Schema</p>
-          <h2>Fields</h2>
+          <h2>필드</h2>
           <p className="schema-current-line">
-            {props.savedSchema ? props.schemaName : "New schema"} · {props.fields.length} fields
+            {props.savedSchema ? props.schemaName : "새 schema"} · {props.fields.length}개 필드
           </p>
         </div>
         <div className="schema-header-actions">
@@ -3696,7 +3696,7 @@ function SchemaBuilder(props: {
           </span>
           <button type="button" className="secondary compact" onClick={props.onOpenLibrary}>
             <ClipboardList size={14} />
-            Schema Library
+            Schema 목록
           </button>
           <button
             type="button"
@@ -3706,7 +3706,7 @@ function SchemaBuilder(props: {
             onClick={() => void props.onRecommendSchema()}
           >
             <Sparkles size={14} />
-            AI recommend schema
+            AI schema 추천
           </button>
         </div>
       </div>
@@ -3714,38 +3714,38 @@ function SchemaBuilder(props: {
       <div className="schema-core-panel">
         <div className="schema-name-banner">
           <div>
-            <span>{props.savedSchema ? "Active schema" : "Draft schema"}</span>
-            <strong>{props.schemaName || "Untitled schema"}</strong>
+            <span>{props.savedSchema ? "활성 schema" : "초안 schema"}</span>
+            <strong>{props.schemaName || "이름 없는 schema"}</strong>
           </div>
           <p>
-            {props.fields.length} fields · {props.regions.length} regions · {schemaSaveStatusLabel(props.schemaSaveStatus, props.savedSchema)}
+            {props.fields.length}개 필드 · {props.regions.length}개 영역 · {schemaSaveStatusLabel(props.schemaSaveStatus, props.savedSchema)}
           </p>
         </div>
         <div className="schema-table-wrap">
-          <div className="schema-field-table" role="table" aria-label="Schema fields">
+          <div className="schema-field-table" role="table" aria-label="Schema 필드">
             <div className="schema-field-head" role="row">
-              <span>Key name</span>
-              <span>Description</span>
-              <span>Type</span>
-              <span>Region</span>
+              <span>필드명</span>
+              <span>설명</span>
+              <span>타입</span>
+              <span>영역</span>
               <span />
             </div>
           {props.fields.map((field, index) => (
             <div className="schema-field-row" role="row" key={field.local_id}>
               <input
-                aria-label="Key name"
+                aria-label="필드명"
                 value={field.key_name}
                 onChange={(event) => props.onUpdateField(index, { key_name: event.target.value })}
               />
               <textarea
-                aria-label="Description"
+                aria-label="설명"
                 className="schema-description-input"
                 value={field.description}
-                placeholder="Where and how the value should be found"
+                placeholder="값을 어디서 어떻게 찾을지 입력하세요"
                 onChange={(event) => props.onUpdateField(index, { description: event.target.value })}
               />
               <select
-                aria-label="Output format"
+                aria-label="출력 형식"
                 value={field.output_format}
                 onChange={(event) => props.onUpdateField(index, { output_format: event.target.value as OutputFormat })}
               >
@@ -3756,7 +3756,7 @@ function SchemaBuilder(props: {
                 ))}
               </select>
               <select
-                aria-label="Region"
+                aria-label="영역"
                 value={field.region_id ?? ""}
                 onChange={(event) => props.onUpdateField(index, { region_id: event.target.value || null, region: null })}
               >
@@ -3767,7 +3767,7 @@ function SchemaBuilder(props: {
                   </option>
                 ))}
               </select>
-              <button className="ghost danger icon-only" title="Remove field" onClick={() => props.onRemoveField(index)}>
+              <button className="ghost danger icon-only" title="필드 삭제" onClick={() => props.onRemoveField(index)}>
                 <Trash2 size={16} />
               </button>
             </div>
@@ -3778,7 +3778,7 @@ function SchemaBuilder(props: {
         <div className="action-row">
           <button className="secondary" onClick={props.onAddField}>
             <Plus size={16} />
-            Add field
+            필드 추가
           </button>
           <button
             type="button"
@@ -3788,11 +3788,11 @@ function SchemaBuilder(props: {
             onClick={() => setRegionsOpen(true)}
           >
             <PanelLeft size={16} />
-            Regions
+            영역
           </button>
           <button className="primary" disabled={!props.canExtract} onClick={() => void props.onRunExtraction()}>
             <Play size={16} />
-            Extract
+            추출
           </button>
         </div>
       </div>
@@ -3859,13 +3859,13 @@ function SchemaLibraryPanel(props: {
   }
 
   return (
-    <aside className="schema-library-sidebar" aria-label="Schema library">
+    <aside className="schema-library-sidebar" aria-label="Schema 목록">
       <div className="modal-header schema-library-header">
         <div>
-          <p className="eyebrow">Schema Library</p>
-          <h2>Manage schema</h2>
+          <p className="eyebrow">Schema 목록</p>
+          <h2>Schema 관리</h2>
         </div>
-        <button type="button" className="icon-only secondary" aria-label="Close schema library" onClick={props.onClose}>
+        <button type="button" className="icon-only secondary" aria-label="Schema 목록 닫기" onClick={props.onClose}>
           <X size={16} />
         </button>
       </div>
@@ -3873,19 +3873,19 @@ function SchemaLibraryPanel(props: {
       <section className="schema-library-section">
         <div className="schema-library-top">
           <div>
-            <strong>Saved schemas</strong>
-            <span>{selectedSchemaIds.length ? `${selectedSchemaIds.length} selected` : `${props.savedSchemas.length} saved`}</span>
+            <strong>저장된 schema</strong>
+            <span>{selectedSchemaIds.length ? `${selectedSchemaIds.length}개 선택됨` : `${props.savedSchemas.length}개 저장됨`}</span>
           </div>
           <div className="schema-library-actions">
             {selectedSchemaIds.length > 0 && (
               <button type="button" className="secondary compact danger-outline" onClick={deleteSelectedSchemas}>
                 <Trash2 size={14} />
-                Delete selected
+                선택 삭제
               </button>
             )}
             <button type="button" className="primary compact" onClick={props.onNewSchema}>
               <Plus size={14} />
-              New schema
+              새 schema
             </button>
           </div>
         </div>
@@ -3898,7 +3898,7 @@ function SchemaLibraryPanel(props: {
                 onClick={() => props.onLoadSavedSchema(savedSchema.id)}
               >
                 <input
-                  aria-label={`Select ${savedSchema.display_name || savedSchema.name}`}
+                  aria-label={`${savedSchema.display_name || savedSchema.name} 선택`}
                   checked={selectedSchemaIdSet.has(savedSchema.id)}
                   onChange={() => toggleSchemaSelection(savedSchema.id)}
                   onClick={(event) => event.stopPropagation()}
@@ -3913,17 +3913,17 @@ function SchemaLibraryPanel(props: {
                     {savedSchema.display_name || savedSchema.name}
                   </span>
                   <span className="schema-card-meta">
-                    {savedSchema.fields.length} fields · {savedSchema.regions.length} regions · {formatDate(savedSchema.updated_at)}
+                    {savedSchema.fields.length}개 필드 · {savedSchema.regions.length}개 영역 · {formatDate(savedSchema.updated_at)}
                   </span>
                 </button>
               </div>
             ))
           ) : (
             <div className="empty-schema-library">
-              <span>No saved schemas.</span>
+              <span>저장된 schema가 없습니다.</span>
               <button type="button" className="secondary compact" onClick={props.onNewSchema}>
                 <Plus size={14} />
-                Create first schema
+                첫 schema 만들기
               </button>
             </div>
           )}
@@ -3932,11 +3932,11 @@ function SchemaLibraryPanel(props: {
 
       <div className="schema-identity-panel">
         <label className="field-stack schema-name-inline">
-          <span>Selected schema name</span>
+          <span>선택한 schema 이름</span>
           <input value={props.schemaName} onChange={(event) => props.onSchemaName(event.target.value)} />
         </label>
         <div className="schema-detail-actions">
-          <span>{props.savedSchema ? `${props.fields.length} fields` : "Unsaved draft"}</span>
+          <span>{props.savedSchema ? `${props.fields.length}개 필드` : "저장 전 초안"}</span>
           <button
             type="button"
             className="secondary compact danger-outline"
@@ -3944,7 +3944,7 @@ function SchemaLibraryPanel(props: {
             onClick={() => props.savedSchema && props.onDeleteSchema(props.savedSchema.id)}
           >
             <Trash2 size={14} />
-            Delete
+            삭제
           </button>
         </div>
         {props.schemaSaveMessage && (
@@ -3956,7 +3956,7 @@ function SchemaLibraryPanel(props: {
 
       <div className="field-stack drawer-section">
         <div className="field-label-row">
-          <span>Schema description</span>
+          <span>Schema 설명</span>
           <button
             type="button"
             className="secondary compact mini-action"
@@ -3973,8 +3973,8 @@ function SchemaLibraryPanel(props: {
 
       <div className="region-manager-bar">
         <div>
-          <strong>Extraction regions</strong>
-          <span>{props.regions.length ? `${props.regions.length} saved` : "No shared regions"}</span>
+          <strong>추출 영역</strong>
+          <span>{props.regions.length ? `${props.regions.length}개 저장됨` : "공유 영역 없음"}</span>
         </div>
         <button
           type="button"
@@ -3983,44 +3983,44 @@ function SchemaLibraryPanel(props: {
           title={props.regionTarget ? "현재 선택한 이미지 위에 extraction region을 지정합니다." : "문서 이미지가 있어야 region을 지정할 수 있습니다."}
           onClick={() => setRegionsOpen(true)}
         >
-          Manage regions
+          영역 관리
         </button>
       </div>
 
       {props.document && (
         <div className="intel-card">
           <div>
-            <span className="eyebrow">Document intelligence</span>
-            <strong>{props.document.document_type || "Unknown document type"}</strong>
+            <span className="eyebrow">문서 인텔리전스</span>
+            <strong>{props.document.document_type || "문서 유형 미확인"}</strong>
           </div>
-          <span>{props.document.language || "language unknown"} · {props.document.page_count} page(s)</span>
+          <span>{props.document.language || "언어 미확인"} · {props.document.page_count}페이지</span>
           {props.document.recommendation_reasoning && <p>{props.document.recommendation_reasoning}</p>}
         </div>
       )}
 
       {props.systemStatus?.is_mock && (
-        <div className="notice-card">Mock mode is active. AI recommendation and extraction use deterministic demo data.</div>
+        <div className="notice-card">Mock 모드입니다. AI 추천과 추출은 고정된 데모 데이터를 사용합니다.</div>
       )}
 
       <div className="tool-section">
-        <h3>Schema import/export</h3>
+        <h3>Schema 가져오기/내보내기</h3>
         <div className="action-row">
           <button className="secondary" onClick={props.onSampleSchema}>
             <ClipboardList size={16} />
-            Use sample schema
+            샘플 schema 사용
           </button>
           <a className="secondary link-button" href={props.schemaDownloadUrl} download={`${props.schemaName || "schema"}.json`}>
             <FileDown size={16} />
-            Download schema JSON
+            Schema JSON 다운로드
           </a>
         </div>
       </div>
 
       <div className="template-strip">
         <div className="template-header">
-          <strong>Template library</strong>
+          <strong>템플릿 목록</strong>
           <button className="secondary compact" onClick={props.onSaveTemplate}>
-            Save as template
+            템플릿 저장
           </button>
         </div>
         <div className="template-list">
@@ -4028,11 +4028,11 @@ function SchemaLibraryPanel(props: {
             props.templates.slice(0, 4).map((template) => (
               <button key={template.id} onClick={() => props.onLoadTemplate(template)}>
                 <strong>{template.display_name || template.name}</strong>
-                <span>{template.template_category || "General"} · {template.fields.length} fields</span>
+                <span>{template.template_category || "일반"} · {template.fields.length}개 필드</span>
               </button>
             ))
           ) : (
-            <span className="muted">Save a schema as a template to reuse it here.</span>
+            <span className="muted">Schema를 템플릿으로 저장하면 여기에서 재사용할 수 있습니다.</span>
           )}
         </div>
       </div>
@@ -4040,23 +4040,23 @@ function SchemaLibraryPanel(props: {
       <details className="import-box">
         <summary>
           <FileUp size={16} />
-          Import schema JSON
+          Schema JSON 가져오기
         </summary>
         <textarea
           value={props.schemaJsonInput}
           onChange={(event) => props.onSchemaJsonInput(event.target.value)}
-          placeholder="Paste schema JSON here"
+          placeholder="Schema JSON을 붙여넣으세요"
         />
         <button className="secondary" onClick={props.onImportSchemaJson}>
           <FileUp size={16} />
-          Import
+          가져오기
         </button>
       </details>
 
       <div className="preview-block">
         <div className="preview-title">
           <FileJson size={16} />
-          JSON preview
+          JSON 미리보기
         </div>
         <pre>{props.schemaPreview}</pre>
       </div>
@@ -4090,7 +4090,7 @@ function RegionManagerModal(props: {
     const page = props.target.pages[Math.min(props.activePage, props.target.pages.length - 1)]?.page ?? 1;
     setEditingRegion({
       id,
-      name: `Region ${props.regions.length + 1}`,
+      name: `영역 ${props.regions.length + 1}`,
       page,
       x: 0.1,
       y: 0.1,
@@ -4101,13 +4101,13 @@ function RegionManagerModal(props: {
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="modal-panel region-manager-modal" role="dialog" aria-modal="true" aria-label="Extraction regions">
+      <section className="modal-panel region-manager-modal" role="dialog" aria-modal="true" aria-label="추출 영역">
         <div className="modal-header">
           <div>
-            <p className="eyebrow">Extraction regions</p>
-            <h2>Shared region templates</h2>
+            <p className="eyebrow">추출 영역</p>
+            <h2>공유 영역 템플릿</h2>
           </div>
-          <button type="button" className="icon-only secondary" aria-label="Close regions" onClick={props.onClose}>
+          <button type="button" className="icon-only secondary" aria-label="영역 닫기" onClick={props.onClose}>
             <X size={16} />
           </button>
         </div>
@@ -4116,7 +4116,7 @@ function RegionManagerModal(props: {
           <p>하나의 region을 여러 field에 할당할 수 있습니다. field row의 region select에서 원하는 region을 선택하세요.</p>
           <button type="button" className="primary compact" onClick={createRegion}>
             <Plus size={16} />
-            Add region
+            영역 추가
           </button>
         </div>
 
@@ -4133,10 +4133,10 @@ function RegionManagerModal(props: {
                 </div>
                 <div className="region-row-actions">
                   <button type="button" className="secondary compact" onClick={() => setEditingRegion(region)}>
-                    Edit
+                    수정
                   </button>
                   <button type="button" className="ghost compact danger" onClick={() => props.onRemoveRegion(region.id)}>
-                    Delete
+                    삭제
                   </button>
                 </div>
               </div>
@@ -4239,24 +4239,24 @@ function RegionPickerModal(props: {
 
   return (
     <div className="nested-modal-backdrop" role="presentation">
-      <section className="modal-panel region-picker-modal" role="dialog" aria-modal="true" aria-label="Extraction region">
+      <section className="modal-panel region-picker-modal" role="dialog" aria-modal="true" aria-label="추출 영역">
         <div className="modal-header">
           <div>
-            <p className="eyebrow">Extraction region</p>
+            <p className="eyebrow">추출 영역</p>
             <h2>{regionName || props.region.name}</h2>
           </div>
-          <button type="button" className="icon-only secondary" aria-label="Close region picker" onClick={props.onClose}>
+          <button type="button" className="icon-only secondary" aria-label="영역 선택 닫기" onClick={props.onClose}>
             <X size={16} />
           </button>
         </div>
 
         <div className="region-toolbar">
           <label>
-            <span>Name</span>
+            <span>이름</span>
             <input value={regionName} onChange={(event) => setRegionName(event.target.value)} />
           </label>
           <label>
-            <span>Page</span>
+            <span>페이지</span>
             <select
               value={pageIndex}
               onChange={(event) => {
@@ -4267,7 +4267,7 @@ function RegionPickerModal(props: {
             >
               {props.target.pages.map((item, index) => (
                 <option key={item.id} value={index}>
-                  Page {item.page}
+                  {item.page}페이지
                 </option>
               ))}
             </select>
@@ -4282,7 +4282,7 @@ function RegionPickerModal(props: {
 
         <div className="region-image-wrap">
           <div className="region-canvas" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
-            <img ref={imageRef} className="region-target-image" src={imageUrl} alt={`Page ${page.page}`} draggable={false} />
+            <img ref={imageRef} className="region-target-image" src={imageUrl} alt={`${page.page}페이지`} draggable={false} />
             {normalizedRegion && (
               <div
                 className="region-box"
@@ -4299,11 +4299,11 @@ function RegionPickerModal(props: {
 
         <div className="action-row">
           <button className="secondary" onClick={props.onClose}>
-            Cancel
+            취소
           </button>
           <button className="primary" disabled={!normalizedRegion} onClick={saveRegion}>
             <Save size={16} />
-            Save region
+            영역 저장
           </button>
         </div>
       </section>
@@ -4330,7 +4330,7 @@ function ReviewPanel(props: {
   onSavePreset: () => void;
 }) {
   if (!props.result) {
-    return <div className="empty-state">No extraction result yet.</div>;
+    return <div className="empty-state">아직 추출 결과가 없습니다.</div>;
   }
 
   const visibleFields = props.fields.filter((field) => {
@@ -4350,14 +4350,14 @@ function ReviewPanel(props: {
     <div className="review-panel">
       <div className="pane-header">
         <div>
-          <p className="eyebrow">Review</p>
-          <h2>Extraction result</h2>
+          <p className="eyebrow">검수</p>
+          <h2>추출 결과</h2>
         </div>
-        <span className={`status-badge ${props.result.validated_output.status}`}>{props.result.validated_output.status}</span>
+        <span className={`status-badge ${props.result.validated_output.status}`}>{statusLabel(props.result.validated_output.status)}</span>
       </div>
 
       <div className="progress-card">
-        <strong>{reviewedCount} / {props.fields.length} reviewed</strong>
+        <strong>{reviewedCount} / {props.fields.length}개 검수됨</strong>
         <progress max={props.fields.length || 1} value={reviewedCount} />
       </div>
 
@@ -4365,19 +4365,19 @@ function ReviewPanel(props: {
         <Filter size={16} />
         {(["needs_review", "all", "warning", "null", "low_confidence", "unreviewed", "changed"] as ReviewFilter[]).map((filter) => (
           <button key={filter} className={props.filter === filter ? "active" : ""} onClick={() => props.onFilter(filter)}>
-            {filter}
+            {reviewFilterLabel(filter)}
           </button>
         ))}
       </div>
 
       <div className="result-table">
         <div className="result-head">
-          <span>field</span>
-          <span>value</span>
-          <span>page</span>
-          <span>confidence</span>
-          <span>warnings</span>
-          <span>reviewed</span>
+          <span>필드</span>
+          <span>값</span>
+          <span>페이지</span>
+          <span>신뢰도</span>
+          <span>경고</span>
+          <span>검수</span>
         </div>
         {visibleFields.map((field) => {
           const value = props.values[field.key_name];
@@ -4392,14 +4392,14 @@ function ReviewPanel(props: {
               <label>
                 <input value={stringifyValue(value?.value)} onChange={(event) => props.onEdit(field.key_name, event.target.value)} />
                 {value?.evidence && <small>{value.evidence}</small>}
-                {isEdited && <small>Original: {stringifyValue(originalValue?.value)}</small>}
+                {isEdited && <small>원본: {stringifyValue(originalValue?.value)}</small>}
               </label>
               <button className="ghost page-link" onClick={() => props.onGoToPage(value?.page ?? null)}>
                 {value?.page ?? "-"}
               </button>
               <span>{formatConfidence(value?.confidence)}</span>
               <span className={value?.warnings?.length ? "warn-text" : "muted"}>
-                {value?.warnings?.length ? value.warnings.join(", ") : "valid"}
+                {value?.warnings?.length ? value.warnings.join(", ") : "정상"}
               </span>
               <label className="review-check">
                 <input
@@ -4416,10 +4416,10 @@ function ReviewPanel(props: {
       <div className="action-row">
         <button className="secondary" onClick={() => void props.onSaveCorrections()}>
           <Save size={16} />
-          Save corrections
+          수정 저장
         </button>
         <select value={props.selectedPresetId} onChange={(event) => props.onPreset(event.target.value)}>
-          <option value="">Default export</option>
+          <option value="">기본 export</option>
           {props.exportPresets.map((preset) => (
             <option key={preset.id} value={preset.id}>
               {preset.name}
@@ -4428,7 +4428,7 @@ function ReviewPanel(props: {
         </select>
         <button className="secondary" onClick={props.onSavePreset}>
           <Save size={16} />
-          Save preset
+          Preset 저장
         </button>
         <a className="secondary link-button" href={exportHref(props.result.id, "json", props.selectedPresetId)} target="_blank">
           <Download size={16} />
@@ -4443,7 +4443,7 @@ function ReviewPanel(props: {
       <AuditPanel events={props.auditEvents} />
 
       <div className="preview-block">
-        <div className="preview-title">Raw model output</div>
+        <div className="preview-title">원본 모델 출력</div>
         <pre>{JSON.stringify(props.result.raw_model_output, null, 2)}</pre>
       </div>
     </div>
@@ -4453,7 +4453,7 @@ function ReviewPanel(props: {
 function AuditPanel({ events }: { events: AuditEvent[] }) {
   return (
     <div className="audit-panel">
-      <div className="preview-title">Audit log</div>
+      <div className="preview-title">감사 로그</div>
       <div className="mini-list">
         {events.length ? (
           events.map((event) => (
@@ -4463,7 +4463,7 @@ function AuditPanel({ events }: { events: AuditEvent[] }) {
             </div>
           ))
         ) : (
-          <span className="muted">No audit events loaded.</span>
+          <span className="muted">로드된 감사 로그가 없습니다.</span>
         )}
       </div>
     </div>
@@ -4490,19 +4490,19 @@ function RecommendationDiffModal(props: {
       <div className="diff-modal">
         <div className="pane-header">
           <div>
-            <p className="eyebrow">AI recommendation</p>
-            <h2>Apply recommended schema?</h2>
+            <p className="eyebrow">AI 추천</p>
+            <h2>추천 schema를 적용할까요?</h2>
           </div>
         </div>
-        <p>{props.recommendation.reasoning || "AI generated a new schema draft for this document."}</p>
+        <p>{props.recommendation.reasoning || "AI가 현재 문서 기준의 schema 초안을 생성했습니다."}</p>
         <div className="diff-grid">
-          <DiffList title="Added" items={added.map((field) => field.key_name)} />
-          <DiffList title="Changed" items={changed.map((field) => field.key_name)} />
-          <DiffList title="Removed" items={removed.map((field) => field.key_name)} />
+          <DiffList title="추가" items={added.map((field) => field.key_name)} />
+          <DiffList title="변경" items={changed.map((field) => field.key_name)} />
+          <DiffList title="제거" items={removed.map((field) => field.key_name)} />
         </div>
         <div className="action-row">
-          <button className="secondary" onClick={props.onCancel}>Cancel</button>
-          <button className="primary" onClick={props.onApply}>Apply recommendation</button>
+          <button className="secondary" onClick={props.onCancel}>취소</button>
+          <button className="primary" onClick={props.onApply}>추천 적용</button>
         </div>
       </div>
     </div>
@@ -4513,7 +4513,7 @@ function DiffList({ title, items }: { title: string; items: string[] }) {
   return (
     <div className="diff-list">
       <strong>{title}</strong>
-      {items.length ? items.map((item) => <span key={item}>{item}</span>) : <span className="muted">None</span>}
+      {items.length ? items.map((item) => <span key={item}>{item}</span>) : <span className="muted">없음</span>}
     </div>
   );
 }
@@ -4523,9 +4523,9 @@ function StepPill({ label, active, done }: { label: string; active: boolean; don
 }
 
 function ProviderPill({ status }: { status: SystemStatus | null }) {
-  if (!status) return <span className="provider-pill warning">API unknown</span>;
-  const label = status.is_mock ? "Mock mode" : status.vlm_provider === "google_genai" ? "Gemini mode" : "OpenAI-compatible mode";
-  const detail = status.vlm_model_name || (status.has_vlm_credentials ? "model ready" : "missing model");
+  if (!status) return <span className="provider-pill warning">API 상태 알 수 없음</span>;
+  const label = status.is_mock ? "Mock 모드" : status.vlm_provider === "google_genai" ? "Gemini 모드" : "OpenAI 호환 모드";
+  const detail = status.vlm_model_name || (status.has_vlm_credentials ? "모델 준비됨" : "모델 미설정");
   return (
     <span className={`provider-pill ${status.is_mock ? "mock" : status.has_vlm_credentials ? "ready" : "warning"}`}>
       {label} · {detail}
@@ -4557,22 +4557,22 @@ async function pollJob(jobId: string): Promise<ExtractionJob> {
     if (["completed", "failed", "needs_review"].includes(job.status)) return job;
     await new Promise((resolve) => setTimeout(resolve, 800));
   }
-  throw new Error("Extraction did not finish in time.");
+  throw new Error("제한 시간 안에 추출이 끝나지 않았습니다.");
 }
 
 function validateFields(fields: FieldDefinition[], regions: SchemaRegion[] = []) {
-  if (!fields.length) return "Add at least one schema field.";
+  if (!fields.length) return "Schema 필드를 최소 1개 이상 추가하세요.";
   const keys = fields.map((field) => field.key_name.trim());
   const regionIds = new Set(regions.map((region) => region.id));
-  if (keys.some((key) => !key)) return "Every field needs a key name.";
-  if (fields.some((field) => !field.description.trim())) return "Every field needs a description.";
-  if (fields.some((field) => !OUTPUT_FORMATS.includes(field.output_format))) return "Every field needs a supported output format.";
+  if (keys.some((key) => !key)) return "모든 필드에 필드명을 입력하세요.";
+  if (fields.some((field) => !field.description.trim())) return "모든 필드에 설명을 입력하세요.";
+  if (fields.some((field) => !OUTPUT_FORMATS.includes(field.output_format))) return "모든 필드의 출력 형식을 확인하세요.";
   if (fields.some((field) => field.region !== undefined && field.region !== null && !normalizeRegion(field.region))) {
-    return "Extraction regions must use page plus x, y, width, height values between 0 and 1.";
+    return "추출 영역은 page와 0~1 사이의 x, y, width, height 값을 사용해야 합니다.";
   }
-  if (fields.some((field) => field.region_id && !regionIds.has(field.region_id))) return "Every field region must reference a saved extraction region.";
-  if (new Set(keys).size !== keys.length) return "Field key names must be unique.";
-  if (new Set(regions.map((region) => region.id)).size !== regions.length) return "Extraction region ids must be unique.";
+  if (fields.some((field) => field.region_id && !regionIds.has(field.region_id))) return "필드에 연결된 영역은 저장된 추출 영역이어야 합니다.";
+  if (new Set(keys).size !== keys.length) return "필드명은 중복될 수 없습니다.";
+  if (new Set(regions.map((region) => region.id)).size !== regions.length) return "추출 영역 id는 중복될 수 없습니다.";
   return null;
 }
 
@@ -4600,23 +4600,54 @@ function schemaSaveStatusLabel(
   status: "idle" | "pending" | "saving" | "saved" | "error",
   savedSchema: SavedSchema | null
 ) {
-  if (status === "saving") return "Auto-saving";
-  if (status === "pending") return "Auto-save pending";
-  if (status === "saved") return savedSchema ? "Auto-saved" : "Ready";
-  if (status === "error") return "Auto-save blocked";
-  return savedSchema ? "Auto-saved" : "Draft";
+  if (status === "saving") return "자동 저장 중";
+  if (status === "pending") return "자동 저장 대기";
+  if (status === "saved") return savedSchema ? "자동 저장됨" : "준비됨";
+  if (status === "error") return "자동 저장 차단";
+  return savedSchema ? "자동 저장됨" : "초안";
+}
+
+function reviewFilterLabel(filter: ReviewFilter) {
+  const labels: Record<ReviewFilter, string> = {
+    needs_review: "검토 필요",
+    all: "전체",
+    warning: "경고",
+    null: "누락값",
+    changed: "수정됨",
+    low_confidence: "낮은 신뢰도",
+    unreviewed: "미검수"
+  };
+  return labels[filter];
+}
+
+function statusLabel(status: string | null | undefined) {
+  if (!status) return "상태 없음";
+  const labels: Record<string, string> = {
+    queued: "대기 중",
+    running: "실행 중",
+    completed: "완료",
+    completed_with_errors: "일부 실패",
+    failed: "실패",
+    canceled: "취소됨",
+    cancel_requested: "중단 요청됨",
+    canceling: "중단 중",
+    needs_review: "검토 필요",
+    complete: "완료",
+    incomplete: "누락 있음"
+  };
+  return labels[status] ?? status;
 }
 
 function schemaValidationHint(message: string | null) {
   if (!message) return null;
   const hints: Record<string, string> = {
     "Add at least one schema field.": "우측 schema에 최소 1개 이상의 필드를 추가하세요.",
-    "Every field needs a key name.": "모든 필드에 key name을 입력하세요.",
-    "Every field needs a description.": "모든 필드에 description을 입력하세요.",
-    "Every field needs a supported output format.": "모든 필드의 output format을 확인하세요.",
+    "Every field needs a key name.": "모든 필드에 필드명을 입력하세요.",
+    "Every field needs a description.": "모든 필드에 설명을 입력하세요.",
+    "Every field needs a supported output format.": "모든 필드의 출력 형식을 확인하세요.",
     "Extraction regions must use page plus x, y, width, height values between 0 and 1.": "Region 좌표는 0~1 사이 상대 좌표여야 합니다.",
     "Every field region must reference a saved extraction region.": "필드에 연결된 region이 저장된 region인지 확인하세요.",
-    "Field key names must be unique.": "Field key name은 중복될 수 없습니다.",
+    "Field key names must be unique.": "필드명은 중복될 수 없습니다.",
     "Extraction region ids must be unique.": "Region id는 중복될 수 없습니다."
   };
   return hints[message] ?? message;
@@ -4702,7 +4733,7 @@ function normalizeSchemaFieldsAndRegions(
       regions.push({
         ...legacyRegion,
         id: generatedId,
-        name: `Region ${regions.length + 1}`
+        name: `영역 ${regions.length + 1}`
       });
       regionIds.add(generatedId);
       regionId = generatedId;
@@ -4809,10 +4840,10 @@ function formatApiDetail(detail: unknown): string | null {
 function toFriendlyError(error: unknown): string {
   const message = error instanceof Error ? error.message : "Unexpected error";
   if (message.includes("VLM_CREDENTIALS_MISSING") || message.includes("VLM API key and model name are required")) {
-    return "VLM credentials are missing. Go Home and use Setting to save API key and model name, or use VLM_PROVIDER=mock for a local demo.";
+    return "VLM 인증 정보가 없습니다. 홈의 설정에서 API key와 model name을 저장하거나 로컬 데모에서는 VLM_PROVIDER=mock을 사용하세요.";
   }
   if (message.includes("VLM_PROVIDER_UNSUPPORTED") || message.includes("Unsupported VLM_PROVIDER")) {
-    return "Unsupported VLM_PROVIDER. Use auto, mock, openai_compatible, or google_genai.";
+    return "지원하지 않는 VLM_PROVIDER입니다. auto, mock, openai_compatible, google_genai 중 하나를 사용하세요.";
   }
   if (message.includes("VLM_PROVIDER_REQUEST_FAILED")) {
     return message.replace("VLM_PROVIDER_REQUEST_FAILED: ", "");

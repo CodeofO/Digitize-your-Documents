@@ -427,8 +427,9 @@ Document Classifier workspace:
 Required Field Checker workspace:
 
 - 좌측은 단일/배치 업로드, 문서 preview, batch file rail을 제공한다.
-- 우측은 checklist item table, 실행 버튼, 결과 table을 제공한다.
+- 우측은 checklist item table, AI 추천 버튼, 저장/실행 버튼, 결과 table을 제공한다.
 - checklist library는 push sidebar 방식으로 제공한다.
+- `AI 추천`은 현재 업로드된 문서 이미지를 VLM에 전달해 checklist name/description/items/regions 초안을 생성한다. 추천은 즉시 저장하지 않고 사용자가 검토 후 저장한다.
 - item은 `item_name`, `description`, `evidence_type`, `required`, optional `region_id`로 구성한다.
 - region은 KIE와 동일하게 0~1 상대 좌표로 저장하며 여러 item이 같은 region을 공유할 수 있다.
 - 결과는 overall `complete`, `incomplete`, `needs_review`와 item별 `present`, `missing`, `uncertain`, `not_applicable`을 표시한다.
@@ -540,7 +541,7 @@ Frontend:
 - Key Information Extractor 진입 및 schema/review flow 유지
 - KIE schema-level extraction region 지정/저장 및 field별 region 할당
 - Document Classifier 진입, class 후보 편집, unknown toggle, 단일/batch 실행, 결과 수정, export
-- Required Field Checker 진입, checklist item 편집, region 표시, 단일/batch 실행, 결과 수정, export
+- Required Field Checker 진입, AI checklist 추천, checklist item 편집, region 표시, 단일/batch 실행, 결과 수정, export
 - Workflow Builder disabled 카드 표시
 - 모바일 폭에서 layout overlap 없음
 
