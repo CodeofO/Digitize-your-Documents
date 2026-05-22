@@ -32,6 +32,21 @@ Digitize Your Document는 사람이 대량 문서에서 반복적으로 확인�
 - VLM runtime parameter는 `.env`와 Setting popup에서 제어한다. Thinking 계열 모델은 기본 `reasoning_effort=minimal`, `verbosity=low`로 빠른 추출을 우선한다.
 - 사용자는 별도 환경 파일 복사 절차 없이 git clone 후 Home에서 설정할 수 있다.
 
+### 1.1 2026-05-22 안정화 완료 범위
+
+| ID | 내용 |
+| --- | --- |
+| P0-1 | VLM 실패를 `VLM_*` stable code로 표준화 |
+| P0-2 | Provider 오류 메시지의 API key redaction |
+| P0-3 | Credentials/provider/응답/설정값 오류를 job 저장과 HTTP detail에서 일관 처리 |
+| P0-4 | Document Classifier `unknown`/`needs_review`의 `class_name=null` 허용 및 정규화 |
+| P0-5 | Batch cancel로 모든 job이 terminal이면 batch `completed_at` 즉시 기록 |
+| P1-6 | Classifier/Required Field Checker polling에 `cache: no-store` 적용 |
+| P1-7 | 일시적 module batch polling 실패 시 기존 sidebar 상태 유지 |
+| P1-8 | KIE/Classifier/Required batch CSV export UTF-8 BOM/charset 검증 |
+| P2-9 | README와 개발정의서를 현재 동작 기준으로 갱신 |
+| P2-10 | log/coverage/test report/cache/temp backup 등 로컬 산출물 ignore 명시 |
+
 ## 2. Raw Data Extractor
 
 ### 2.1 UX
@@ -175,6 +190,9 @@ LibreOffice가 없거나 변환에 실패하면 row는 `status=failed`로 저장
 - 각 group 호출의 structured output schema는 해당 group field만 포함한다.
 - VLM 응답이 stringified JSON이면 실패 처리한다.
 - 저장되는 결과는 사용자 schema에 명시된 key만 허용한다.
+- VLM 실패는 stable code를 갖는 `VLM_*` 오류로 표준화한다. Background job 실패는 `VLM_CODE: message` 형식의 `error_message`로 저장하고, 동기 API 실패는 `{code, message, hint}` detail로 반환한다.
+- Provider 요청 실패 메시지에 API key가 포함되면 저장/반환 전에 `[redacted]`로 마스킹한다.
+- 현재 사용하는 대표 code는 `VLM_CREDENTIALS_MISSING`, `VLM_PROVIDER_UNSUPPORTED`, `VLM_PROVIDER_REQUEST_FAILED`, `VLM_RESPONSE_INVALID_JSON`, `VLM_RESPONSE_STRING`, `VLM_SETTING_INVALID_INTEGER`, `VLM_SETTING_INVALID_NUMERIC`이다.
 
 지원 입력:
 
@@ -227,6 +245,8 @@ DOCX/PPTX는 LibreOffice로 PDF 변환 후 page image로 rasterize한다. 이후
 - `classified`: 후보 class 중 하나로 판단됨
 - `unknown`: 후보 class에 맞지 않고 unknown 허용
 - `needs_review`: 판단 불확실 또는 unknown 미허용 상황
+
+`unknown`과 `needs_review`에서는 `class_name`이 `null`일 수 있다. `unknown` 결과에 class 후보명이 섞여 들어오면 backend validation에서 `class_name=null`로 정규화한다.
 
 ### 4.4 API
 
@@ -487,6 +507,7 @@ Backend:
 - health/system status
 - VLM settings read/write
 - VLM reasoning/verbosity/max token/top_p/service tier runtime parameter 적용
+- VLM error code, HTTP detail, secret redaction
 - image/PDF/DOCX/PPTX document upload
 - schema create/update
 - extraction failure without credentials
@@ -498,11 +519,11 @@ Backend:
 - result correction/export
 - document classifier config CRUD/archive
 - classification single job structured output 저장
-- classification batch progress/cancel/export
+- classification batch progress/cancel/export, CSV UTF-8 BOM, terminal cancel `completed_at`
 - required field checklist config CRUD/archive
 - required field checklist region validation
 - required field check single job structured output 저장
-- required field check batch progress/cancel/export
+- required field check batch progress/cancel/export, CSV UTF-8 BOM, terminal cancel `completed_at`
 
 Frontend:
 
@@ -559,5 +580,6 @@ GitHub에 올라가는 문서는 제품 사용자가 바로 읽는 내용과 개
 - 디자인 스타일 로컬 메모
 - sample 입력 파일
 - local DB, storage, `.env`, `.venv`, `node_modules`, frontend build output
+- log, coverage, test report, cache, temporary backup output
 
 `.gitignore`는 default-deny allowlist 구조를 사용한다. 모든 파일을 먼저 무시하고, source/test/config/script/GitHub 문서/README asset만 `!` 패턴으로 추적한다. 새 파일을 Git에 올릴 때는 해당 파일이 제품 실행이나 GitHub 문서에 필요한지 먼저 판단하고, 필요할 때만 allowlist에 추가한다.

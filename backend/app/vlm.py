@@ -44,6 +44,38 @@ Use optional region crops only for their matching items.
 Return data that matches the requested structured output schema."""
 
 
+class VlmRuntimeError(RuntimeError):
+    def __init__(self, code: str, message: str, hint: str | None = None):
+        self.code = code
+        self.message = message
+        self.hint = hint
+        super().__init__(self.as_text())
+
+    def as_text(self) -> str:
+        text = f"{self.code}: {self.message}"
+        if self.hint:
+            text = f"{text} Hint: {self.hint}"
+        return text
+
+    def as_detail(self) -> dict[str, str]:
+        detail = {"code": self.code, "message": self.message}
+        if self.hint:
+            detail["hint"] = self.hint
+        return detail
+
+
+def vlm_error_detail(exc: Exception) -> str | dict[str, str]:
+    if isinstance(exc, VlmRuntimeError):
+        return exc.as_detail()
+    return str(exc)
+
+
+def format_vlm_exception(exc: Exception) -> str:
+    if isinstance(exc, VlmRuntimeError):
+        return exc.as_text()
+    return str(exc)
+
+
 def build_structured_output_schema(fields: list[FieldDefinition]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
@@ -188,12 +220,20 @@ def resolve_vlm_api_style(settings=None) -> str:
         return "openai_compatible"
     if provider in {"openai_compatible", "openai"}:
         return "openai_compatible"
-    raise RuntimeError("Unsupported VLM_PROVIDER. Use auto, mock, openai_compatible, or google_genai.")
+    raise VlmRuntimeError(
+        "VLM_PROVIDER_UNSUPPORTED",
+        "Unsupported VLM_PROVIDER.",
+        "Use auto, mock, openai_compatible, or google_genai.",
+    )
 
 
 def _ensure_vlm_credentials(settings) -> None:
     if not settings.resolved_vlm_api_key or not settings.resolved_vlm_model_name:
-        raise RuntimeError("VLM API key and model name are required")
+        raise VlmRuntimeError(
+            "VLM_CREDENTIALS_MISSING",
+            "VLM API key and model name are required.",
+            "Save API key and model name in Home Setting, or use VLM_PROVIDER=mock for a local demo.",
+        )
 
 
 def _invoke_structured_llm(
@@ -206,7 +246,7 @@ def _invoke_structured_llm(
     if api_style == "google_genai":
         return _invoke_google_genai(system_prompt, prompt, image_inputs, output_schema)
     if api_style != "openai_compatible":
-        raise RuntimeError(f"Unsupported VLM API style: {api_style}")
+        raise VlmRuntimeError("VLM_API_STYLE_UNSUPPORTED", f"Unsupported VLM API style: {api_style}")
     content = _build_multimodal_content(prompt, image_inputs)
     return _invoke_openai_compatible(system_prompt, content, output_schema)
 
@@ -222,14 +262,22 @@ def _invoke_openai_compatible(system_prompt: str, content: list[dict[str, Any]],
         strict=True,
     )
 
-    response = structured_llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=content)])
+    try:
+        response = structured_llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=content)])
+    except VlmRuntimeError:
+        raise
+    except Exception as exc:
+        raise VlmRuntimeError(
+            "VLM_PROVIDER_REQUEST_FAILED",
+            f"OpenAI-compatible VLM request failed: {_sanitize_provider_error(exc)}",
+        ) from exc
     if hasattr(response, "model_dump"):
         return response.model_dump()
     if isinstance(response, dict):
         return response
     if isinstance(response, str):
-        raise RuntimeError("VLM returned a string instead of a structured object")
-    raise RuntimeError("VLM returned an unsupported structured response")
+        raise VlmRuntimeError("VLM_RESPONSE_STRING", "VLM returned a string instead of a structured object.")
+    raise VlmRuntimeError("VLM_RESPONSE_UNSUPPORTED", "VLM returned an unsupported structured response.")
 
 
 def _invoke_google_genai(
@@ -243,7 +291,11 @@ def _invoke_google_genai(
         from google import genai
         from google.genai import types
     except ImportError as exc:
-        raise RuntimeError("Gemini native mode requires google-genai. Run: uv pip install -e 'backend[dev]'") from exc
+        raise VlmRuntimeError(
+            "VLM_GOOGLE_GENAI_MISSING",
+            "Gemini native mode requires google-genai.",
+            "Run: uv pip install -e 'backend[dev]'",
+        ) from exc
 
     contents: list[Any] = [prompt]
     for image_input in image_inputs:
@@ -255,11 +307,19 @@ def _invoke_google_genai(
 
     config = _build_google_generation_config(system_prompt, output_schema)
     client = genai.Client(api_key=settings.resolved_vlm_api_key)
-    response = client.models.generate_content(
-        model=settings.resolved_vlm_model_name,
-        contents=contents,
-        config=config,
-    )
+    try:
+        response = client.models.generate_content(
+            model=settings.resolved_vlm_model_name,
+            contents=contents,
+            config=config,
+        )
+    except VlmRuntimeError:
+        raise
+    except Exception as exc:
+        raise VlmRuntimeError(
+            "VLM_PROVIDER_REQUEST_FAILED",
+            f"Google GenAI VLM request failed: {_sanitize_provider_error(exc)}",
+        ) from exc
     return _coerce_structured_response(response)
 
 
@@ -342,16 +402,19 @@ def _coerce_structured_response(response: Any) -> dict[str, Any]:
 
     text = getattr(response, "text", None)
     if isinstance(text, str) and text.strip():
-        loaded = json.loads(text)
+        try:
+            loaded = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise VlmRuntimeError("VLM_RESPONSE_INVALID_JSON", "VLM returned invalid JSON text.") from exc
         if isinstance(loaded, dict):
             return loaded
-        raise RuntimeError("VLM returned structured JSON that is not an object")
+        raise VlmRuntimeError("VLM_RESPONSE_JSON_NOT_OBJECT", "VLM returned structured JSON that is not an object.")
 
     if isinstance(response, dict):
         return response
     if isinstance(response, str):
-        raise RuntimeError("VLM returned a string instead of a structured object")
-    raise RuntimeError("VLM returned an unsupported structured response")
+        raise VlmRuntimeError("VLM_RESPONSE_STRING", "VLM returned a string instead of a structured object.")
+    raise VlmRuntimeError("VLM_RESPONSE_UNSUPPORTED", "VLM returned an unsupported structured response.")
 
 
 def _clean_optional_text(value: str | None) -> str | None:
@@ -368,7 +431,7 @@ def _optional_int(value: str | None) -> int | None:
     try:
         return int(cleaned)
     except ValueError as exc:
-        raise RuntimeError(f"Invalid integer VLM setting: {cleaned}") from exc
+        raise VlmRuntimeError("VLM_SETTING_INVALID_INTEGER", f"Invalid integer VLM setting: {cleaned}") from exc
 
 
 def _optional_float(value: str | None) -> float | None:
@@ -378,7 +441,18 @@ def _optional_float(value: str | None) -> float | None:
     try:
         return float(cleaned)
     except ValueError as exc:
-        raise RuntimeError(f"Invalid numeric VLM setting: {cleaned}") from exc
+        raise VlmRuntimeError("VLM_SETTING_INVALID_NUMERIC", f"Invalid numeric VLM setting: {cleaned}") from exc
+
+
+def _sanitize_provider_error(exc: Exception) -> str:
+    settings = get_settings()
+    message = str(exc) or exc.__class__.__name__
+    for secret in [settings.resolved_vlm_api_key, settings.openai_api_key, settings.vlm_api_key]:
+        if secret:
+            message = message.replace(secret, "[redacted]")
+            if len(secret) > 8:
+                message = message.replace(secret[:8], "[redacted]")
+    return message
 
 
 def _mime_type_for_path(path: Path) -> str:
@@ -458,9 +532,7 @@ def _schema_description_output_schema() -> dict[str, Any]:
 
 def _classification_output_schema(classes: list[ClassCandidate], allow_unknown: bool) -> dict[str, Any]:
     class_names = [item.class_name for item in classes]
-    class_schema: dict[str, Any] = {"type": "string", "enum": class_names}
-    if allow_unknown:
-        class_schema = {"anyOf": [class_schema, {"type": "null"}]}
+    class_schema: dict[str, Any] = {"anyOf": [{"type": "string", "enum": class_names}, {"type": "null"}]}
     return {
         "title": "DocumentClassificationResult",
         "type": "object",

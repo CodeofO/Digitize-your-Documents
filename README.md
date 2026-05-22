@@ -37,6 +37,17 @@ Digitize Your Document를 사용하면 대량 문서에서 수작업으로 값�
 | 50장 이상 반복 검토 | Batch sidebar + progress polling + result review | 항목별 검토와 batch export |
 | 손글씨/복잡한 레이아웃 보조 | full page context + masked page + enlarged crop | region 기반 집중 추출 |
 
+## 2026-05-22 변경 사항
+
+- VLM 실패를 `VLM_*` 코드로 표준화했습니다. Credentials/provider/요청 실패/응답 파싱/설정값 오류가 같은 형식으로 저장되고, provider 오류에 API key가 섞여도 `[redacted]`로 마스킹됩니다.
+- Schema recommendation처럼 즉시 실패를 반환하는 API는 `{code, message, hint}` 구조의 error detail을 사용하고, background job 실패는 code-prefixed `error_message`로 남깁니다.
+- Frontend는 새 VLM error detail을 사람이 읽기 좋은 메시지로 표시합니다.
+- Document Classifier의 `needs_review`/`unknown` 결과에서 `class_name=null`이 가능하도록 structured output schema와 validation을 맞췄습니다.
+- KIE, Document Classifier, Required Field Checker batch cancel은 모든 job이 terminal이 되면 `completed_at`을 즉시 닫습니다.
+- Document Classifier와 Required Field Checker polling도 `cache: "no-store"`를 사용하고, 일시적 polling 실패 시 기존 batch UI 상태를 유지합니다.
+- 세 batch CSV export 모두 UTF-8 BOM과 `charset=utf-8`을 검증합니다.
+- Backend 회귀 테스트에 VLM error code/redaction, classifier null class, required-field batch cancel, module CSV encoding 검증을 추가했습니다.
+
 ## 2026-05-21 변경 사항
 
 - README 상단 이미지를 최신 모듈 구조와 비즈니스 활용 중심으로 교체했습니다.
@@ -153,6 +164,17 @@ LIBREOFFICE_PATH=/Applications/LibreOffice.app/Contents/MacOS/soffice
 | `VLM_PROVIDER=mock` | 로컬 mock |
 
 `VLM_API_KEY`와 `VLM_MODEL_NAME`이 있으면 이 값이 우선 사용됩니다. `OPENAI_API_KEY`, `OPENAI_MODEL_NAME`은 하위 호환 alias이며 `VLM_*`가 비어 있을 때만 fallback으로 사용합니다.
+
+VLM 오류는 아래처럼 code를 포함해 반환하거나 job `error_message`에 저장합니다.
+
+| Code | 의미 |
+| --- | --- |
+| `VLM_CREDENTIALS_MISSING` | API key 또는 model name 누락 |
+| `VLM_PROVIDER_UNSUPPORTED` | 지원하지 않는 provider 설정 |
+| `VLM_PROVIDER_REQUEST_FAILED` | provider 요청 실패 |
+| `VLM_RESPONSE_INVALID_JSON` | provider 응답 JSON 파싱 실패 |
+| `VLM_RESPONSE_STRING` | structured object 대신 string 반환 |
+| `VLM_SETTING_INVALID_INTEGER` / `VLM_SETTING_INVALID_NUMERIC` | VLM runtime 설정값 타입 오류 |
 
 예시:
 
@@ -320,7 +342,7 @@ KIE API:
 | 값 | 설명 |
 | --- | --- |
 | `status` | `classified`, `unknown`, `needs_review` |
-| `class_name` | 선택된 class 이름 |
+| `class_name` | 선택된 class 이름. `unknown` 또는 `needs_review`에서는 `null` 가능 |
 | `confidence` | 0~1 confidence |
 | `reason` | 판단 이유 |
 | `evidence` | 문서에서 본 근거 |
@@ -382,6 +404,7 @@ API:
 | `GET` | `/api/required-field-check-batches/{batch_id}/export?format=csv\|json` |
 
 두 모듈 모두 KIE와 같은 문서 업로드/rasterize 구조를 사용합니다. PDF/image/DOCX/PPTX를 page image로 만든 뒤 VLM에 전달하고, batch에서는 파일명 기준 오름차순으로 처리/export합니다.
+Batch polling은 cache를 사용하지 않으며, 일시적인 polling 실패는 현재 sidebar 상태를 비우지 않고 다음 tick에서 재시도합니다. Cancel 요청으로 모든 job이 terminal이 되면 batch `completed_at`도 즉시 기록됩니다.
 
 ## 문서와 구조
 
@@ -450,5 +473,6 @@ GitHub에는 핵심 변경 이력만 문서화합니다. 로컬에서 만든 실
 - SQLite DB 기본 파일명은 `backend/digitize_documents.db`입니다.
 - 업로드 문서와 raw extraction 결과는 `backend/storage/` 아래에 저장됩니다.
 - `.env`, `.venv`, local DB, storage output, `node_modules`, frontend build artifact는 git에서 제외됩니다.
+- log, coverage, test report, cache, 임시 백업 파일도 git에서 제외됩니다.
 - `.gitignore`는 모든 파일을 먼저 무시한 뒤 필요한 source, test, 실행 스크립트, GitHub 문서, README asset만 allowlist로 포함합니다.
 - `.env.example` 복사는 필요하지 않습니다. Home Setting에서 `.env`를 생성합니다.

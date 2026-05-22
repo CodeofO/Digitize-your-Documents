@@ -102,7 +102,7 @@ from app.schemas import (
     VlmSettingsRead,
     VlmSettingsUpdate,
 )
-from app.vlm import recommend_schema_description_with_vlm, recommend_schema_with_vlm, resolve_vlm_api_style
+from app.vlm import recommend_schema_description_with_vlm, recommend_schema_with_vlm, resolve_vlm_api_style, vlm_error_detail
 
 
 @asynccontextmanager
@@ -446,7 +446,7 @@ def recommend_schema(
     except ValidationError as exc:
         raise HTTPException(status_code=502, detail=f"VLM returned an invalid schema recommendation: {exc}") from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=vlm_error_detail(exc)) from exc
 
 
 @app.post("/api/schemas/description-recommendations", response_model=SchemaDescriptionRecommendationRead)
@@ -471,7 +471,7 @@ def recommend_schema_description(
     except ValidationError as exc:
         raise HTTPException(status_code=502, detail=f"VLM returned an invalid schema description recommendation: {exc}") from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=vlm_error_detail(exc)) from exc
 
 
 @app.get("/api/schemas/{schema_id}", response_model=SchemaRead)
@@ -1229,7 +1229,9 @@ def cancel_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
             canceled_count += 1
 
     if canceled_count:
-        batch.status = "cancel_requested"
+        _close_batch_if_all_jobs_terminal(batch, now)
+        if batch.status not in {"canceled", "completed", "completed_with_errors"}:
+            batch.status = "cancel_requested"
         log_audit_event(
             db,
             entity_type="batch",
@@ -2120,7 +2122,9 @@ def _cancel_module_batch(batch: Any, entity_type: str, db: Session) -> None:
             item.job.completed_at = now
             canceled_count += 1
     if canceled_count:
-        batch.status = "cancel_requested"
+        _close_batch_if_all_jobs_terminal(batch, now)
+        if batch.status not in {"canceled", "completed", "completed_with_errors"}:
+            batch.status = "cancel_requested"
         action = "cancel_requested"
         message = f"Cancel requested for {canceled_count} running or queued job(s)"
         metadata = {"canceled_count": canceled_count}
@@ -2129,6 +2133,21 @@ def _cancel_module_batch(batch: Any, entity_type: str, db: Session) -> None:
         message = "No running or queued batch jobs to cancel"
         metadata = {}
     log_audit_event(db, entity_type=entity_type, entity_id=batch.id, action=action, message=message, metadata=metadata)
+
+
+def _close_batch_if_all_jobs_terminal(batch: Any, completed_at: datetime) -> None:
+    terminal_statuses = {"completed", "needs_review", "failed", "canceled"}
+    jobs = [item.job for item in batch.items if item.job]
+    if not jobs or any(job.status not in terminal_statuses for job in jobs):
+        return
+    statuses = [job.status for job in jobs]
+    if all(status == "canceled" for status in statuses):
+        batch.status = "canceled"
+    elif any(status in {"failed", "canceled"} for status in statuses):
+        batch.status = "completed_with_errors"
+    else:
+        batch.status = "completed"
+    batch.completed_at = completed_at
 
 
 def _sorted_batch_items(items) -> list[BatchItem]:

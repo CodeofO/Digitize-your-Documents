@@ -13,7 +13,7 @@ from app.database import SessionLocal
 from app.models import Document, ExtractionJob, ExtractionResult, Schema
 from app.schemas import FieldDefinition, FieldRegion, SchemaRegion
 from app.validation import validate_extracted_values
-from app.vlm import extract_with_vlm
+from app.vlm import extract_with_vlm, format_vlm_exception
 
 
 TERMINAL_JOB_STATUSES = {"completed", "needs_review", "failed", "canceled"}
@@ -48,7 +48,7 @@ def run_extraction_job(job_id: str) -> None:
         raw_values = _extract_grouped_values(context.document, context.fields, context.regions, job_id)
         _save_extraction_result(job_id, context, raw_values)
     except Exception as exc:
-        _mark_job_failed(job_id, str(exc))
+        _mark_job_failed(job_id, format_vlm_exception(exc))
 
 
 def run_batch_jobs(batch_id: str, job_ids: list[str]) -> None:

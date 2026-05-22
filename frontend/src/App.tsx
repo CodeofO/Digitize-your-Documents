@@ -4794,17 +4794,28 @@ function formatApiDetail(detail: unknown): string | null {
       })
       .join("; ");
   }
-  if (typeof detail === "object") return JSON.stringify(detail);
+  if (typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    if (typeof record.code === "string" && typeof record.message === "string") {
+      const hint = typeof record.hint === "string" ? ` ${record.hint}` : "";
+      return `${record.code}: ${record.message}${hint}`;
+    }
+    if (typeof record.message === "string") return record.message;
+    return JSON.stringify(detail);
+  }
   return String(detail);
 }
 
 function toFriendlyError(error: unknown): string {
   const message = error instanceof Error ? error.message : "Unexpected error";
-  if (message.includes("VLM API key and model name are required")) {
+  if (message.includes("VLM_CREDENTIALS_MISSING") || message.includes("VLM API key and model name are required")) {
     return "VLM credentials are missing. Go Home and use Setting to save API key and model name, or use VLM_PROVIDER=mock for a local demo.";
   }
-  if (message.includes("Unsupported VLM_PROVIDER")) {
+  if (message.includes("VLM_PROVIDER_UNSUPPORTED") || message.includes("Unsupported VLM_PROVIDER")) {
     return "Unsupported VLM_PROVIDER. Use auto, mock, openai_compatible, or google_genai.";
+  }
+  if (message.includes("VLM_PROVIDER_REQUEST_FAILED")) {
+    return message.replace("VLM_PROVIDER_REQUEST_FAILED: ", "");
   }
   if (message.includes("Schema name already exists")) {
     return "이미 저장된 schema 이름입니다. 드롭다운에서 기존 schema를 불러오거나 다른 이름으로 저장하세요.";

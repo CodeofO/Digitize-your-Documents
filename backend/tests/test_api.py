@@ -2,7 +2,10 @@ import base64
 import io
 import json
 import os
+from types import SimpleNamespace
 import zipfile
+
+import pytest
 
 try:
     import pymupdf as fitz
@@ -134,6 +137,30 @@ def test_vlm_api_style_auto_detects_google_and_base_url(monkeypatch) -> None:
         get_settings.cache_clear()
 
 
+def test_vlm_errors_have_stable_codes_and_redact_secrets(monkeypatch) -> None:
+    from app.vlm import VlmRuntimeError, _coerce_structured_response, _sanitize_provider_error, resolve_vlm_api_style
+
+    try:
+        monkeypatch.setenv("VLM_PROVIDER", "unknown_provider")
+        get_settings.cache_clear()
+        with pytest.raises(VlmRuntimeError) as provider_error:
+            resolve_vlm_api_style()
+        assert provider_error.value.code == "VLM_PROVIDER_UNSUPPORTED"
+        assert provider_error.value.as_detail()["code"] == "VLM_PROVIDER_UNSUPPORTED"
+
+        monkeypatch.setenv("VLM_API_KEY", "AIzaSyCP_test_key_should_not_leak")
+        get_settings.cache_clear()
+        sanitized = _sanitize_provider_error(RuntimeError("bad key AIzaSyCP_test_key_should_not_leak"))
+        assert "AIzaSyCP_test_key_should_not_leak" not in sanitized
+        assert "[redacted]" in sanitized
+
+        with pytest.raises(VlmRuntimeError) as response_error:
+            _coerce_structured_response(SimpleNamespace(text="not-json"))
+        assert response_error.value.code == "VLM_RESPONSE_INVALID_JSON"
+    finally:
+        get_settings.cache_clear()
+
+
 def test_google_generation_config_uses_structured_output_and_thinking_level(monkeypatch) -> None:
     from app.vlm import _build_google_generation_config
 
@@ -152,6 +179,43 @@ def test_google_generation_config_uses_structured_output_and_thinking_level(monk
         assert config["thinking_config"] == {"thinking_level": "minimal"}
     finally:
         get_settings.cache_clear()
+
+
+def test_classification_schema_allows_needs_review_without_class_name() -> None:
+    from app.vlm import _classification_output_schema
+    from app.schemas import ClassCandidate
+
+    schema = _classification_output_schema(
+        classes=[ClassCandidate(class_name="contract", description="Contract", signals=[])],
+        allow_unknown=False,
+    )
+    class_name_schema = schema["properties"]["class_name"]
+    assert {"type": "null"} in class_name_schema["anyOf"]
+
+
+def test_classification_validation_clears_unknown_class_name() -> None:
+    from app.document_modules import ClassificationContext, _validate_classification_output
+    from app.extraction import DocumentSnapshot
+    from app.schemas import ClassCandidate
+
+    context = ClassificationContext(
+        document=DocumentSnapshot(id="doc_1", storage_path="", pages=[]),
+        classifier_id="clf_1",
+        classes=[ClassCandidate(class_name="contract", description="Contract", signals=[])],
+        allow_unknown=True,
+    )
+    output = _validate_classification_output(
+        {
+            "status": "unknown",
+            "class_name": "contract",
+            "confidence": 0.3,
+            "reason": "No class matched.",
+            "evidence": [],
+        },
+        context,
+    )
+    assert output["status"] == "unknown"
+    assert output["class_name"] is None
 
 
 def test_schema_validation_and_creation() -> None:
@@ -791,6 +855,7 @@ def test_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:
         assert payload["status"] == "canceled"
         assert payload["canceled_count"] == 2
         assert payload["progress"] == 1
+        assert payload["completed_at"] is not None
         assert {item["status"] for item in payload["items"]} == {"canceled"}
 
 
@@ -968,6 +1033,7 @@ def test_document_classifier_batch_cancel_and_export(monkeypatch) -> None:
             assert canceled.status_code == 200, canceled.text
             assert canceled.json()["status"] == "canceled"
             assert canceled.json()["canceled_count"] == 2
+            assert canceled.json()["completed_at"] is not None
 
     try:
         os.environ["VLM_PROVIDER"] = "mock"
@@ -990,6 +1056,8 @@ def test_document_classifier_batch_cancel_and_export(monkeypatch) -> None:
 
             csv_response = client.get(f"/api/classification-batches/{batch['id']}/export?format=csv")
             assert csv_response.status_code == 200, csv_response.text
+            assert csv_response.content.startswith(b"\xef\xbb\xbf")
+            assert "charset=utf-8" in csv_response.headers["content-type"]
             assert "classification_status,class_name,confidence,reason,evidence" in csv_response.text.splitlines()[0]
             assert csv_response.text.index("a_first.png") < csv_response.text.index("z_last.png")
 
@@ -1085,6 +1153,8 @@ def test_required_field_check_batch_export_mock_mode() -> None:
 
             csv_response = client.get(f"/api/required-field-check-batches/{batch['id']}/export?format=csv")
             assert csv_response.status_code == 200, csv_response.text
+            assert csv_response.content.startswith(b"\xef\xbb\xbf")
+            assert "charset=utf-8" in csv_response.headers["content-type"]
             header = csv_response.text.splitlines()[0]
             assert "overall_status" in header
             assert "성명_status" in header
@@ -1097,6 +1167,33 @@ def test_required_field_check_batch_export_mock_mode() -> None:
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
+
+
+def test_required_field_check_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_required_field_check_batch", lambda batch_id, job_ids: None)
+
+    with get_client() as client:
+        checklist = create_required_field_checklist(client, name="cancel_checklist")
+        response = client.post(
+            "/api/required-field-check-batches",
+            data={"checklist_id": checklist["id"]},
+            files=[
+                ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+            ],
+        )
+        assert response.status_code == 200, response.text
+        batch = response.json()
+        assert batch["status"] == "running"
+
+        canceled = client.post(f"/api/required-field-check-batches/{batch['id']}/cancel")
+        assert canceled.status_code == 200, canceled.text
+        payload = canceled.json()
+        assert payload["status"] == "canceled"
+        assert payload["canceled_count"] == 2
+        assert payload["progress"] == 1
+        assert payload["completed_at"] is not None
+        assert {item["status"] for item in payload["items"]} == {"canceled"}
 
 
 def test_batch_worker_exception_does_not_leave_batch_running(monkeypatch) -> None:

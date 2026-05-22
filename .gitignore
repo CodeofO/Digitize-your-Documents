@@ -9,8 +9,19 @@
 .uv-cache/
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
 *.pyc
 .DS_Store
+*.log
+*.tmp
+*.bak
+.coverage
+coverage/
+htmlcov/
+playwright-report/
+test-results/
 api_key_memo.txt
 sample/
 docs/
@@ -26,6 +37,8 @@ backend/backend/
 # Frontend build/dependency outputs.
 frontend/node_modules/
 frontend/dist/
+frontend/coverage/
+frontend/.vite/
 frontend/*.tsbuildinfo
 frontend/vite.config.d.ts
 frontend/vite.config.js

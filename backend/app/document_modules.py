@@ -21,7 +21,7 @@ from app.models import (
     RequiredFieldChecklist,
 )
 from app.schemas import ClassCandidate, RequiredFieldItem, SchemaRegion
-from app.vlm import classify_document_with_vlm, check_required_fields_with_vlm
+from app.vlm import classify_document_with_vlm, check_required_fields_with_vlm, format_vlm_exception
 
 
 TERMINAL_MODULE_JOB_STATUSES = {"completed", "needs_review", "failed", "canceled"}
@@ -55,7 +55,7 @@ def run_classification_job(job_id: str) -> None:
         )
         _save_classification_result(job_id, context, raw_values)
     except Exception as exc:
-        _mark_classification_job_failed(job_id, str(exc))
+        _mark_classification_job_failed(job_id, format_vlm_exception(exc))
 
 
 def run_classification_batch(batch_id: str, job_ids: list[str]) -> None:
@@ -74,7 +74,7 @@ def run_required_field_check_job(job_id: str) -> None:
         )
         _save_required_field_result(job_id, context, raw_values)
     except Exception as exc:
-        _mark_required_field_job_failed(job_id, str(exc))
+        _mark_required_field_job_failed(job_id, format_vlm_exception(exc))
 
 
 def run_required_field_check_batch(batch_id: str, job_ids: list[str]) -> None:
@@ -262,6 +262,8 @@ def _validate_classification_output(raw_values: dict[str, Any], context: Classif
     class_name = raw_values.get("class_name")
     if status == "classified" and class_name not in class_names:
         status = "needs_review"
+        class_name = None
+    if status == "unknown":
         class_name = None
     if status == "unknown" and not context.allow_unknown:
         status = "needs_review"

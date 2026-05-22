@@ -399,8 +399,8 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
       const path = isClassifier ? `/api/classification-batches/${batchId}` : `/api/required-field-check-batches/${batchId}`;
       const batch = await api<ModuleBatch>(path);
       setBatches((items) => [batch, ...items.filter((item) => item.id !== batch.id)].slice(0, 12));
-    } catch (err) {
-      setError(errorMessage(err));
+    } catch {
+      // Keep the current batch visible; the next polling tick will retry.
     }
   }
 
@@ -1114,6 +1114,7 @@ function ModuleLibraryPanel(props: {
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const isForm = options.body instanceof FormData;
   const response = await fetch(`${API_BASE}${path}`, {
+    cache: "no-store",
     ...options,
     headers: isForm ? options.headers : { "Content-Type": "application/json", ...(options.headers ?? {}) }
   });
@@ -1279,6 +1280,10 @@ function formatApiDetail(detail: unknown): string {
   }
   if (typeof detail === "object") {
     const record = detail as Record<string, unknown>;
+    if (typeof record.code === "string" && typeof record.message === "string") {
+      const hint = typeof record.hint === "string" ? ` ${record.hint}` : "";
+      return `${record.code}: ${record.message}${hint}`;
+    }
     if (typeof record.msg === "string") return record.msg;
     if (typeof record.message === "string") return record.message;
     return JSON.stringify(record);
@@ -1287,5 +1292,15 @@ function formatApiDetail(detail: unknown): string {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("VLM_CREDENTIALS_MISSING") || message.includes("VLM API key and model name are required")) {
+    return "VLM credentials are missing. Go Home and use Setting to save API key and model name, or use VLM_PROVIDER=mock for a local demo.";
+  }
+  if (message.includes("VLM_PROVIDER_UNSUPPORTED") || message.includes("Unsupported VLM_PROVIDER")) {
+    return "Unsupported VLM_PROVIDER. Use auto, mock, openai_compatible, or google_genai.";
+  }
+  if (message.includes("VLM_PROVIDER_REQUEST_FAILED")) {
+    return message.replace("VLM_PROVIDER_REQUEST_FAILED: ", "");
+  }
+  return message;
 }
