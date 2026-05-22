@@ -164,7 +164,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [workflowName, setWorkflowName] = useState(initialDraft?.workflowName ?? "문서 자동화 워크플로우");
   const [workflowDescription, setWorkflowDescription] = useState(initialDraft?.workflowDescription ?? "");
   const [nodes, setNodes] = useState<WorkflowNode[]>(() => initialDraft?.nodes ?? defaultNodes);
-  const [edges, setEdges] = useState<WorkflowEdge[]>(() => initialDraft?.edges ?? defaultEdges);
+  const [edges, setEdges] = useState<WorkflowEdge[]>(() => initialDraft?.edges ?? defaultEdges.map(normalizeWorkflowEdge));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(initialDraft?.selectedNodeId ?? defaultNodes[1]?.id ?? null);
   const [schemas, setSchemas] = useState<SchemaSummary[]>([]);
   const [classifiers, setClassifiers] = useState<ClassifierSummary[]>([]);
@@ -231,7 +231,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
         {
           ...connection,
           id: `${connection.source}-${connection.sourceHandle || "out"}-${connection.target}`,
-          animated: connection.sourceHandle?.startsWith("class:") ?? false,
+          animated: false,
           label: connection.sourceHandle ? branchKeyLabel(connection.sourceHandle) : undefined
         },
         current
@@ -271,7 +271,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
     setWorkflowName(workflow.name);
     setWorkflowDescription(workflow.description ?? "");
     setNodes((workflow.definition.nodes?.length ? workflow.definition.nodes : defaultNodes).map(normalizeWorkflowNode));
-    setEdges(workflow.definition.edges?.length ? workflow.definition.edges : defaultEdges);
+    setEdges((workflow.definition.edges?.length ? workflow.definition.edges : defaultEdges).map(normalizeWorkflowEdge));
     setSelectedNodeId(workflow.definition.nodes?.[0]?.id ?? defaultNodes[0].id);
     setMessage(`불러온 워크플로우: ${workflow.name}`);
   }
@@ -281,7 +281,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
     setWorkflowName("문서 자동화 워크플로우");
     setWorkflowDescription("");
     setNodes(defaultNodes.map(normalizeWorkflowNode));
-    setEdges(defaultEdges.map((edge) => ({ ...edge })));
+    setEdges(defaultEdges.map(normalizeWorkflowEdge));
     setSelectedNodeId(defaultNodes[1]?.id ?? defaultNodes[0]?.id ?? null);
     setMessage("새 워크플로우를 시작합니다.");
   }
@@ -785,8 +785,19 @@ function workflowEdge(source: string, target: string, sourceHandle?: string): Wo
     source,
     target,
     sourceHandle,
-    animated: sourceHandle?.startsWith("class:") ?? false,
+    animated: false,
     label: sourceHandle ? branchKeyLabel(sourceHandle) : undefined
+  };
+}
+
+function normalizeWorkflowEdge(edge: WorkflowEdge): WorkflowEdge {
+  const sourceHandle = typeof edge.sourceHandle === "string" ? edge.sourceHandle : undefined;
+  return {
+    ...edge,
+    id: edge.id || `${edge.source}-${sourceHandle || "out"}-${edge.target}`,
+    sourceHandle,
+    animated: false,
+    label: sourceHandle ? branchKeyLabel(sourceHandle) : edge.label
   };
 }
 
@@ -845,7 +856,7 @@ function readWorkflowDraft(): WorkflowDraft | null {
       workflowName: typeof parsed.workflowName === "string" && parsed.workflowName.trim() ? parsed.workflowName : "문서 자동화 워크플로우",
       workflowDescription: typeof parsed.workflowDescription === "string" ? parsed.workflowDescription : "",
       nodes: parsed.nodes.map(normalizeWorkflowNode),
-      edges: parsed.edges,
+      edges: parsed.edges.map(normalizeWorkflowEdge),
       selectedNodeId: typeof parsed.selectedNodeId === "string" ? parsed.selectedNodeId : parsed.nodes[0]?.id ?? null
     };
   } catch {
@@ -872,7 +883,7 @@ function writeWorkflowDraft(draft: WorkflowDraft) {
           sourceHandle: edge.sourceHandle,
           targetHandle: edge.targetHandle,
           label: edge.label,
-          animated: edge.animated,
+          animated: false,
           data: edge.data
         }))
       })
