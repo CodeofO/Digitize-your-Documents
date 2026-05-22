@@ -112,6 +112,18 @@ type WorkflowBuilderProps = {
   onCreateChecklist: () => void;
 };
 
+type WorkflowDraft = {
+  activeWorkflowId: string;
+  workflowName: string;
+  workflowDescription: string;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  selectedNodeId: string | null;
+};
+
+const WORKFLOW_DRAFT_KEY = "digitize_workflow_builder_draft_v1";
+const TERMINAL_RUN_STATUSES = ["completed", "completed_with_errors", "needs_review", "failed", "canceled"];
+
 const nodePalette: { kind: WorkflowNodeKind; label: string; description: string }[] = [
   { kind: "input", label: "문서 입력", description: "단일/배치 문서를 자동 판단합니다." },
   { kind: "classifier", label: "문서 분류", description: "저장된 classifier를 실행합니다." },
@@ -135,11 +147,9 @@ const defaultNodes: WorkflowNode[] = [
 const defaultEdges: WorkflowEdge[] = [
   workflowEdge("input", "classifier"),
   workflowEdge("classifier", "branch"),
-  workflowEdge("branch", "merge", "default"),
-  workflowEdge("branch", "merge", "unknown"),
-  workflowEdge("branch", "merge", "needs_review"),
-  workflowEdge("kie", "required-checker"),
-  workflowEdge("required-checker", "merge"),
+  workflowEdge("branch", "kie_contract", "default"),
+  workflowEdge("kie_contract", "required_contract"),
+  workflowEdge("required_contract", "merge"),
   workflowEdge("merge", "export")
 ];
 
@@ -148,13 +158,14 @@ const nodeTypes = {
 };
 
 export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateChecklist }: WorkflowBuilderProps) {
+  const [initialDraft] = useState<WorkflowDraft | null>(() => readWorkflowDraft());
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
-  const [activeWorkflowId, setActiveWorkflowId] = useState("");
-  const [workflowName, setWorkflowName] = useState("문서 자동화 워크플로우");
-  const [workflowDescription, setWorkflowDescription] = useState("");
-  const [nodes, setNodes] = useState<WorkflowNode[]>(defaultNodes);
-  const [edges, setEdges] = useState<WorkflowEdge[]>(defaultEdges);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(defaultNodes[1]?.id ?? null);
+  const [activeWorkflowId, setActiveWorkflowId] = useState(initialDraft?.activeWorkflowId ?? "");
+  const [workflowName, setWorkflowName] = useState(initialDraft?.workflowName ?? "문서 자동화 워크플로우");
+  const [workflowDescription, setWorkflowDescription] = useState(initialDraft?.workflowDescription ?? "");
+  const [nodes, setNodes] = useState<WorkflowNode[]>(() => initialDraft?.nodes ?? defaultNodes);
+  const [edges, setEdges] = useState<WorkflowEdge[]>(() => initialDraft?.edges ?? defaultEdges);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(initialDraft?.selectedNodeId ?? defaultNodes[1]?.id ?? null);
   const [schemas, setSchemas] = useState<SchemaSummary[]>([]);
   const [classifiers, setClassifiers] = useState<ClassifierSummary[]>([]);
   const [checklists, setChecklists] = useState<ChecklistSummary[]>([]);
@@ -165,6 +176,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(initialDraft ? "복원됨" : null);
 
   const activeWorkflow = workflows.find((workflow) => workflow.id === activeWorkflowId) ?? null;
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
@@ -179,10 +191,25 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   }, []);
 
   useEffect(() => {
-    if (!activeRun || ["completed", "completed_with_errors", "needs_review", "failed", "canceled"].includes(activeRun.status)) return;
+    if (!activeRun || TERMINAL_RUN_STATUSES.includes(activeRun.status)) return;
     const timer = window.setInterval(() => void refreshRun(activeRun.id), 1200);
     return () => window.clearInterval(timer);
   }, [activeRun?.id, activeRun?.status]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      writeWorkflowDraft({
+        activeWorkflowId,
+        workflowName,
+        workflowDescription,
+        nodes,
+        edges,
+        selectedNodeId
+      });
+      setDraftSavedAt(new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [activeWorkflowId, workflowName, workflowDescription, nodes, edges, selectedNodeId]);
 
   const onNodesChange = useCallback((changes: NodeChange<WorkflowNode>[]) => {
     setNodes((current) => applyNodeChanges(changes, current));
@@ -193,17 +220,24 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   }, []);
 
   const onConnect = useCallback((connection: Connection) => {
+    const validationMessage = validateConnection(connection, nodes, edges);
+    if (validationMessage) {
+      setError(validationMessage);
+      return;
+    }
+    setError(null);
     setEdges((current) =>
       addEdge(
         {
           ...connection,
           id: `${connection.source}-${connection.sourceHandle || "out"}-${connection.target}`,
-          animated: connection.sourceHandle?.startsWith("class:") ?? false
+          animated: connection.sourceHandle?.startsWith("class:") ?? false,
+          label: connection.sourceHandle ? branchKeyLabel(connection.sourceHandle) : undefined
         },
         current
       )
     );
-  }, []);
+  }, [edges, nodes]);
 
   async function refreshAll() {
     setError(null);
@@ -220,7 +254,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       setClassifiers(loadedClassifiers);
       setChecklists(loadedChecklists);
       setRuns(loadedRuns);
-      if (!activeWorkflowId && loadedWorkflows[0]) {
+      if (!activeWorkflowId && !initialDraft && loadedWorkflows[0]) {
         loadWorkflowIntoCanvas(loadedWorkflows[0]);
       }
       if (!activeRunId && loadedRuns[0]) {
@@ -240,6 +274,16 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
     setEdges(workflow.definition.edges?.length ? workflow.definition.edges : defaultEdges);
     setSelectedNodeId(workflow.definition.nodes?.[0]?.id ?? defaultNodes[0].id);
     setMessage(`불러온 워크플로우: ${workflow.name}`);
+  }
+
+  function resetWorkflowDraft() {
+    setActiveWorkflowId("");
+    setWorkflowName("문서 자동화 워크플로우");
+    setWorkflowDescription("");
+    setNodes(defaultNodes.map(normalizeWorkflowNode));
+    setEdges(defaultEdges.map((edge) => ({ ...edge })));
+    setSelectedNodeId(defaultNodes[1]?.id ?? defaultNodes[0]?.id ?? null);
+    setMessage("새 워크플로우를 시작합니다.");
   }
 
   async function saveWorkflow() {
@@ -263,6 +307,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       setActiveWorkflowId(saved.id);
       setWorkflows((current) => [saved, ...current.filter((workflow) => workflow.id !== saved.id)]);
       setMessage("워크플로우를 저장했습니다.");
+      setDraftSavedAt("저장됨");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 저장에 실패했습니다.");
     } finally {
@@ -381,7 +426,11 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             </div>
             <select value={activeWorkflowId} onChange={(event) => {
               const workflow = workflows.find((item) => item.id === event.target.value);
-              if (workflow) loadWorkflowIntoCanvas(workflow);
+              if (workflow) {
+                loadWorkflowIntoCanvas(workflow);
+              } else {
+                resetWorkflowDraft();
+              }
             }}>
               <option value="">새 워크플로우</option>
               {workflows.map((workflow) => (
@@ -396,6 +445,9 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             <button type="button" onClick={() => void saveWorkflow()} disabled={Boolean(busy) || validation.errors.length > 0}>
               <Save size={16} /> 저장
             </button>
+            <span className="workflow-autosave">
+              자동 저장 {draftSavedAt ?? "대기"}
+            </span>
           </div>
 
           <div className="workflow-canvas">
@@ -478,29 +530,35 @@ function WorkflowCanvasNode({ data, selected }: NodeProps<WorkflowNode>) {
   const kind = data.kind;
   const branchKeys = data.branchKeys?.length ? data.branchKeys : ["default", "unknown", "needs_review"];
   return (
-    <div className={`workflow-node ${selected ? "selected" : ""}`}>
-      {kind !== "input" && <Handle type="target" position={Position.Left} />}
+    <div className={`workflow-node workflow-node-${kind} ${selected ? "selected" : ""}`}>
+      {kind !== "input" && <Handle className="workflow-handle workflow-handle-target" type="target" position={Position.Left} />}
       <div className="workflow-node-title">
         <NodeIcon kind={kind} />
         <strong>{data.label}</strong>
       </div>
       <span>{nodeKindDescription(kind)}</span>
       {kind === "branch" ? (
-        <div className="branch-handles">
+        <>
+          <div className="branch-handles">
+            {branchKeys.map((key) => (
+              <div key={key} className="branch-handle-row">
+                <small>{branchKeyLabel(key)}</small>
+              </div>
+            ))}
+          </div>
           {branchKeys.map((key, index) => (
-            <div key={key} className="branch-handle-row">
-              <small>{branchKeyLabel(key)}</small>
-              <Handle
-                id={key}
-                type="source"
-                position={Position.Right}
-                style={{ top: 58 + index * 22 }}
-              />
-            </div>
+            <Handle
+              key={key}
+              id={key}
+              className="workflow-handle workflow-handle-branch-source"
+              type="source"
+              position={Position.Right}
+              style={{ top: 76 + index * 26 }}
+            />
           ))}
-        </div>
+        </>
       ) : kind !== "export" ? (
-        <Handle type="source" position={Position.Right} />
+        <Handle className="workflow-handle workflow-handle-source" type="source" position={Position.Right} />
       ) : null}
     </div>
   );
@@ -727,7 +785,8 @@ function workflowEdge(source: string, target: string, sourceHandle?: string): Wo
     source,
     target,
     sourceHandle,
-    animated: sourceHandle?.startsWith("class:") ?? false
+    animated: sourceHandle?.startsWith("class:") ?? false,
+    label: sourceHandle ? branchKeyLabel(sourceHandle) : undefined
   };
 }
 
@@ -773,6 +832,73 @@ function syncBranchKeys(nodes: WorkflowNode[], classifierId: string, classifiers
     if (node.data.kind !== "branch") return node;
     return { ...node, data: { ...node.data, branchKeys } };
   });
+}
+
+function readWorkflowDraft(): WorkflowDraft | null {
+  try {
+    const raw = window.localStorage.getItem(WORKFLOW_DRAFT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<WorkflowDraft>;
+    if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) return null;
+    return {
+      activeWorkflowId: typeof parsed.activeWorkflowId === "string" ? parsed.activeWorkflowId : "",
+      workflowName: typeof parsed.workflowName === "string" && parsed.workflowName.trim() ? parsed.workflowName : "문서 자동화 워크플로우",
+      workflowDescription: typeof parsed.workflowDescription === "string" ? parsed.workflowDescription : "",
+      nodes: parsed.nodes.map(normalizeWorkflowNode),
+      edges: parsed.edges,
+      selectedNodeId: typeof parsed.selectedNodeId === "string" ? parsed.selectedNodeId : parsed.nodes[0]?.id ?? null
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeWorkflowDraft(draft: WorkflowDraft) {
+  try {
+    window.localStorage.setItem(
+      WORKFLOW_DRAFT_KEY,
+      JSON.stringify({
+        ...draft,
+        nodes: draft.nodes.map((node) => ({
+          id: node.id,
+          type: "workflow",
+          position: node.position,
+          data: node.data
+        })),
+        edges: draft.edges.map((edge) => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.sourceHandle,
+          targetHandle: edge.targetHandle,
+          label: edge.label,
+          animated: edge.animated,
+          data: edge.data
+        }))
+      })
+    );
+  } catch {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+}
+
+function validateConnection(connection: Connection, nodes: WorkflowNode[], edges: WorkflowEdge[]) {
+  if (!connection.source || !connection.target) return "연결할 시작/도착 노드가 필요합니다.";
+  if (connection.source === connection.target) return "같은 노드끼리는 연결할 수 없습니다.";
+  const source = nodes.find((node) => node.id === connection.source);
+  const target = nodes.find((node) => node.id === connection.target);
+  if (!source || !target) return "연결 대상 노드를 찾지 못했습니다.";
+  if (source.data.kind === "export") return "Export 뒤에는 노드를 연결할 수 없습니다.";
+  if (target.data.kind === "input") return "Input 앞에는 노드를 연결할 수 없습니다.";
+  if (target.data.kind === "branch" && source.data.kind !== "classifier") return "Branch 앞에는 Document Classifier만 연결하세요.";
+  if (source.data.kind === "branch" && !connection.sourceHandle) return "Branch는 default/unknown/class handle에서 연결하세요.";
+  if (edges.some((edge) => edge.source === connection.source && edge.target === connection.target && edge.sourceHandle === connection.sourceHandle)) {
+    return "이미 같은 연결이 있습니다.";
+  }
+  if (source.data.kind !== "branch" && edges.some((edge) => edge.source === connection.source)) {
+    return "이 노드의 기존 outgoing 연결을 먼저 삭제하세요.";
+  }
+  return null;
 }
 
 function validateWorkflow(nodes: WorkflowNode[], edges: WorkflowEdge[]) {

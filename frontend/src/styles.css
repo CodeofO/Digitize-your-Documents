@@ -338,6 +338,12 @@ textarea {
   box-shadow: 0 8px 20px rgba(31, 45, 41, 0.08);
   min-width: 180px;
   padding: 10px 12px;
+  position: relative;
+}
+
+.workflow-node-branch {
+  min-height: 158px;
+  min-width: 210px;
 }
 
 .workflow-node.selected {
@@ -355,9 +361,9 @@ textarea {
 .branch-handles {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 8px;
-  padding-right: 8px;
+  gap: 8px;
+  margin-top: 12px;
+  padding-right: 16px;
 }
 
 .branch-handle-row {
@@ -366,6 +372,38 @@ textarea {
   height: 18px;
   justify-content: flex-end;
   position: relative;
+}
+
+.workflow-handle {
+  background: #1d2529;
+  border: 2px solid #ffffff;
+  height: 12px !important;
+  pointer-events: auto;
+  width: 12px !important;
+}
+
+.workflow-handle-target {
+  left: -7px;
+}
+
+.workflow-handle-source,
+.workflow-handle-branch-source {
+  right: -7px;
+}
+
+.react-flow__edge-path {
+  stroke: #64736b;
+  stroke-width: 1.6;
+}
+
+.react-flow__edge-textbg {
+  fill: #ffffff;
+  stroke: #d7dfd8;
+}
+
+.react-flow__edge-text {
+  fill: #33423c;
+  font-size: 11px;
 }
 
 .workflow-run-bar {
@@ -408,6 +446,12 @@ textarea {
 
 .workflow-validation .danger {
   color: #9b3126;
+}
+
+.workflow-autosave {
+  color: #607069;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .workflow-config-select {
