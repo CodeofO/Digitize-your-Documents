@@ -24,7 +24,7 @@ const MODULE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const MODULE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
 
 type ModuleKind = "classifier" | "required-checker";
-type EvidenceType = "text_or_handwriting" | "checkbox" | "signature_or_stamp" | "visual_mark" | "other";
+type EvidenceType = string;
 
 type DocumentPage = {
   id: string;
@@ -55,6 +55,7 @@ type ClassCandidate = {
   class_name: string;
   description: string;
   signals: string[];
+  signals_text?: string;
 };
 
 type DocumentClassifier = {
@@ -179,8 +180,9 @@ type ModuleWorkspaceProps = {
   onResize: (event: PointerEvent<HTMLButtonElement>) => void;
 };
 
-const evidenceTypes: EvidenceType[] = ["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"];
-const evidenceTypeLabels: Record<EvidenceType, string> = {
+const evidenceTypes = ["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"] as const;
+const customEvidenceTypeValue = "__custom_evidence_type__";
+const evidenceTypeLabels: Record<string, string> = {
   text_or_handwriting: "문자/손글씨",
   checkbox: "체크박스",
   signature_or_stamp: "서명/도장",
@@ -914,7 +916,7 @@ function ClassifierConfigEditor(props: { draft: DocumentClassifier; onDraft: (dr
               <tr key={index}>
                 <td><input value={item.class_name} onChange={(event) => updateClass(index, { class_name: event.target.value })} /></td>
                 <td><textarea value={item.description} onChange={(event) => updateClass(index, { description: event.target.value })} /></td>
-                <td><textarea value={item.signals.join(", ")} onChange={(event) => updateClass(index, { signals: splitSignals(event.target.value) })} /></td>
+                <td><textarea value={signalText(item)} onChange={(event) => updateClass(index, { signals_text: event.target.value })} /></td>
                 <td>
                   <button type="button" className="icon-only danger-plain" onClick={() => props.onDraft({ ...draft, classes: draft.classes.filter((_, itemIndex) => itemIndex !== index) })}>
                     <Trash2 size={15} />
@@ -925,7 +927,7 @@ function ClassifierConfigEditor(props: { draft: DocumentClassifier; onDraft: (dr
           </tbody>
         </table>
       </div>
-      <button type="button" className="secondary" onClick={() => props.onDraft({ ...draft, classes: [...draft.classes, { class_name: "", description: "", signals: [] }] })}>
+      <button type="button" className="secondary" onClick={() => props.onDraft({ ...draft, classes: [...draft.classes, { class_name: "", description: "", signals: [], signals_text: "" }] })}>
         <Plus size={16} />
         문서 클래스 추가
       </button>
@@ -986,9 +988,22 @@ function RequiredChecklistEditor(props: {
                 <td><input value={item.item_name} onChange={(event) => updateItem(index, { item_name: event.target.value })} /></td>
                 <td><textarea value={item.description} onChange={(event) => updateItem(index, { description: event.target.value })} /></td>
                 <td>
-                  <select value={item.evidence_type} onChange={(event) => updateItem(index, { evidence_type: event.target.value as EvidenceType })}>
+                  <div className="evidence-type-control">
+                  <select
+                    value={isPresetEvidenceType(item.evidence_type) ? item.evidence_type : customEvidenceTypeValue}
+                    onChange={(event) => updateItem(index, { evidence_type: event.target.value === customEvidenceTypeValue ? "" : event.target.value })}
+                  >
                     {evidenceTypes.map((type) => <option key={type} value={type}>{evidenceTypeLabels[type]}</option>)}
+                    <option value={customEvidenceTypeValue}>직접 입력</option>
                   </select>
+                  {!isPresetEvidenceType(item.evidence_type) && (
+                    <input
+                      value={item.evidence_type}
+                      placeholder="증거 유형 입력"
+                      onChange={(event) => updateItem(index, { evidence_type: event.target.value })}
+                    />
+                  )}
+                  </div>
                 </td>
                 <td><input type="checkbox" checked={item.required} onChange={(event) => updateItem(index, { required: event.target.checked })} /></td>
                 <td>
@@ -1270,7 +1285,7 @@ function toClassifierPayload(config: DocumentClassifier) {
     .map((item) => ({
       class_name: item.class_name.trim(),
       description: item.description.trim(),
-      signals: item.signals.map((signal) => signal.trim()).filter(Boolean)
+      signals: signalsForPayload(item)
     }))
     .filter((item) => item.class_name && item.description);
   if (!config.name.trim()) throw new Error("분류 설정 이름을 입력하세요.");
@@ -1288,13 +1303,14 @@ function toChecklistPayload(config: RequiredFieldChecklist) {
     .map((item) => ({
       item_name: item.item_name.trim(),
       description: item.description.trim(),
-      evidence_type: item.evidence_type,
+      evidence_type: item.evidence_type.trim(),
       required: item.required,
       region_id: item.region_id || null
     }))
     .filter((item) => item.item_name && item.description);
   if (!config.name.trim()) throw new Error("체크리스트 이름을 입력하세요.");
   if (!items.length) throw new Error("체크 항목을 최소 1개 이상 입력하세요.");
+  if (items.some((item) => !item.evidence_type)) throw new Error("체크 항목의 증거 유형을 입력하세요.");
   return {
     name: config.name.trim(),
     description: config.description?.trim() || null,
@@ -1313,8 +1329,19 @@ function defaultRegion(index: number): SchemaRegion {
   return { id: `region_${Date.now()}_${index}`, name: `영역 ${index}`, page: 1, x: 0.55, y: 0.55, width: 0.35, height: 0.2 };
 }
 
-function splitSignals(value: string): string[] {
-  return value.split(",").map((item) => item.trim()).filter(Boolean);
+function signalText(item: ClassCandidate): string {
+  return item.signals_text ?? item.signals.join(", ");
+}
+
+function signalsForPayload(item: ClassCandidate): string[] {
+  if (item.signals_text === undefined) {
+    return item.signals.map((signal) => signal.trim()).filter(Boolean);
+  }
+  return item.signals_text.split(/\n+/).map((signal) => signal.trim()).filter(Boolean);
+}
+
+function isPresetEvidenceType(value: string): boolean {
+  return evidenceTypes.includes(value as (typeof evidenceTypes)[number]);
 }
 
 function documentPageThumbnailSrc(documentId: string, page: number, width: number) {

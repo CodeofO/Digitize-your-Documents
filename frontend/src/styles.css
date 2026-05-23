@@ -1925,6 +1925,11 @@ textarea {
   padding-right: 8px;
 }
 
+.evidence-type-control {
+  display: grid;
+  gap: 4px;
+}
+
 .checklist-table input[type="checkbox"] {
   min-height: 38px;
   width: auto;

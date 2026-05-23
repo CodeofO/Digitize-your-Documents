@@ -273,7 +273,7 @@ class SchemaDescriptionRecommendationRead(BaseModel):
 
 
 ClassificationStatus = Literal["classified", "unknown"]
-RequiredFieldEvidenceType = Literal["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"]
+RequiredFieldEvidenceType = str
 RequiredFieldItemStatus = Literal["present", "missing", "uncertain", "not_applicable"]
 RequiredFieldOverallStatus = Literal["complete", "incomplete", "needs_review"]
 
@@ -409,11 +409,11 @@ class ClassificationBatchRead(BaseModel):
 class RequiredFieldItem(BaseModel):
     item_name: str = Field(min_length=1, max_length=120)
     description: str = Field(min_length=1, max_length=1000)
-    evidence_type: RequiredFieldEvidenceType = "text_or_handwriting"
+    evidence_type: RequiredFieldEvidenceType = Field(default="text_or_handwriting", min_length=1, max_length=120)
     required: bool = True
     region_id: str | None = Field(default=None, max_length=80)
 
-    @field_validator("item_name", "description")
+    @field_validator("item_name", "description", "evidence_type")
     @classmethod
     def validate_text(cls, value: str) -> str:
         return value.strip()

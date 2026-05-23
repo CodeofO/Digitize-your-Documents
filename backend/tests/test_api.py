@@ -1289,6 +1289,24 @@ def test_required_field_checklist_single_job_and_region_validation() -> None:
             )
             assert invalid.status_code == 422
 
+            custom = client.post(
+                "/api/required-field-checklists",
+                json={
+                    "name": "custom_evidence_checklist",
+                    "regions": [],
+                    "items": [
+                        {
+                            "item_name": "수기 메모",
+                            "description": "사용자가 직접 정의한 증거 유형을 확인합니다.",
+                            "evidence_type": "수기 메모/특이사항",
+                            "required": True,
+                        }
+                    ],
+                },
+            )
+            assert custom.status_code == 200, custom.text
+            assert custom.json()["items"][0]["evidence_type"] == "수기 메모/특이사항"
+
             checklist = create_required_field_checklist(client)
             document = upload_png(client)
             response = client.post(
