@@ -86,7 +86,7 @@ def _prepare_extraction_job(job_id: str) -> ExtractionContext | None:
         job = db.get(ExtractionJob, job_id)
         if not job:
             return None
-        if job.status == "canceled":
+        if job.status != "queued":
             return None
 
         job.status = "running"

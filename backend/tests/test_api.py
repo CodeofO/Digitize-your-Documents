@@ -38,6 +38,7 @@ def test_system_status_mock_mode(monkeypatch) -> None:
     try:
         monkeypatch.setenv("VLM_PROVIDER", "mock")
         monkeypatch.setenv("UPLOAD_MAX_BATCH_FILES", "1234")
+        monkeypatch.setenv("UPLOAD_CHUNK_FILES", "10")
         get_settings.cache_clear()
         with get_client() as client:
             response = client.get("/api/system/status")
@@ -46,6 +47,10 @@ def test_system_status_mock_mode(monkeypatch) -> None:
         assert payload["vlm_provider"] == "mock"
         assert payload["is_mock"] is True
         assert payload["upload_max_batch_files"] == 1234
+        assert payload["upload_chunk_files"] == 10
+        assert payload["workflow_max_workers"] == 1
+        assert payload["document_page_max_long_edge"] == 3000
+        assert payload["document_page_jpeg_quality"] == 88
         assert "vlm_api_key" not in payload
     finally:
         get_settings.cache_clear()
@@ -608,7 +613,7 @@ def test_image_upload() -> None:
         assert document["created_at"]
         image = client.get(document["pages"][0]["image_url"])
         assert image.status_code == 200
-        assert image.headers["content-type"] == "image/png"
+        assert image.headers["content-type"] == "image/jpeg"
         thumbnail = client.get(f"/api/documents/{document['document_id']}/pages/1/thumbnail?width=96")
         assert thumbnail.status_code == 200
         assert thumbnail.headers["content-type"] == "image/jpeg"
@@ -677,7 +682,7 @@ def test_office_upload_for_key_information_extractor(monkeypatch) -> None:
             assert document["page_count"] == 1
             image = client.get(document["pages"][0]["image_url"])
             assert image.status_code == 200
-            assert image.headers["content-type"] == "image/png"
+            assert image.headers["content-type"] == "image/jpeg"
 
 
 def test_extraction_fails_without_vlm_credentials() -> None:
@@ -1176,6 +1181,53 @@ def test_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:
         assert {item["status"] for item in payload["items"]} == {"canceled"}
 
 
+def test_batch_init_items_start_flow(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_batch_jobs", lambda batch_id, job_ids: None)
+
+    with get_client() as client:
+        schema = create_schema(client)
+        initialized = client.post("/api/batches/init", json={"schema_id": schema["id"], "total_count": 2})
+        assert initialized.status_code == 200, initialized.text
+        batch = initialized.json()
+        assert batch["status"] == "uploading"
+        assert batch["uploaded_count"] == 0
+
+        early_start = client.post(f"/api/batches/{batch['id']}/start")
+        assert early_start.status_code == 422
+        assert early_start.json()["detail"]["uploaded_count"] == 0
+
+        partial = client.post(
+            f"/api/batches/{batch['id']}/items",
+            data={"client_file_ids": ["0:first.png:1:1"]},
+            files=[("files", ("first.png", ONE_BY_ONE_PNG, "image/png"))],
+        )
+        assert partial.status_code == 200, partial.text
+        partial_resume = client.post(f"/api/batches/{batch['id']}/resume")
+        assert partial_resume.status_code == 422, partial_resume.text
+        assert partial_resume.json()["detail"]["uploaded_count"] == 1
+        assert partial_resume.json()["detail"]["total_count"] == 2
+
+        appended = client.post(
+            f"/api/batches/{batch['id']}/items",
+            data={"client_file_ids": ["1:second.png:1:1"]},
+            files=[("files", ("second.png", ONE_BY_ONE_PNG, "image/png"))],
+        )
+        assert appended.status_code == 200, appended.text
+        payload = appended.json()
+        assert payload["uploaded_count"] == 2
+        assert payload["queued_count"] == 2
+        assert payload["preprocessing_count"] == 0
+
+        summary = client.get(f"/api/batches/{batch['id']}/summary")
+        assert summary.status_code == 200
+        assert summary.json()["items"] == []
+        assert summary.json()["queued_count"] == 2
+
+        started = client.post(f"/api/batches/{batch['id']}/start")
+        assert started.status_code == 200, started.text
+        assert started.json()["status"] == "running"
+
+
 def test_batch_export_csv_and_json_mock_mode() -> None:
     try:
         os.environ["VLM_PROVIDER"] = "mock"
@@ -1595,13 +1647,227 @@ def test_workflow_definition_validation_and_branch_run_mock_mode() -> None:
             assert "charset=utf-8" in csv_response.headers["content-type"]
             header = csv_response.text.splitlines()[0]
             assert "classification_status" in header
+            assert "upload_duration_ms" in header
+            assert "inference_duration_ms" in header
             assert "kie_invoice_number" in header
             assert "required_성명_status" in header
             assert csv_response.text.index("a_first.png") < csv_response.text.index("z_last.png")
 
             json_response = client.get(f"/api/workflow-runs/{run['id']}/export?format=json")
             assert json_response.status_code == 200
+            assert isinstance(run["upload_duration_ms"], int)
+            assert isinstance(run["inference_duration_ms"], int)
+            assert all(isinstance(item["upload_duration_ms"], int) for item in run["items"])
+            assert all(isinstance(item["inference_duration_ms"], int) for item in run["items"])
+            assert json_response.json()["rows"][0]["upload_duration_ms"] is not None
             assert json_response.json()["rows"][0]["class_name"] == "contract"
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_resume_and_discard_partial_upload(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_workflow_run", lambda run_id: None)
+
+    with get_client() as client:
+        schema = create_schema(client, name="workflow_resume_schema")
+        classifier = create_document_classifier(client, name="workflow_resume_classifier")
+        checklist = create_required_field_checklist(client, name="workflow_resume_checklist")
+        workflow = client.post(
+            "/api/workflows",
+            json={"name": "resume_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        assert workflow.status_code == 200, workflow.text
+
+        initialized = client.post(f"/api/workflows/{workflow.json()['id']}/runs/init", json={"total_count": 2})
+        assert initialized.status_code == 200, initialized.text
+        run_id = initialized.json()["id"]
+
+        appended = client.post(
+            f"/api/workflow-runs/{run_id}/items",
+            data={"client_file_ids": ["0:first.png:1:1"]},
+            files=[("files", ("first.png", ONE_BY_ONE_PNG, "image/png"))],
+        )
+        assert appended.status_code == 200, appended.text
+        document_id = appended.json()["items"][0]["document_id"]
+        assert appended.json()["uploaded_count"] == 1
+        assert appended.json()["total_count"] == 2
+
+        resumed = client.post(f"/api/workflow-runs/{run_id}/resume")
+        assert resumed.status_code == 422, resumed.text
+        payload = resumed.json()["detail"]
+        assert payload["uploaded_count"] == 1
+        assert payload["total_count"] == 2
+        assert payload["missing_count"] == 1
+
+        appended = client.post(
+            f"/api/workflow-runs/{run_id}/items",
+            data={"client_file_ids": ["1:second.png:1:1"]},
+            files=[("files", ("second.png", ONE_BY_ONE_PNG, "image/png"))],
+        )
+        assert appended.status_code == 200, appended.text
+        resumed = client.post(f"/api/workflow-runs/{run_id}/resume")
+        assert resumed.status_code == 200, resumed.text
+        payload = resumed.json()
+        assert payload["status"] == "running"
+        assert payload["total_count"] == 2
+        assert payload["queued_count"] == 2
+
+        discarded = client.post(f"/api/workflow-runs/{run_id}/discard")
+        assert discarded.status_code == 200, discarded.text
+        payload = discarded.json()
+        assert payload["status"] == "canceled"
+        assert payload["items"] == []
+        assert payload["uploaded_count"] == 0
+        assert client.get(f"/api/documents/{document_id}").status_code == 404
+
+
+def test_workflow_items_preserve_upload_index_order(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_workflow_run", lambda run_id: None)
+
+    with get_client() as client:
+        schema = create_schema(client, name="workflow_upload_index_schema")
+        classifier = create_document_classifier(client, name="workflow_upload_index_classifier")
+        checklist = create_required_field_checklist(client, name="workflow_upload_index_checklist")
+        workflow = client.post(
+            "/api/workflows",
+            json={"name": "upload_index_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        assert workflow.status_code == 200, workflow.text
+
+        initialized = client.post(f"/api/workflows/{workflow.json()['id']}/runs/init", json={"total_count": 2})
+        assert initialized.status_code == 200, initialized.text
+        run_id = initialized.json()["id"]
+
+        appended = client.post(
+            f"/api/workflow-runs/{run_id}/items",
+            data={
+                "client_file_ids": ["1:z_last.png:1:1", "0:a_first.png:1:1"],
+                "upload_indexes": ["1", "0"],
+            },
+            files=[
+                ("files", ("z_last.png", ONE_BY_ONE_PNG, "image/png")),
+                ("files", ("a_first.png", ONE_BY_ONE_PNG, "image/png")),
+            ],
+        )
+        assert appended.status_code == 200, appended.text
+        payload = appended.json()
+        assert [item["filename"] for item in payload["items"]] == ["a_first.png", "z_last.png"]
+        assert [item["upload_index"] for item in payload["items"]] == [0, 1]
+
+
+def test_workflow_pause_preserves_uploads_and_restart_requeues(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_workflow_run", lambda run_id: None)
+
+    with get_client() as client:
+        schema = create_schema(client, name="workflow_pause_schema")
+        classifier = create_document_classifier(client, name="workflow_pause_classifier")
+        checklist = create_required_field_checklist(client, name="workflow_pause_checklist")
+        workflow = client.post(
+            "/api/workflows",
+            json={"name": "pause_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        assert workflow.status_code == 200, workflow.text
+        initialized = client.post(f"/api/workflows/{workflow.json()['id']}/runs/init", json={"total_count": 2})
+        assert initialized.status_code == 200, initialized.text
+        run_id = initialized.json()["id"]
+        appended = client.post(
+            f"/api/workflow-runs/{run_id}/items",
+            data={"client_file_ids": ["0:first.png:1:1", "1:second.png:1:1"], "upload_indexes": ["0", "1"]},
+            files=[
+                ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+            ],
+        )
+        assert appended.status_code == 200, appended.text
+        started = client.post(f"/api/workflow-runs/{run_id}/start")
+        assert started.status_code == 200, started.text
+
+        paused = client.post(f"/api/workflow-runs/{run_id}/pause")
+        assert paused.status_code == 200, paused.text
+        payload = paused.json()
+        assert payload["status"] == "paused"
+        assert payload["uploaded_count"] == 2
+        assert {item["status"] for item in payload["items"]} == {"paused"}
+
+        restarted = client.post(f"/api/workflow-runs/{run_id}/restart")
+        assert restarted.status_code == 200, restarted.text
+        payload = restarted.json()
+        assert payload["status"] == "running"
+        assert payload["queued_count"] == 2
+        assert {item["status"] for item in payload["items"]} == {"queued"}
+
+
+def test_workflow_restart_retries_failed_items_without_reupload(monkeypatch) -> None:
+    def fake_failed_execute(db, item, graph):
+        return {
+            "document_id": item.document_id,
+            "filename": item.filename,
+            "status": "failed",
+            "error_message": "VLM_PROVIDER_REQUEST_FAILED: invalid api key",
+            "branch_path": None,
+            "path_node_ids": ["classifier"],
+            "completed_node_ids": [],
+            "current_node_id": None,
+            "current_node_kind": None,
+            "current_node_label": None,
+            "node_results": {},
+        }
+
+    def fake_success_execute(db, item, graph):
+        return {
+            "document_id": item.document_id,
+            "filename": item.filename,
+            "status": "completed",
+            "error_message": None,
+            "branch_path": "class:contract",
+            "path_node_ids": ["classifier"],
+            "completed_node_ids": ["classifier"],
+            "current_node_id": None,
+            "current_node_kind": None,
+            "current_node_label": None,
+            "node_results": {},
+            "classification": {"status": "classified", "class_name": "contract"},
+            "kie_values": {},
+            "required_overall_status": None,
+            "required_items": {},
+        }
+
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_failed_execute)
+        with get_client() as client:
+            schema = create_schema(client, name="workflow_restart_schema")
+            classifier = create_document_classifier(client, name="workflow_restart_classifier")
+            checklist = create_required_field_checklist(client, name="workflow_restart_checklist")
+            workflow = client.post(
+                "/api/workflows",
+                json={"name": "restart_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+            )
+            assert workflow.status_code == 200, workflow.text
+            run_response = client.post(
+                f"/api/workflows/{workflow.json()['id']}/runs",
+                files=[
+                    ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert run_response.status_code == 200, run_response.text
+            run_id = run_response.json()["id"]
+            failed_run = client.get(f"/api/workflow-runs/{run_id}").json()
+            assert failed_run["status"] == "completed_with_errors"
+            assert failed_run["failed_count"] == 2
+            document_ids = [item["document_id"] for item in failed_run["items"]]
+
+            monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_success_execute)
+            restarted = client.post(f"/api/workflow-runs/{run_id}/restart")
+            assert restarted.status_code == 200, restarted.text
+            payload = client.get(f"/api/workflow-runs/{run_id}").json()
+            assert payload["status"] == "completed"
+            assert payload["uploaded_count"] == 2
+            assert [item["document_id"] for item in payload["items"]] == document_ids
+            assert {item["status"] for item in payload["items"]} == {"completed"}
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
@@ -1721,7 +1987,7 @@ def test_workflow_progress_payload_marks_current_and_completed_nodes(monkeypatch
         get_settings.cache_clear()
 
 
-def test_workflow_run_uses_batch_max_workers(monkeypatch) -> None:
+def test_workflow_run_uses_workflow_max_workers(monkeypatch) -> None:
     active = 0
     max_active = 0
     lock = threading.Lock()
@@ -1755,7 +2021,7 @@ def test_workflow_run_uses_batch_max_workers(monkeypatch) -> None:
     monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_execute)
     try:
         os.environ["VLM_PROVIDER"] = "mock"
-        os.environ["BATCH_MAX_WORKERS"] = "2"
+        os.environ["WORKFLOW_MAX_WORKERS"] = "2"
         get_settings.cache_clear()
         with get_client() as client:
             schema = create_schema(client, name="workflow_parallel_schema")
@@ -1775,7 +2041,7 @@ def test_workflow_run_uses_batch_max_workers(monkeypatch) -> None:
             assert run["status"] == "completed"
             assert max_active == 2
     finally:
-        os.environ["BATCH_MAX_WORKERS"] = "4"
+        os.environ["WORKFLOW_MAX_WORKERS"] = "1"
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
 

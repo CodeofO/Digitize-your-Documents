@@ -40,6 +40,7 @@ def _run_lightweight_migrations() -> None:
 
     column_specs = {
         "documents": [
+            ("error_message", "TEXT"),
             ("document_type", "VARCHAR"),
             ("language", "VARCHAR"),
             ("ai_summary", "TEXT"),
@@ -55,6 +56,26 @@ def _run_lightweight_migrations() -> None:
         ],
         "extraction_results": [
             ("reviewed_fields", "TEXT NOT NULL DEFAULT '[]'"),
+        ],
+        "batch_items": [
+            ("client_file_id", "VARCHAR"),
+        ],
+        "classification_batch_items": [
+            ("client_file_id", "VARCHAR"),
+        ],
+        "required_field_check_batch_items": [
+            ("client_file_id", "VARCHAR"),
+        ],
+        "workflow_runs": [
+            ("upload_duration_ms", "INTEGER"),
+            ("inference_duration_ms", "INTEGER"),
+            ("inference_started_at", "DATETIME"),
+        ],
+        "workflow_run_items": [
+            ("client_file_id", "VARCHAR"),
+            ("upload_index", "INTEGER"),
+            ("upload_duration_ms", "INTEGER"),
+            ("inference_duration_ms", "INTEGER"),
         ],
     }
 

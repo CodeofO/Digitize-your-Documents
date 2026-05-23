@@ -42,7 +42,7 @@ const LEFT_PANE_PERCENT_KEY = "digitize_left_pane_percent_v1";
 const OUTPUT_FORMATS = ["string", "float", "date", "bool"] as const;
 const KIE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const KIE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
-const LARGE_UPLOAD_CHUNK_SIZE = 100;
+const DEFAULT_UPLOAD_CHUNK_FILES = 10;
 const BATCH_FILE_ROW_HEIGHT = 84;
 const BATCH_FILE_OVERSCAN = 8;
 const DEFAULT_MAX_BATCH_UPLOAD_FILES = 10000;
@@ -238,6 +238,11 @@ type SystemStatus = {
   has_vlm_credentials: boolean;
   is_mock: boolean;
   upload_max_batch_files: number;
+  upload_chunk_files: number;
+  preprocess_max_workers: number;
+  workflow_max_workers: number;
+  document_page_max_long_edge: number;
+  document_page_jpeg_quality: number;
 };
 
 type VlmSettings = {
@@ -264,6 +269,12 @@ type HomeWorkflowRun = {
   completed_count: number;
   failed_count: number;
   needs_review_count: number;
+  uploaded_count?: number;
+  preprocessing_count?: number;
+  ready_count?: number;
+  queued_count?: number;
+  running_count?: number;
+  progress_phase?: string;
   progress: number;
   items: { status: string }[];
   created_at: string;
@@ -276,6 +287,13 @@ type HomeModuleBatch = {
   completed_count: number;
   failed_count: number;
   canceled_count: number;
+  uploaded_count?: number;
+  preprocessing_count?: number;
+  ready_count?: number;
+  queued_count?: number;
+  running_count?: number;
+  needs_review_count?: number;
+  progress_phase?: string;
   progress: number;
   items: { status: string }[];
   created_at: string;
@@ -293,6 +311,8 @@ type HomeMonitorItem = {
   progress: number;
   totalCount: number;
   doneCount: number;
+  uploadedCount: number;
+  preprocessingCount: number;
   runningCount: number;
   queuedCount: number;
   failedCount: number;
@@ -339,6 +359,13 @@ type Batch = {
   completed_count: number;
   failed_count: number;
   canceled_count: number;
+  uploaded_count?: number;
+  preprocessing_count?: number;
+  ready_count?: number;
+  queued_count?: number;
+  running_count?: number;
+  needs_review_count?: number;
+  progress_phase?: string;
   progress: number;
   items: BatchItem[];
   created_at: string;
@@ -841,14 +868,15 @@ export default function App() {
     () =>
       batches.some(
         (batch) =>
-          batch.status === "running" ||
-          batch.items.some((item) => item.status === "queued" || item.status === "running")
+          batchIsActive(batch) ||
+          batch.items.some((item) => ["preprocessing", "queued", "running"].includes(item.status))
       ),
     [batches]
   );
-  const shouldPollActiveBatch = Boolean(activeBatchId && (!activeBatch || batchCanCancel(activeBatch)));
+  const shouldPollActiveBatch = Boolean(activeBatchId && (!activeBatch || batchIsActive(activeBatch)));
   const batchPollingActive = shouldPollActiveBatch || hasActiveBatch;
   const uploadMaxBatchFiles = systemStatus?.upload_max_batch_files ?? DEFAULT_MAX_BATCH_UPLOAD_FILES;
+  const uploadChunkFiles = systemStatus?.upload_chunk_files ?? DEFAULT_UPLOAD_CHUNK_FILES;
   const hasPreparedSchema =
     Boolean(document) || Boolean(schema) || batchFiles.length > 0 || schemaDirty || hasMeaningfulSchema(fields);
   const schemaLibraryVisible = schemaLibraryOpen && hasPreparedSchema;
@@ -1209,8 +1237,12 @@ export default function App() {
 
   async function refreshBatch(batchId: string) {
     try {
-      const nextBatch = await api<Batch>(`/api/batches/${batchId}`);
-      setBatches((current) => [nextBatch, ...current.filter((item) => item.id !== nextBatch.id)].slice(0, 12));
+      const nextBatch = await api<Batch>(`/api/batches/${batchId}/summary`);
+      setBatches((current) => {
+        const existing = current.find((item) => item.id === nextBatch.id);
+        const merged = nextBatch.items.length || !existing ? nextBatch : { ...nextBatch, items: existing.items };
+        return [merged, ...current.filter((item) => item.id !== nextBatch.id)].slice(0, 12);
+      });
     } catch {
       await refreshBatches();
     }
@@ -1989,28 +2021,36 @@ export default function App() {
         }
         selectedSchema = saved;
       }
-      const createdBatches: Batch[] = [];
+      const uploadFiles = sortFilesByDisplayName(batchFiles);
+      const initializedBatch = await api<Batch>("/api/batches/init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schema_id: selectedSchema.id, total_count: uploadFiles.length })
+      });
+      setBatches((current) => [initializedBatch, ...current.filter((item) => item.id !== initializedBatch.id)].slice(0, 12));
       let uploadedCount = 0;
-      for (const chunk of chunkFiles(batchFiles, LARGE_UPLOAD_CHUNK_SIZE)) {
-        setBusy(`${uploadedCount.toLocaleString()} / ${batchFiles.length.toLocaleString()} 문서 업로드 중`);
+      let latestBatch = initializedBatch;
+      for (let chunkStart = 0; chunkStart < uploadFiles.length; chunkStart += uploadChunkFiles) {
+        const chunk = uploadFiles.slice(chunkStart, chunkStart + uploadChunkFiles);
+        setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 업로드 중`);
         const form = new FormData();
-        form.append("schema_id", selectedSchema.id);
-        chunk.forEach((file) => form.append("files", file));
-        const batch = await api<Batch>("/api/batches", { method: "POST", body: form });
+        chunk.forEach((file, index) => {
+          form.append("files", file);
+          form.append("client_file_ids", clientFileId(file, chunkStart + index));
+        });
+        latestBatch = await api<Batch>(`/api/batches/${initializedBatch.id}/items`, { method: "POST", body: form });
         uploadedCount += chunk.length;
-        createdBatches.push(batch);
-        setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 12));
-        setBusy(`${uploadedCount.toLocaleString()} / ${batchFiles.length.toLocaleString()} 문서 업로드 중`);
+        setBatches((current) => [latestBatch, ...current.filter((item) => item.id !== latestBatch.id)].slice(0, 12));
+        setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 업로드 중`);
       }
-      const batch = createdBatches[0];
+      const batch = await api<Batch>(`/api/batches/${initializedBatch.id}/start`, { method: "POST" });
       if (!batch) throw new Error("배치 작업을 생성하지 못했습니다.");
+      setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 12));
       setActiveBatchId(batch.id);
       setActiveBatchItemId(batch.items[0]?.id ?? null);
       setBatchFiles([]);
       setBatchMessage(
-        createdBatches.length > 1
-          ? `${batchFiles.length.toLocaleString()}개 파일을 ${createdBatches.length.toLocaleString()}개 배치로 나누어 시작했습니다.`
-          : `${batch.total_count}개 파일의 배치 추출을 시작했습니다. 좌측 파일 목록에서 항목을 선택해 결과를 확인하세요.`
+        `${batch.total_count}개 파일의 배치 추출을 시작했습니다. 좌측 파일 목록에서 항목을 선택해 결과를 확인하세요.`
       );
       if (batch.items[0]) {
         await openBatchItem(batch.id, batch.items[0].id, batch);
@@ -2025,14 +2065,35 @@ export default function App() {
     }
   }
 
-  async function cancelBatch(batchId: string) {
-    setBusy("배치 추출 중단 중");
+  async function discardBatch(batchId: string) {
+    setBusy("배치 추출 중단·정리 중");
     setError(null);
     setBatchMessage(null);
     try {
-      const canceled = await api<Batch>(`/api/batches/${batchId}/cancel`, { method: "POST" });
-      setBatches((current) => current.map((item) => (item.id === canceled.id ? canceled : item)));
-      setBatchMessage("배치 중단을 요청했습니다. 이미 VLM 호출 중인 항목은 현재 호출이 끝난 뒤 중단 상태로 정리됩니다.");
+      const discarded = await api<Batch>(`/api/batches/${batchId}/discard`, { method: "POST" });
+      setBatches((current) => [discarded, ...current.filter((item) => item.id !== discarded.id)].slice(0, 12));
+      setActiveBatchItemId(null);
+      setDocument(null);
+      setJob(null);
+      setBatchMessage("배치 기록만 남기고 업로드 산출물을 정리했습니다.");
+      await refreshBatches();
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function resumeBatch(batchId: string) {
+    setBusy("배치 추출 계속 처리 중");
+    setError(null);
+    setBatchMessage(null);
+    try {
+      const resumed = await api<Batch>(`/api/batches/${batchId}/resume`, { method: "POST" });
+      setBatches((current) => [resumed, ...current.filter((item) => item.id !== resumed.id)].slice(0, 12));
+      setActiveBatchId(resumed.id);
+      setActiveBatchItemId(resumed.items[0]?.id ?? null);
+      setBatchMessage("등록된 파일 기준으로 배치 처리를 계속합니다.");
       await refreshBatches();
     } catch (err) {
       setError(toFriendlyError(err));
@@ -2232,11 +2293,13 @@ export default function App() {
           kind={mode}
           leftPanePercent={leftPanePercent}
           uploadMaxBatchFiles={uploadMaxBatchFiles}
+          uploadChunkFiles={uploadChunkFiles}
           onResize={startResize}
         />
       ) : mode === "workflow" ? (
         <WorkflowBuilder
           uploadMaxBatchFiles={uploadMaxBatchFiles}
+          uploadChunkFiles={uploadChunkFiles}
           onCreateSchema={() => navigateMode("key-info")}
           onCreateClassifier={() => navigateMode("classifier")}
           onCreateChecklist={() => navigateMode("required-checker")}
@@ -2281,7 +2344,8 @@ export default function App() {
                     batch={activeBatch}
                     activeItemId={activeBatchItem?.id ?? null}
                     onOpenItem={(itemId) => void openBatchItem(activeBatch.id, itemId)}
-                    onCancelBatch={(batchId) => void cancelBatch(batchId)}
+                    onDiscardBatch={(batchId) => void discardBatch(batchId)}
+                    onResumeBatch={(batchId) => void resumeBatch(batchId)}
                     onRefresh={() => void refreshBatches()}
                   />
                 )}
@@ -2396,7 +2460,8 @@ export default function App() {
                 batch={activeBatch}
                 item={activeBatchItem}
                 onRefresh={() => void refreshBatches()}
-                onCancelBatch={(batchId) => void cancelBatch(batchId)}
+                onDiscardBatch={(batchId) => void discardBatch(batchId)}
+                onResumeBatch={(batchId) => void resumeBatch(batchId)}
               />
             ) : (
               <ReviewPanel
@@ -2535,7 +2600,8 @@ export default function App() {
               setBatchMessage(null);
             }}
             onRunBatch={() => void runBatchUpload()}
-            onCancelBatch={(batchId) => void cancelBatch(batchId)}
+            onDiscardBatch={(batchId) => void discardBatch(batchId)}
+            onResumeBatch={(batchId) => void resumeBatch(batchId)}
             onRefresh={() => void refreshBatches()}
             onOpenItem={(batchId, itemId) => {
               setBatchOpen(false);
@@ -2767,6 +2833,8 @@ function HomeMonitorPanel(props: {
                 <strong>{item.title}</strong>
                 <small>
                   {item.doneCount.toLocaleString()} / {item.totalCount.toLocaleString()} 처리
+                  {item.uploadedCount ? ` · ${item.uploadedCount.toLocaleString()} 업로드됨` : ""}
+                  {item.preprocessingCount ? ` · ${item.preprocessingCount.toLocaleString()} 전처리` : ""}
                   {item.runningCount ? ` · ${item.runningCount.toLocaleString()} 실행 중` : ""}
                   {item.queuedCount ? ` · ${item.queuedCount.toLocaleString()} 대기` : ""}
                   {item.failedCount ? ` · ${item.failedCount.toLocaleString()} 실패` : ""}
@@ -2803,11 +2871,13 @@ function buildHomeMonitorItems(
     moduleLabel: "워크플로우",
     title: "워크플로우 실행",
     status: run.status,
-    progress: progressFromCounts(run.items, run.total_count, run.progress),
+    progress: run.progress ?? progressFromCounts(run.items, run.total_count, run.progress),
     totalCount: run.total_count,
-    doneCount: terminalItemCount(run.items, run.total_count),
-    runningCount: run.items.filter((item) => item.status === "running").length,
-    queuedCount: run.items.filter((item) => item.status === "queued").length,
+    doneCount: Math.min(run.total_count, run.completed_count + run.failed_count),
+    uploadedCount: run.uploaded_count ?? run.items.length,
+    preprocessingCount: run.preprocessing_count ?? run.items.filter((item) => item.status === "preprocessing").length,
+    runningCount: run.running_count ?? run.items.filter((item) => item.status === "running").length,
+    queuedCount: run.queued_count ?? run.items.filter((item) => item.status === "queued").length,
     failedCount: run.failed_count,
     createdAt: run.created_at
   }));
@@ -2825,18 +2895,20 @@ function buildHomeMonitorItems(
 }
 
 function homeBatchToMonitorItem(batch: HomeModuleBatch | Batch, target: HomeMonitorTarget, moduleLabel: string): HomeMonitorItem {
-  const runningCount = batch.items.filter((item) => item.status === "running").length;
-  const queuedCount = batch.items.filter((item) => item.status === "queued").length;
-  const doneCount = terminalItemCount(batch.items, batch.total_count);
+  const runningCount = batch.running_count ?? batch.items.filter((item) => item.status === "running").length;
+  const queuedCount = batch.queued_count ?? batch.items.filter((item) => item.status === "queued").length;
+  const doneCount = Math.min(batch.total_count, batch.completed_count + batch.failed_count + batch.canceled_count);
   return {
     id: batch.id,
     target,
     moduleLabel,
     title: `${moduleLabel} 배치`,
     status: batch.status,
-    progress: progressFromCounts(batch.items, batch.total_count, batch.progress),
+    progress: batch.progress ?? progressFromCounts(batch.items, batch.total_count, batch.progress),
     totalCount: batch.total_count,
     doneCount,
+    uploadedCount: batch.uploaded_count ?? batch.items.length,
+    preprocessingCount: batch.preprocessing_count ?? batch.items.filter((item) => item.status === "preprocessing").length,
     runningCount,
     queuedCount,
     failedCount: batch.failed_count,
@@ -2849,7 +2921,7 @@ function hasRunningHomeItems(items: { status: string }[]) {
 }
 
 function isActiveHomeStatus(status: string) {
-  return ["queued", "running", "cancel_requested", "canceling"].includes(status);
+  return ["uploading", "preprocessing", "queued", "running", "cancel_requested", "canceling"].includes(status);
 }
 
 function terminalItemCount(items: { status: string }[], totalCount: number) {
@@ -3217,15 +3289,21 @@ function BatchFileRail(props: {
   batch: Batch;
   activeItemId: string | null;
   onOpenItem: (itemId: string) => void;
-  onCancelBatch: (batchId: string) => void;
+  onDiscardBatch: (batchId: string) => void;
+  onResumeBatch: (batchId: string) => void;
   onRefresh: () => void;
 }) {
+  const uploadedCount = props.batch.uploaded_count ?? props.batch.items.length;
+  const preprocessingCount = props.batch.preprocessing_count ?? props.batch.items.filter((item) => item.status === "preprocessing").length;
+  const runningCount = props.batch.running_count ?? props.batch.items.filter((item) => item.status === "running").length;
+  const queuedCount = props.batch.queued_count ?? props.batch.items.filter((item) => item.status === "queued").length;
   return (
     <aside className="batch-file-rail" aria-label="배치 파일">
       <div className="batch-rail-header">
         <div>
           <p className="eyebrow">배치</p>
           <strong>{props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count} / {props.batch.total_count}</strong>
+          <span>{uploadedCount} / {props.batch.total_count} 업로드됨 · {preprocessingCount} 전처리 · {runningCount} 실행 · {queuedCount} 대기</span>
         </div>
         <button type="button" className="icon-only secondary compact" title="배치 새로고침" onClick={props.onRefresh}>
           <RefreshCw size={14} />
@@ -3239,9 +3317,14 @@ function BatchFileRail(props: {
         <a className="secondary compact link-button" href={batchExportHref(props.batch.id, "json")} target="_blank">
           JSON
         </a>
-        {batchCanCancel(props.batch) && (
-          <button type="button" className="secondary compact danger-outline" onClick={() => props.onCancelBatch(props.batch.id)}>
-            중단
+        {batchCanResume(props.batch) && (
+          <button type="button" className="secondary compact" onClick={() => props.onResumeBatch(props.batch.id)}>
+            계속 처리
+          </button>
+        )}
+        {batchCanDiscard(props.batch) && (
+          <button type="button" className="secondary compact danger-outline" onClick={() => props.onDiscardBatch(props.batch.id)}>
+            중단·정리
           </button>
         )}
       </div>
@@ -3384,7 +3467,8 @@ function BatchItemStatusPanel(props: {
   batch: Batch;
   item: BatchItem;
   onRefresh: () => void;
-  onCancelBatch: (batchId: string) => void;
+  onDiscardBatch: (batchId: string) => void;
+  onResumeBatch: (batchId: string) => void;
 }) {
   const finishedCount = props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count;
   return (
@@ -3421,10 +3505,16 @@ function BatchItemStatusPanel(props: {
           <FileJson size={16} />
           배치 JSON
         </a>
-        {batchCanCancel(props.batch) && (
-          <button type="button" className="secondary danger-outline" onClick={() => props.onCancelBatch(props.batch.id)}>
+        {batchCanResume(props.batch) && (
+          <button type="button" className="secondary" onClick={() => props.onResumeBatch(props.batch.id)}>
+            <Play size={16} />
+            계속 처리
+          </button>
+        )}
+        {batchCanDiscard(props.batch) && (
+          <button type="button" className="secondary danger-outline" onClick={() => props.onDiscardBatch(props.batch.id)}>
             <X size={16} />
-            배치 중단
+            중단·정리
           </button>
         )}
       </div>
@@ -3918,7 +4008,8 @@ function BatchPanel(props: {
   onSelectFiles: (files: FileList | null) => void;
   onClearFiles: () => void;
   onRunBatch: () => void;
-  onCancelBatch: (batchId: string) => void;
+  onDiscardBatch: (batchId: string) => void;
+  onResumeBatch: (batchId: string) => void;
   onRefresh: () => void;
   onOpenItem: (batchId: string, itemId: string) => void;
 }) {
@@ -4022,10 +4113,15 @@ function BatchPanel(props: {
                   <span className="muted">
                     완료 {batch.completed_count} · 실패 {batch.failed_count} · 취소 {batch.canceled_count} · 전체 {batch.total_count}
                   </span>
-                  {batchCanCancel(batch) && (
-                    <button type="button" className="secondary compact danger-outline" onClick={() => props.onCancelBatch(batch.id)}>
+                  {batchCanResume(batch) && (
+                    <button type="button" className="secondary compact" onClick={() => props.onResumeBatch(batch.id)}>
+                      계속 처리
+                    </button>
+                  )}
+                  {batchCanDiscard(batch) && (
+                    <button type="button" className="secondary compact danger-outline" onClick={() => props.onDiscardBatch(batch.id)}>
                       <X size={14} />
-                      중단
+                      중단·정리
                     </button>
                   )}
                 </div>
@@ -5011,6 +5107,11 @@ function chunkFiles<T>(items: T[], size: number) {
   return chunks;
 }
 
+function clientFileId(file: File, index: number) {
+  const relativePath = "webkitRelativePath" in file && typeof file.webkitRelativePath === "string" ? file.webkitRelativePath : "";
+  return `${index}:${relativePath || file.name}:${file.size}:${file.lastModified}`;
+}
+
 async function pollJob(jobId: string): Promise<ExtractionJob> {
   for (let attempt = 0; attempt < 75; attempt += 1) {
     const job = await api<ExtractionJob>(`/api/extraction-jobs/${jobId}`);
@@ -5083,6 +5184,8 @@ function reviewFilterLabel(filter: ReviewFilter) {
 function statusLabel(status: string | null | undefined) {
   if (!status) return "상태 없음";
   const labels: Record<string, string> = {
+    uploading: "업로드 중",
+    preprocessing: "전처리 중",
     queued: "대기 중",
     running: "실행 중",
     completed: "완료",
@@ -5348,8 +5451,21 @@ function formatFileSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function batchCanCancel(batch: Batch) {
-  return batch.items.some((item) => item.status === "queued" || item.status === "running");
+function batchCanResume(batch: Batch) {
+  const uploadedCount = batch.uploaded_count ?? batch.items.length;
+  const queuedCount = batch.queued_count ?? batch.items.filter((item) => item.status === "queued").length;
+  const activeStaleCount =
+    (batch.preprocessing_count ?? batch.items.filter((item) => item.status === "preprocessing").length) +
+    (batch.running_count ?? batch.items.filter((item) => item.status === "running").length);
+  return !["completed", "completed_with_errors", "failed", "canceled"].includes(batch.status) && uploadedCount === batch.total_count && (queuedCount > 0 || activeStaleCount > 0);
+}
+
+function batchCanDiscard(batch: Batch) {
+  return !["completed", "completed_with_errors", "canceled"].includes(batch.status);
+}
+
+function batchIsActive(batch: Batch) {
+  return ["uploading", "preprocessing", "queued", "running", "cancel_requested", "canceling"].includes(batch.status);
 }
 
 function formatConfidence(value: number | null | undefined) {

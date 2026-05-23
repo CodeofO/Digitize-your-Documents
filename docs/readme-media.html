@@ -1,0 +1,1156 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>README media</title>
+    <style>
+      :root {
+        --bg: #f6f8fb;
+        --surface: #ffffff;
+        --soft: #f1f4f8;
+        --line: #dfe5ed;
+        --line-strong: #ccd6e3;
+        --text: #1d2530;
+        --muted: #687789;
+        --primary: #2f7cf6;
+        --primary-soft: #e8f2ff;
+        --warning: #f59e0b;
+        --danger: #e05243;
+        --success: #16a26f;
+        --shadow: 0 26px 70px rgba(31, 42, 58, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 1600px;
+        height: 1000px;
+        margin: 0;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        letter-spacing: 0;
+      }
+
+      body {
+        padding: 58px 64px;
+      }
+
+      .shot {
+        display: none;
+        width: 1472px;
+        height: 884px;
+      }
+
+      body[data-view="overview"] #overview,
+      body[data-view="core"] #core,
+      body[data-view="builder"] #builder,
+      body[data-view="results"] #results {
+        display: block;
+      }
+
+      .eyebrow {
+        margin: 0 0 14px;
+        color: #1f6fe5;
+        font-size: 18px;
+        font-weight: 850;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 58px;
+        line-height: 1.02;
+        font-weight: 900;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 36px;
+        line-height: 1.1;
+        font-weight: 880;
+      }
+
+      h3 {
+        margin: 0;
+        font-size: 24px;
+        line-height: 1.18;
+        font-weight: 830;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 17px;
+        line-height: 1.55;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 42px;
+        align-items: start;
+      }
+
+      .hero-copy {
+        padding-top: 2px;
+      }
+
+      .hero-copy p {
+        width: 820px;
+        margin-top: 24px;
+        font-size: 22px;
+      }
+
+      .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 28px;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 40px;
+        padding: 0 18px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--soft);
+        color: #526071;
+        font-size: 16px;
+        font-weight: 760;
+      }
+
+      .badge.primary {
+        border-color: #b8d7ff;
+        background: var(--primary-soft);
+        color: #1267db;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 52px;
+        padding: 0 24px;
+        border-radius: 10px;
+        background: var(--primary);
+        color: white;
+        font-size: 19px;
+        font-weight: 840;
+        box-shadow: 0 18px 36px rgba(47, 124, 246, 0.22);
+      }
+
+      .button-row {
+        display: flex;
+        gap: 12px;
+        margin-top: 32px;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .focus-panel {
+        padding: 30px;
+      }
+
+      .focus-panel h3 {
+        margin-bottom: 20px;
+      }
+
+      .focus-list {
+        display: grid;
+        gap: 12px;
+      }
+
+      .focus-item {
+        padding: 18px 20px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fbfcfe;
+      }
+
+      .focus-item strong {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 20px;
+      }
+
+      .flow-panel {
+        margin-top: 42px;
+        padding: 30px;
+      }
+
+      .flow-header,
+      .split-header {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 34px;
+        padding: 0 16px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--soft);
+        color: #5d6b7c;
+        font-size: 15px;
+        font-weight: 780;
+      }
+
+      .chip.primary {
+        border-color: #b8d7ff;
+        background: var(--primary-soft);
+        color: #1267db;
+      }
+
+      .chip.success {
+        color: #087a55;
+        background: #e7f8f0;
+        border-color: #bdebd8;
+      }
+
+      .chip.warning {
+        color: #936000;
+        background: #fff7df;
+        border-color: #f8dda3;
+      }
+
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 12px;
+        margin-top: 26px;
+      }
+
+      .step {
+        min-height: 118px;
+        padding: 18px 20px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fbfcfe;
+      }
+
+      .step-number {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        margin-bottom: 14px;
+        border-radius: 50%;
+        background: var(--primary);
+        color: white;
+        font-weight: 850;
+      }
+
+      .step strong {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 21px;
+      }
+
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+        margin-top: 28px;
+      }
+
+      .metric {
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--surface);
+      }
+
+      .metric strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 22px;
+      }
+
+      .topline {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        margin-bottom: 28px;
+      }
+
+      .topline p {
+        width: 470px;
+        text-align: right;
+        font-size: 21px;
+      }
+
+      .module-shell {
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: 18px;
+        margin-top: 26px;
+      }
+
+      .module-hero {
+        min-height: 280px;
+        padding: 26px;
+        background: #eef2f7;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+      }
+
+      .module-cells {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+        margin-top: 22px;
+      }
+
+      .mini-card {
+        min-height: 90px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: white;
+      }
+
+      .mini-card strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 20px;
+      }
+
+      .status-table {
+        margin-top: 22px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+      }
+
+      .status-table div {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        padding: 15px 18px;
+        border-top: 1px solid var(--line);
+        font-size: 17px;
+        font-weight: 720;
+      }
+
+      .status-table div:first-child {
+        border-top: 0;
+        background: var(--soft);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .module-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 18px;
+        margin-top: 18px;
+      }
+
+      .module-card {
+        min-height: 320px;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .module-title {
+        display: grid;
+        grid-template-columns: 50px 1fr;
+        gap: 14px;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+
+      .letter {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 50px;
+        height: 50px;
+        border-radius: 14px;
+        background: var(--primary-soft);
+        color: #146be4;
+        font-size: 22px;
+        font-weight: 900;
+      }
+
+      .fake-doc {
+        height: 96px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--soft);
+      }
+
+      .line {
+        display: block;
+        height: 12px;
+        margin-bottom: 12px;
+        border-radius: 999px;
+        background: #dfe5eb;
+      }
+
+      .line.short {
+        width: 58%;
+      }
+
+      .line.mid {
+        width: 74%;
+      }
+
+      .builder-app {
+        height: 760px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .app-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        height: 92px;
+        padding: 22px 28px;
+        border-bottom: 1px solid var(--line);
+        background: #fafbfd;
+      }
+
+      .app-header small,
+      .section-label {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 850;
+        text-transform: uppercase;
+      }
+
+      .app-header strong {
+        font-size: 28px;
+        font-weight: 900;
+      }
+
+      .toolbar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .icon-btn,
+      .text-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 38px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff;
+        color: var(--text);
+        font-size: 15px;
+        font-weight: 760;
+      }
+
+      .icon-btn {
+        width: 42px;
+      }
+
+      .text-btn {
+        padding: 0 14px;
+      }
+
+      .text-btn.primary {
+        color: #1267db;
+        border-color: #b8d7ff;
+        background: var(--primary-soft);
+      }
+
+      .text-btn.danger {
+        color: #bc3b2f;
+        border-color: #f0c7c1;
+        background: #fff7f5;
+      }
+
+      .builder-body {
+        display: grid;
+        grid-template-columns: 286px 1fr;
+        height: 668px;
+      }
+
+      .palette {
+        padding: 22px 18px;
+        border-right: 1px solid var(--line);
+        background: #fbfcfe;
+      }
+
+      .palette h3 {
+        margin-bottom: 14px;
+        font-size: 20px;
+      }
+
+      .palette-item {
+        display: flex;
+        justify-content: space-between;
+        min-height: 70px;
+        margin-bottom: 10px;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fff;
+      }
+
+      .palette-item strong {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 17px;
+      }
+
+      .palette-item span {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .canvas-shell {
+        display: grid;
+        grid-template-rows: 72px 76px 1fr 74px;
+        min-width: 0;
+      }
+
+      .workflow-form {
+        display: grid;
+        grid-template-columns: 1fr 1fr 280px auto auto;
+        gap: 10px;
+        align-items: center;
+        padding: 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .input {
+        height: 38px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        color: var(--text);
+        background: #fff;
+        font-size: 15px;
+      }
+
+      .run-bar {
+        padding: 13px 16px 0;
+        border-bottom: 1px solid var(--line);
+        background: #fff;
+      }
+
+      .run-card {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        height: 58px;
+        padding: 10px 12px;
+        border: 1px solid #cfe0f8;
+        border-radius: 12px;
+        background: #fbfdff;
+        box-shadow: inset 0 -4px 0 #2f7cf6;
+      }
+
+      .run-title small {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 850;
+      }
+
+      .run-title strong {
+        display: block;
+        margin-top: 2px;
+        font-size: 19px;
+        font-weight: 900;
+      }
+
+      .run-pills {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .canvas {
+        position: relative;
+        overflow: hidden;
+        background-color: #fff;
+        background-image: radial-gradient(#d7dce4 1px, transparent 1px);
+        background-size: 16px 16px;
+      }
+
+      .node {
+        position: absolute;
+        width: 158px;
+        min-height: 70px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: white;
+        box-shadow: 0 10px 28px rgba(28, 38, 52, 0.08);
+      }
+
+      .node strong {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 13px;
+      }
+
+      .node span {
+        display: block;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.35;
+      }
+
+      .node.big {
+        width: 206px;
+        min-height: 94px;
+      }
+
+      .edge {
+        position: absolute;
+        height: 2px;
+        background: #2f7cf6;
+        transform-origin: left center;
+      }
+
+      .edge.dashed {
+        height: 0;
+        border-top: 2px dashed #2f7cf6;
+        background: transparent;
+      }
+
+      .canvas-controls {
+        position: absolute;
+        left: 18px;
+        bottom: 18px;
+        display: grid;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: white;
+      }
+
+      .canvas-controls span {
+        display: grid;
+        place-items: center;
+        width: 36px;
+        height: 36px;
+        border-top: 1px solid var(--line);
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      .canvas-controls span:first-child {
+        border-top: 0;
+      }
+
+      .minimap {
+        position: absolute;
+        right: 18px;
+        bottom: 18px;
+        width: 174px;
+        height: 116px;
+        border: 8px solid #f1f3f6;
+        background: white;
+      }
+
+      .minimap i {
+        position: absolute;
+        display: block;
+        height: 8px;
+        border-radius: 1px;
+        background: #d7dbe0;
+      }
+
+      .upload-dock {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        padding: 13px 16px;
+        border-top: 1px solid var(--line);
+        background: #fff;
+      }
+
+      .upload-dock .left,
+      .upload-dock .right {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .results-panel {
+        height: 730px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        background: white;
+        box-shadow: var(--shadow);
+      }
+
+      .results-top {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        height: 90px;
+        padding: 18px 26px;
+        border-bottom: 1px solid var(--line);
+        background: #fbfdff;
+        box-shadow: inset 0 -6px 0 #2f7cf6;
+      }
+
+      .results-grid {
+        display: grid;
+        grid-template-columns: 280px 1fr 380px;
+        height: 640px;
+      }
+
+      .result-list {
+        padding: 18px;
+        border-right: 1px solid var(--line);
+        background: #fafbfd;
+      }
+
+      .result-item {
+        min-height: 72px;
+        margin-bottom: 10px;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: white;
+      }
+
+      .result-item.active {
+        border-color: #b8d7ff;
+        box-shadow: 0 0 0 2px #e8f2ff inset;
+      }
+
+      .result-item strong {
+        display: block;
+        margin-bottom: 7px;
+        font-size: 18px;
+      }
+
+      .result-item span {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .doc-preview {
+        display: grid;
+        place-items: center;
+        border-right: 1px solid var(--line);
+        background: #fff;
+      }
+
+      .doc-page {
+        width: 500px;
+        height: 520px;
+        padding: 36px 28px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: white;
+        box-shadow: 0 18px 45px rgba(29, 37, 48, 0.09);
+      }
+
+      .doc-block {
+        height: 64px;
+        width: 250px;
+        margin-bottom: 24px;
+        border-radius: 8px;
+        background: #d6e4f6;
+      }
+
+      .doc-table {
+        height: 112px;
+        margin-top: 18px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #f2f4f7;
+      }
+
+      .inspector {
+        padding: 22px 18px;
+        overflow: hidden;
+      }
+
+      .inspector h3 {
+        margin: 4px 0 8px;
+      }
+
+      .info-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+        margin: 18px 0;
+      }
+
+      .info {
+        min-height: 72px;
+        padding: 13px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+
+      .info strong {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 14px;
+      }
+
+      .info span {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .compact-table {
+        overflow: hidden;
+        margin-top: 10px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+
+      .compact-table div {
+        display: grid;
+        grid-template-columns: 1fr 1fr 0.8fr;
+        padding: 10px 12px;
+        border-top: 1px solid var(--line);
+        font-size: 13px;
+        font-weight: 730;
+      }
+
+      .compact-table div:first-child {
+        border-top: 0;
+        background: var(--soft);
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .caption-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+        margin-top: 24px;
+      }
+
+      #overview .metric-grid,
+      #results .caption-grid {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="shot" id="overview">
+      <div class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Document Automation Workspace</p>
+          <h1>대용량 문서를 한 흐름에서 안정적으로 처리</h1>
+          <p>업로드, 전처리, 모델 추론, 검수, export를 분리해 5,000장 규모에서도 상태를 잃지 않고 이어서 처리합니다.</p>
+          <div class="badge-row">
+            <span class="badge primary">Workflow Builder</span>
+            <span class="badge">Folder Upload</span>
+            <span class="badge">Resume Upload</span>
+            <span class="badge">Pause and Restart</span>
+            <span class="badge">CSV / JSON Export</span>
+          </div>
+          <div class="button-row">
+            <span class="button">워크플로우 빌더 열기</span>
+            <span class="badge primary">업로드 32초</span>
+            <span class="badge primary">추론 4분 12초</span>
+          </div>
+        </div>
+        <div class="panel focus-panel">
+          <p class="eyebrow">Workspace Focus</p>
+          <h3>중단되어도 기록은 남기고 산출물은 정리합니다</h3>
+          <div class="focus-list">
+            <div class="focus-item">
+              <strong>업로드 완료 후 실행</strong>
+              <p>부분 업로드 상태에서는 start를 막아 누락 실행을 방지합니다.</p>
+            </div>
+            <div class="focus-item">
+              <strong>재선택 기반 이어가기</strong>
+              <p>새로고침 후 같은 파일이나 폴더를 다시 선택하면 등록된 항목은 건너뜁니다.</p>
+            </div>
+            <div class="focus-item">
+              <strong>실행 시간 저장</strong>
+              <p>파일별 upload duration과 inference duration을 결과에 포함합니다.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel flow-panel">
+        <div class="flow-header">
+          <h2>공통 처리 흐름</h2>
+          <span class="chip primary">init -> items -> start</span>
+        </div>
+        <div class="steps">
+          <div class="step"><span class="step-number">1</span><strong>Upload</strong><p>파일, 폴더, chunk 등록</p></div>
+          <div class="step"><span class="step-number">2</span><strong>Preprocess</strong><p>원본 보존, JPEG preview 생성</p></div>
+          <div class="step"><span class="step-number">3</span><strong>Queue</strong><p>ready item만 실행 대기</p></div>
+          <div class="step"><span class="step-number">4</span><strong>Inference</strong><p>VLM worker 제한 실행</p></div>
+          <div class="step"><span class="step-number">5</span><strong>Review</strong><p>이미지와 결과를 함께 검수</p></div>
+          <div class="step"><span class="step-number">6</span><strong>Export</strong><p>CSV, JSON 저장</p></div>
+        </div>
+      </div>
+      <div class="metric-grid">
+        <div class="metric"><strong>10 files</strong><p>기본 chunk 크기</p></div>
+        <div class="metric"><strong>2 workers</strong><p>전처리 기본 동시성</p></div>
+        <div class="metric"><strong>3000 px</strong><p>preview 긴 변 제한</p></div>
+        <div class="metric"><strong>Summary API</strong><p>목록 polling 경량화</p></div>
+      </div>
+    </section>
+
+    <section class="shot" id="core">
+      <div class="topline">
+        <div>
+          <p class="eyebrow">Core Modules</p>
+          <h1>단일 모듈 실행과 워크플로우 연결</h1>
+        </div>
+        <p>모든 모듈은 같은 업로드와 상태 요약 흐름을 사용합니다.</p>
+      </div>
+      <div class="panel flow-panel" style="margin-top:0">
+        <div class="module-shell">
+          <div class="module-hero">
+            <div class="module-title">
+              <span class="letter">W</span>
+              <div>
+                <h3>Workflow Builder</h3>
+                <p>분류, 분기, 추출, 필수 항목 확인, 병합, export 노드를 연결합니다.</p>
+              </div>
+            </div>
+            <div class="module-cells">
+              <div class="mini-card"><strong>Input</strong><p>file/folder</p></div>
+              <div class="mini-card"><strong>Branch</strong><p>class path</p></div>
+              <div class="mini-card"><strong>Merge</strong><p>결과 통합</p></div>
+              <div class="mini-card"><strong>Export</strong><p>CSV/JSON</p></div>
+            </div>
+          </div>
+          <div class="module-hero">
+            <h3>공통 상태 모델</h3>
+            <p>업로드와 실행을 같은 counter로 표시합니다.</p>
+            <div class="status-table">
+              <div><span>단계</span><span>run/batch</span><span>item</span></div>
+              <div><span>Upload</span><span>uploading</span><span>uploading</span></div>
+              <div><span>Preprocess</span><span>preprocessing</span><span>preprocessing</span></div>
+              <div><span>Execute</span><span>running</span><span>queued/running</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="module-grid">
+        <div class="module-card">
+          <div class="module-title"><span class="letter">R</span><div><h3>Raw Data Extractor</h3><p>원본 문서 preview와 원문 데이터를 생성합니다.</p></div></div>
+          <div class="fake-doc"><span class="line"></span><span class="line mid"></span><span class="line short"></span></div>
+        </div>
+        <div class="module-card">
+          <div class="module-title"><span class="letter">C</span><div><h3>Document Classifier</h3><p>정의한 class 후보와 unknown 기준으로 분류합니다.</p></div></div>
+          <div class="mini-card"><strong>신청서</strong><p>confidence 96%</p></div>
+          <div class="mini-card" style="margin-top:10px"><strong>동의서</strong><p>branch path</p></div>
+        </div>
+        <div class="module-card">
+          <div class="module-title"><span class="letter">K</span><div><h3>Key Information Extractor</h3><p>schema 기준으로 field, value, evidence를 추출합니다.</p></div></div>
+          <div class="compact-table"><div><span>필드</span><span>값</span><span>신뢰도</span></div><div><span>성명</span><span>김토스</span><span>98%</span></div></div>
+        </div>
+        <div class="module-card">
+          <div class="module-title"><span class="letter">Q</span><div><h3>Required Field Checker</h3><p>필수 항목 존재 여부를 상태로 정리합니다.</p></div></div>
+          <div class="compact-table"><div><span>항목</span><span>상태</span><span>근거</span></div><div><span>서명</span><span>missing</span><span>-</span></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="shot" id="builder">
+      <div class="split-header">
+        <div>
+          <p class="eyebrow">Workflow Builder</p>
+          <h1>워크플로우 빌더</h1>
+        </div>
+        <div class="badge-row" style="margin-top:0">
+          <span class="badge primary">진행률 표시</span>
+          <span class="badge">폴더 업로드</span>
+          <span class="badge">중단·정리</span>
+        </div>
+      </div>
+      <div class="builder-app" style="margin-top:34px">
+        <div class="app-header">
+          <div>
+            <small>Document Automation Workspace</small>
+            <strong>워크플로우 빌더</strong>
+          </div>
+          <div class="toolbar">
+            <span class="text-btn primary">VLM · gemini-3.1-flash-lite</span>
+            <span class="text-btn">Workers · 1</span>
+            <span class="icon-btn">⌂</span>
+            <span class="text-btn">새로고침</span>
+            <span class="icon-btn">?</span>
+          </div>
+        </div>
+        <div class="builder-body">
+          <aside class="palette">
+            <span class="section-label">Builder</span>
+            <h3>모듈</h3>
+            <div class="palette-item"><div><strong>문서 입력</strong><span>처리할 문서를 전달합니다.</span></div><b>+</b></div>
+            <div class="palette-item"><div><strong>문서 분류</strong><span>class 또는 unknown입니다.</span></div><b>+</b></div>
+            <div class="palette-item"><div><strong>분기</strong><span>class별 경로를 나눕니다.</span></div><b>+</b></div>
+            <div class="palette-item"><div><strong>핵심 정보 추출</strong><span>schema로 값을 추출합니다.</span></div><b>+</b></div>
+            <div class="palette-item"><div><strong>필수 항목 확인</strong><span>checklist를 확인합니다.</span></div><b>+</b></div>
+            <div class="palette-item"><div><strong>결과 병합</strong><span>branch 결과를 합칩니다.</span></div><b>+</b></div>
+          </aside>
+          <main class="canvas-shell">
+            <div class="workflow-form">
+              <div class="input">은행서류 자동 분류 및 정보 추출</div>
+              <div class="input">설명</div>
+              <div class="input">은행서류 자동 분류 및 정보 추출</div>
+              <span class="text-btn">갱신</span>
+              <span class="text-btn">저장</span>
+            </div>
+            <div class="run-bar">
+              <div class="run-card">
+                <div class="run-title"><small>RUN</small><strong>작업 진행 중 · 12%</strong></div>
+                <div class="run-pills">
+                  <span class="chip primary">615 / 5,059 업로드됨</span>
+                  <span class="chip">37 전처리</span>
+                  <span class="chip">8 실행 중</span>
+                  <span class="chip">603 대기</span>
+                  <span class="chip primary">업로드 32초</span>
+                  <span class="chip primary">추론 4분 12초</span>
+                </div>
+              </div>
+            </div>
+            <div class="canvas">
+              <div class="node" style="left:76px;top:210px"><strong>문서 입력</strong><span>파일과 폴더를 워크플로우에 전달</span></div>
+              <div class="node" style="left:255px;top:174px"><strong>문서 분류</strong><span>신청서 필터 · 1 classes</span></div>
+              <div class="node big" style="left:480px;top:205px"><strong>분기</strong><span>class · 신청서, unknown</span></div>
+              <div class="node" style="left:700px;top:95px"><strong>핵심 정보 추출</strong><span>성명, 동의여부 · 4 fields</span></div>
+              <div class="node" style="left:890px;top:205px"><strong>결과 병합</strong><span>실행된 branch 결과를 합칩니다.</span></div>
+              <div class="node" style="left:985px;top:105px"><strong>Export</strong><span>CSV/JSON 결과를 만듭니다.</span></div>
+              <span class="edge" style="left:232px;top:245px;width:50px;transform:rotate(-10deg)"></span>
+              <span class="edge" style="left:413px;top:236px;width:80px;transform:rotate(13deg)"></span>
+              <span class="edge dashed" style="left:674px;top:218px;width:72px;transform:rotate(-35deg)"></span>
+              <span class="edge dashed" style="left:674px;top:268px;width:238px;transform:rotate(-8deg)"></span>
+              <span class="edge" style="left:1025px;top:208px;width:78px;transform:rotate(-42deg)"></span>
+              <div class="canvas-controls"><span>+</span><span>-</span><span>⌖</span></div>
+              <div class="minimap"><i style="left:28px;top:55px;width:22px"></i><i style="left:58px;top:62px;width:28px"></i><i style="left:96px;top:49px;width:25px"></i><i style="left:130px;top:67px;width:20px"></i></div>
+            </div>
+            <div class="upload-dock">
+              <div class="left">
+                <span class="text-btn">문서 업로드</span>
+                <span class="text-btn">폴더 업로드</span>
+                <span class="text-btn primary">실행 중</span>
+              </div>
+              <div class="right">
+                <span class="text-btn">CSV</span>
+                <span class="text-btn">JSON</span>
+              </div>
+            </div>
+          </main>
+        </div>
+      </div>
+    </section>
+
+    <section class="shot" id="results">
+      <div class="split-header">
+        <div>
+          <p class="eyebrow">Workflow Builder</p>
+          <h1>결과 상세보기</h1>
+        </div>
+        <div class="badge-row" style="margin-top:0">
+          <span class="badge primary">이미지 검수</span>
+          <span class="badge">정렬 유지</span>
+          <span class="badge">CSV / JSON</span>
+        </div>
+      </div>
+      <div class="results-panel" style="margin-top:34px">
+        <div class="results-top">
+          <div class="run-title"><small>RUN</small><strong>작업 완료 · 100%</strong></div>
+          <div class="run-pills">
+            <span class="chip success">5,059 완료</span>
+            <span class="chip warning">12 검토 필요</span>
+            <span class="chip">업로드 4분 21초</span>
+            <span class="chip">추론 38분 10초</span>
+            <span class="text-btn primary">결과 상세보기</span>
+          </div>
+        </div>
+        <div class="results-grid">
+          <aside class="result-list">
+            <div class="split-header" style="align-items:center;margin-bottom:14px"><h3>5,059개 문서</h3><span class="chip success">완료</span></div>
+            <div class="result-item active"><strong>bank_00001.jpg</strong><span>신청서 · 검토 필요 · 업로드 142ms · 추론 3.8초</span></div>
+            <div class="result-item"><strong>bank_00002.jpg</strong><span>신청서 · 완료 · 업로드 118ms · 추론 3.5초</span></div>
+            <div class="result-item"><strong>bank_00003.jpg</strong><span>동의서 · 완료 · 업로드 126ms · 추론 3.4초</span></div>
+            <div class="result-item"><strong>bank_00004.jpg</strong><span>unknown · 완료 · 업로드 119ms · 추론 2.9초</span></div>
+            <div class="result-item"><strong>bank_00005.jpg</strong><span>신청서 · 완료 · 업로드 133ms · 추론 3.6초</span></div>
+          </aside>
+          <section class="doc-preview">
+            <div class="doc-page">
+              <div class="doc-block"></div>
+              <span class="line"></span>
+              <span class="line mid"></span>
+              <span class="line" style="width:86%"></span>
+              <div class="doc-table"></div>
+              <span class="line" style="margin-top:20px;width:91%"></span>
+              <span class="line mid"></span>
+              <div class="doc-table" style="height:92px"></div>
+            </div>
+          </section>
+          <aside class="inspector">
+            <span class="section-label">Document</span>
+            <h3>bank_00001.jpg</h3>
+            <span class="chip warning">검토 필요</span>
+            <div class="info-grid">
+              <div class="info"><strong>분류</strong><span>신청서</span></div>
+              <div class="info"><strong>Branch</strong><span>class:신청서</span></div>
+              <div class="info"><strong>업로드</strong><span>142ms</span></div>
+              <div class="info"><strong>추론</strong><span>3.8초</span></div>
+            </div>
+            <h3 style="font-size:20px">KIE 결과</h3>
+            <div class="compact-table">
+              <div><span>필드</span><span>값</span><span>신뢰도</span></div>
+              <div><span>본인성명</span><span>홍길동</span><span>100%</span></div>
+              <div><span>대리인성명</span><span>김OO</span><span>96%</span></div>
+            </div>
+            <h3 style="font-size:20px;margin-top:16px">필수 항목</h3>
+            <div class="compact-table">
+              <div><span>항목</span><span>상태</span><span>근거</span></div>
+              <div><span>성명</span><span>present</span><span>텍스트</span></div>
+              <div><span>서명</span><span>missing</span><span>-</span></div>
+            </div>
+          </aside>
+        </div>
+      </div>
+      <div class="caption-grid">
+        <div class="metric"><strong>상세 API는 페이지 단위</strong><p>목록 polling은 summary endpoint만 사용합니다.</p></div>
+        <div class="metric"><strong>파일명 정렬 유지</strong><p>업로드 index 기준으로 결과 순서를 고정합니다.</p></div>
+        <div class="metric"><strong>실패 원인 확인</strong><p>오류 메시지와 모델 실패 항목을 문서별로 확인합니다.</p></div>
+      </div>
+    </section>
+
+    <script>
+      const view = new URLSearchParams(window.location.search).get("view") || "overview";
+      document.body.dataset.view = view;
+    </script>
+  </body>
+</html>

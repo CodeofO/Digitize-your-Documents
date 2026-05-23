@@ -1,12 +1,12 @@
 <div align="center">
   <h1>Document Automation Workspace</h1>
-  <p><b>문서 분류, 필수 항목 검수, 핵심 정보 추출, export를 하나의 워크플로우로 연결하는 문서 자동화 앱입니다.</b></p>
+  <p><b>대용량 문서 업로드, 전처리, VLM 추론, 검수, CSV/JSON export를 하나의 워크스페이스에서 처리하는 문서 자동화 앱입니다.</b></p>
   <p>
     <code>Workflow Builder</code>
     <code>Document Classifier</code>
     <code>Required Field Checker</code>
     <code>Key Information Extractor</code>
-    <code>Batch Export</code>
+    <code>Raw Data Extractor</code>
   </p>
 </div>
 
@@ -14,10 +14,7 @@
 
 ## Demo
 
-- Demo URL: `https://0ece-1-235-8-46.ngrok-free.app`
-- Access code: 별도 공유
-
-외부 데모는 `scripts/start_hosting_demo.sh`로 production 모드와 동일한 단일 서버 구성을 띄운 뒤 ngrok HTTPS URL로 확인합니다.
+외부 데모는 production과 같은 단일 서버 구성을 띄운 뒤 ngrok HTTPS URL로 확인합니다.
 
 ```bash
 ACCESS_CODE=<shared-code> ./scripts/start_hosting_demo.sh
@@ -48,27 +45,44 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 ![Workflow Builder result view](assets/readme/workflow-builder-results.png)
 
 - React Flow 캔버스에서 문서 처리 모듈을 연결합니다.
-- 업로드한 문서를 workflow run으로 처리합니다.
-- 분류 결과에 따라 class별 schema/checklist 경로를 나눌 수 있습니다.
-- 실행 상태는 캔버스 위 progress로 표시하고, 결과는 overlay에서 문서 이미지와 함께 검수합니다.
-- 결과는 CSV 또는 JSON으로 export합니다.
+- 파일 업로드와 폴더 업로드를 모두 지원하고, 파일명과 상대 경로 기준으로 안정적으로 정렬합니다.
+- 업로드는 chunk 단위로 등록하고, 업로드가 끝난 뒤 workflow 실행을 시작합니다.
+- 새로고침이나 네트워크 끊김 후에는 같은 파일 또는 폴더를 다시 선택해 남은 항목만 이어서 업로드할 수 있습니다.
+- 실행 중에는 `계속 처리`, `일시중단`, `재시작`, `중단·정리`로 상태를 제어합니다.
+- 진행 상태는 `업로드됨`, `전처리`, `실행 중`, `대기`, `완료/검토/실패` counter로 분리해 표시합니다.
+- 결과 화면은 문서 목록 스크롤 위치를 유지하고, 상세 결과에서 문서 이미지와 module output을 함께 검수합니다.
+- 결과 CSV/JSON에는 문서별 `upload_duration_ms`, `inference_duration_ms`가 포함됩니다.
 
-## Stack
+## Large Upload Pipeline
 
-| Layer | Tech |
+모든 batch 계열 모듈은 같은 ingestion 흐름을 사용합니다.
+
+| Step | Description |
 | --- | --- |
-| Frontend | Vite, React, TypeScript, React Flow |
-| Backend | FastAPI, SQLAlchemy, Alembic |
-| Storage | Local filesystem, S3-compatible adapter 준비 |
-| Document Preview | PyMuPDF, LibreOffice headless |
-| VLM | Gemini/OpenAI-compatible/mock provider |
+| `init` | run 또는 batch owner를 만들고 전체 파일 수를 기록합니다. |
+| `items` | chunk 파일을 등록합니다. 파일 하나 처리 후 즉시 commit하여 중간 상태를 UI에 반영합니다. |
+| `preprocess` | 원본은 보존하고 preview/VLM 입력용 이미지는 긴 변 제한 JPEG로 생성합니다. |
+| `start` | 전체 업로드가 끝난 run/batch만 실행합니다. ready item만 queue로 넘깁니다. |
+| `summary` | polling은 summary endpoint로 counter만 가져오고, 상세 화면에서만 item page를 조회합니다. |
+
+공통 상태는 `uploading`, `preprocessing`, `running`, `paused`, `completed`, `needs_review`, `completed_with_errors`, `failed`, `canceled`를 사용합니다.
+
+## Recovery Controls
+
+| Control | Behavior |
+| --- | --- |
+| `중단·정리` | 실행 기록은 남기고 업로드 파일, preview, 중간 결과 산출물을 정리합니다. |
+| `계속 처리` | 업로드가 끝났지만 아직 실행되지 않은 run/batch를 시작합니다. |
+| `파일 이어가기` / `폴더 이어가기` | 새로고침 등으로 끊긴 업로드에서 같은 원본을 재선택해 누락 파일만 등록합니다. |
+| `일시중단` | 업로드된 문서는 보존하고, 새 item 실행을 멈춥니다. 진행 중인 VLM 호출은 현재 item까지만 마무리합니다. |
+| `재시작` | API key 오류 같은 실행 실패 후 업로드를 다시 하지 않고 실패/중단 항목만 다시 queue에 넣습니다. |
 
 ## Input / Output
 
 | Input | Handling |
 | --- | --- |
 | PDF | page image로 rasterize 후 preview와 VLM context에 사용 |
-| PNG/JPG/JPEG | 단일 page document로 저장 |
+| PNG/JPG/JPEG | 원본은 그대로 보존하고 preview/VLM용 JPEG를 생성 |
 | DOCX/PPTX | LibreOffice로 PDF 변환 후 처리 |
 | XLSX | sheet HTML과 PDF preview 생성 |
 
@@ -77,7 +91,31 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | KIE | field, value, normalized value, confidence, evidence |
 | Classification | class name, confidence, reason, evidence |
 | Required Check | item별 present/missing/uncertain/not_applicable |
-| Workflow Export | branch별 union-column CSV/JSON |
+| Workflow Export | branch별 union-column CSV/JSON, upload/inference duration |
+
+## API Shape
+
+| Area | Endpoint |
+| --- | --- |
+| System status | `GET /api/system/status` |
+| Workflow upload | `POST /api/workflow-runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
+| Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume-upload`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart` |
+| Batch upload | `POST /api/batches/init`, `POST /api/batches/{batch_id}/items`, `POST /api/batches/{batch_id}/start` |
+| Classification batch | `POST /api/classification-batches/init`, `POST /api/classification-batches/{batch_id}/items`, `POST /api/classification-batches/{batch_id}/start` |
+| Required check batch | `POST /api/required-field-check-batches/init`, `POST /api/required-field-check-batches/{batch_id}/items`, `POST /api/required-field-check-batches/{batch_id}/start` |
+| Summary polling | `GET /api/workflow-runs/{run_id}/summary`, `GET /api/batches/{batch_id}/summary` 계열 |
+
+기존 단일 multipart API는 호환성용으로 유지하고 내부에서 같은 ingestion 흐름을 사용합니다.
+
+## Stack
+
+| Layer | Tech |
+| --- | --- |
+| Frontend | Vite, React, TypeScript, React Flow |
+| Backend | FastAPI, SQLAlchemy, Alembic-compatible lightweight migration |
+| Storage | Local filesystem, S3-compatible adapter 준비 |
+| Document Preview | PyMuPDF, LibreOffice headless |
+| VLM | Gemini/OpenAI-compatible/mock provider |
 
 ## Local Run
 
@@ -104,6 +142,21 @@ VLM_PROVIDER=mock
 VLM_MODEL_NAME=mock-vlm
 ```
 
+## Key Environment Variables
+
+| Env | Default | Description |
+| --- | --- | --- |
+| `UPLOAD_CHUNK_FILES` | `10` | frontend가 system status에서 읽는 chunk 파일 수 |
+| `PREPROCESS_MAX_WORKERS` | `2` | 문서 전처리 동시성 |
+| `DOCUMENT_PAGE_MAX_LONG_EDGE` | `3000` | preview/VLM용 JPEG 긴 변 제한 |
+| `DOCUMENT_PAGE_JPEG_QUALITY` | `88` | preview/VLM용 JPEG 품질 |
+| `WORKFLOW_MAX_WORKERS` | `1` | workflow VLM 실행 동시성 |
+| `BATCH_MAX_WORKERS` | `4` | batch 계열 실행 동시성 |
+| `UPLOAD_MAX_BATCH_FILES` | `10000` | 한 번에 업로드할 수 있는 batch 파일 수 |
+| `UPLOAD_RETENTION_HOURS` | `24` | 업로드 문서 보존 시간 |
+
+운영에서 5,000장 이상 대량 처리를 자주 실행한다면 SQLite보다 Postgres 사용을 권장합니다.
+
 ## Production Hosting
 
 기본 배포 방식은 frontend 정적 호스팅과 backend API 분리 배포입니다. 단일 서버 fallback도 지원합니다.
@@ -117,8 +170,6 @@ VLM_MODEL_NAME=mock-vlm
 | `CORS_ALLOWED_ORIGINS` | frontend origin allowlist |
 | `DATABASE_URL` | SQLite 또는 Postgres URL |
 | `STORAGE_BACKEND=local` | local persistent volume 저장 |
-| `UPLOAD_MAX_BATCH_FILES=10000` | 한 번에 업로드할 수 있는 batch 파일 수 |
-| `UPLOAD_RETENTION_HOURS=24` | 업로드 문서 하루 단위 삭제 |
 | `SERVE_FRONTEND=true` | FastAPI가 `frontend/dist`를 직접 서빙 |
 
 ```bash
@@ -141,9 +192,9 @@ FRONTEND_DIST_DIR="$(pwd)/dist" \
 
 세부 배포 절차는 [docs/deployment.md](docs/deployment.md)에 정리되어 있습니다.
 
-## Design
+## README Media
 
-UI는 Toss Design System을 참고하여 회색 기반 표면, 파란색 primary action, list 중심 정보 구조로 정리했습니다.
+README 이미지는 [docs/readme-media.html](docs/readme-media.html)에서 실제 UI 변경사항에 맞춰 다시 그린 뒤 `assets/readme/*.png`로 렌더링했습니다.
 
 ## Test
 
@@ -158,6 +209,6 @@ npm run build --prefix frontend
 backend/      FastAPI API, document processing, workflow execution
 frontend/     React application
 scripts/      local run and hosting demo scripts
-docs/         deployment notes
+docs/         deployment notes and README media source
 assets/       README images
 ```

@@ -1,4 +1,3 @@
-import shutil
 import zipfile
 from pathlib import Path
 from uuid import uuid4
@@ -84,7 +83,7 @@ def read_image_size(source_path: Path) -> tuple[int, int]:
 
 
 def rasterize_image_page(source_path: Path, page_dir: Path) -> dict[str, int | str]:
-    image_path = page_dir / "page_1.png"
+    image_path = page_dir / "page_1.jpg"
     page_dir.mkdir(parents=True, exist_ok=True)
     try:
         with Image.open(source_path) as source:
@@ -95,8 +94,9 @@ def rasterize_image_page(source_path: Path, page_dir: Path) -> dict[str, int | s
                 image = background
             elif image.mode != "RGB":
                 image = image.convert("RGB")
+            image = _resize_preview_image(image)
             width, height = image.size
-            image.save(image_path, format="PNG")
+            _save_preview_image(image, image_path)
     except UnidentifiedImageError as exc:
         raise DocumentProcessingError("Failed to read image") from exc
     except OSError as exc:
@@ -127,14 +127,16 @@ def _rasterize_pdf(source_path: Path, page_dir: Path) -> list[dict[str, int | st
                 raise DocumentProcessingError(f"PDF page count exceeds the configured limit of {max_pages}", status_code=422)
             for index, page in enumerate(document, start=1):
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-                image_path = page_dir / f"page_{index}.png"
-                pixmap.save(image_path)
+                image_path = page_dir / f"page_{index}.jpg"
+                image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+                image = _resize_preview_image(image)
+                _save_preview_image(image, image_path)
                 pages.append(
                     {
                         "page_number": index,
                         "image_path": str(image_path),
-                        "width": pixmap.width,
-                        "height": pixmap.height,
+                        "width": image.width,
+                        "height": image.height,
                     }
                 )
     except fitz.FileDataError as exc:
@@ -190,15 +192,36 @@ def _rasterize_image(source_path: Path, page_dir: Path) -> list[dict[str, int | 
     try:
         return [rasterize_image_page(source_path, page_dir)]
     except DocumentProcessingError:
-        image_path = page_dir / "page_1.png"
-        shutil.copyfile(source_path, image_path)
-        with fitz.open(image_path) as document:
+        image_path = page_dir / "page_1.jpg"
+        page_dir.mkdir(parents=True, exist_ok=True)
+        with fitz.open(source_path) as document:
             page = document[0]
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+            image = _resize_preview_image(image)
+            _save_preview_image(image, image_path)
             return [
                 {
                     "page_number": 1,
                     "image_path": str(image_path),
-                    "width": int(page.rect.width),
-                    "height": int(page.rect.height),
+                    "width": image.width,
+                    "height": image.height,
                 }
             ]
+
+
+def _resize_preview_image(image: Image.Image) -> Image.Image:
+    max_long_edge = get_settings().document_page_max_long_edge
+    if max_long_edge <= 0:
+        return image
+    long_edge = max(image.size)
+    if long_edge <= max_long_edge:
+        return image
+    scale = max_long_edge / long_edge
+    target = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    return image.resize(target, Image.Resampling.LANCZOS)
+
+
+def _save_preview_image(image: Image.Image, path: Path) -> None:
+    quality = max(40, min(95, get_settings().document_page_jpeg_quality))
+    image.save(path, format="JPEG", quality=quality, optimize=True)

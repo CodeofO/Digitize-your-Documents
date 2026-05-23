@@ -170,6 +170,13 @@ type ModuleBatch = {
   completed_count: number;
   failed_count: number;
   canceled_count: number;
+  uploaded_count?: number;
+  preprocessing_count?: number;
+  ready_count?: number;
+  queued_count?: number;
+  running_count?: number;
+  needs_review_count?: number;
+  progress_phase?: string;
   progress: number;
   items: ModuleBatchItem[];
   created_at: string;
@@ -180,12 +187,12 @@ type ModuleWorkspaceProps = {
   kind: ModuleKind;
   leftPanePercent: number;
   uploadMaxBatchFiles: number;
+  uploadChunkFiles: number;
   onResize: (event: PointerEvent<HTMLButtonElement>) => void;
 };
 
 const evidenceTypes = ["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"] as const;
 const customEvidenceTypeValue = "__custom_evidence_type__";
-const LARGE_UPLOAD_CHUNK_SIZE = 100;
 const evidenceTypeLabels: Record<string, string> = {
   text_or_handwriting: "문자/손글씨",
   checkbox: "체크박스",
@@ -252,7 +259,7 @@ function useVirtualRows(count: number, activeIndex: number) {
   return { containerRef, onScroll, start, end, spacerStyle, windowStyle };
 }
 
-export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, onResize }: ModuleWorkspaceProps) {
+export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, uploadChunkFiles, onResize }: ModuleWorkspaceProps) {
   const isClassifier = kind === "classifier";
   const title = isClassifier ? "문서 분류" : "필수 항목 확인";
   const configLabel = isClassifier ? "분류 설정" : "체크리스트";
@@ -452,50 +459,86 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, on
   }
 
   async function runBatch(configId: string) {
-    const path = isClassifier ? "/api/classification-batches" : "/api/required-field-check-batches";
-    const createdBatches: ModuleBatch[] = [];
+    const uploadFiles = sortUploadFiles(selectedFiles);
+    const initPath = isClassifier ? "/api/classification-batches/init" : "/api/required-field-check-batches/init";
+    const initializedBatch = await api<ModuleBatch>(initPath, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        [isClassifier ? "classifier_id" : "checklist_id"]: configId,
+        total_count: uploadFiles.length
+      })
+    });
+    setBatches((items) => [initializedBatch, ...items.filter((item) => item.id !== initializedBatch.id)].slice(0, 12));
     let uploadedCount = 0;
-    for (const chunk of chunkFiles(selectedFiles, LARGE_UPLOAD_CHUNK_SIZE)) {
-      setBusy(`${uploadedCount.toLocaleString()} / ${selectedFiles.length.toLocaleString()} 문서 업로드 중`);
+    let latestBatch = initializedBatch;
+    for (let chunkStart = 0; chunkStart < uploadFiles.length; chunkStart += uploadChunkFiles) {
+      const chunk = uploadFiles.slice(chunkStart, chunkStart + uploadChunkFiles);
+      setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 업로드 중`);
       const form = new FormData();
-      form.append(isClassifier ? "classifier_id" : "checklist_id", configId);
-      chunk.forEach((file) => form.append("files", file));
-      const batch = await api<ModuleBatch>(path, { method: "POST", body: form });
+      chunk.forEach((file, index) => {
+        form.append("files", file);
+        form.append("client_file_ids", clientFileId(file, chunkStart + index));
+      });
+      const itemPath = isClassifier
+        ? `/api/classification-batches/${initializedBatch.id}/items`
+        : `/api/required-field-check-batches/${initializedBatch.id}/items`;
+      latestBatch = await api<ModuleBatch>(itemPath, { method: "POST", body: form });
       uploadedCount += chunk.length;
-      createdBatches.push(batch);
-      setBatches((items) => [batch, ...items.filter((item) => item.id !== batch.id)].slice(0, 12));
-      setBusy(`${uploadedCount.toLocaleString()} / ${selectedFiles.length.toLocaleString()} 문서 업로드 중`);
+      setBatches((items) => [latestBatch, ...items.filter((item) => item.id !== latestBatch.id)].slice(0, 12));
+      setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 업로드 중`);
     }
-    const batch = createdBatches[0];
+    const startPath = isClassifier
+      ? `/api/classification-batches/${initializedBatch.id}/start`
+      : `/api/required-field-check-batches/${initializedBatch.id}/start`;
+    const batch = await api<ModuleBatch>(startPath, { method: "POST" });
     if (!batch) throw new Error("배치 작업을 생성하지 못했습니다.");
+    setBatches((items) => [batch, ...items.filter((item) => item.id !== batch.id)].slice(0, 12));
     setActiveBatchId(batch.id);
     setActiveBatchItemId(batch.items[0]?.id ?? null);
     setSelectedFiles([]);
     setSelectedFileIndex(0);
     setMessage(
-      createdBatches.length > 1
-        ? `${selectedFiles.length.toLocaleString()}개 파일을 ${createdBatches.length.toLocaleString()}개 배치로 나누어 시작했습니다.`
-        : `${batch.total_count}개 파일의 배치 작업을 시작했습니다.`
+      `${batch.total_count}개 파일의 배치 작업을 시작했습니다.`
     );
     if (batch.items[0]) await openBatchItem(batch.items[0]);
   }
 
   async function refreshBatch(batchId: string) {
     try {
-      const path = isClassifier ? `/api/classification-batches/${batchId}` : `/api/required-field-check-batches/${batchId}`;
+      const path = isClassifier ? `/api/classification-batches/${batchId}/summary` : `/api/required-field-check-batches/${batchId}/summary`;
       const batch = await api<ModuleBatch>(path);
-      setBatches((items) => [batch, ...items.filter((item) => item.id !== batch.id)].slice(0, 12));
+      setBatches((items) => {
+        const existing = items.find((item) => item.id === batch.id);
+        const merged = batch.items.length || !existing ? batch : { ...batch, items: existing.items };
+        return [merged, ...items.filter((item) => item.id !== batch.id)].slice(0, 12);
+      });
     } catch {
       // Keep the current batch visible; the next polling tick will retry.
     }
   }
 
-  async function cancelBatch(batchId: string) {
+  async function discardBatch(batchId: string) {
     try {
-      const path = isClassifier ? `/api/classification-batches/${batchId}/cancel` : `/api/required-field-check-batches/${batchId}/cancel`;
+      const path = isClassifier ? `/api/classification-batches/${batchId}/discard` : `/api/required-field-check-batches/${batchId}/discard`;
       const batch = await api<ModuleBatch>(path, { method: "POST" });
-      setBatches((items) => items.map((item) => (item.id === batch.id ? batch : item)));
-      setMessage("배치 중단을 요청했습니다.");
+      setBatches((items) => [batch, ...items.filter((item) => item.id !== batch.id)].slice(0, 12));
+      setActiveBatchItemId(null);
+      setDocument(null);
+      setMessage("배치 기록만 남기고 업로드 산출물을 정리했습니다.");
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function resumeBatch(batchId: string) {
+    try {
+      const path = isClassifier ? `/api/classification-batches/${batchId}/resume` : `/api/required-field-check-batches/${batchId}/resume`;
+      const batch = await api<ModuleBatch>(path, { method: "POST" });
+      setBatches((items) => [batch, ...items.filter((item) => item.id !== batch.id)].slice(0, 12));
+      setActiveBatchId(batch.id);
+      setActiveBatchItemId(batch.items[0]?.id ?? null);
+      setMessage("등록된 파일 기준으로 배치 처리를 계속합니다.");
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -559,9 +602,9 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, on
 
   function selectFiles(files: FileList | File[] | null) {
     const incoming = Array.from(files ?? []);
-    const supported = incoming
-      .filter((file) => MODULE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
-      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const supported = sortUploadFiles(
+      incoming.filter((file) => MODULE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
+    );
     if (supported.length > uploadMaxBatchFiles) {
       setSelectedFiles([]);
       setSelectedFileIndex(0);
@@ -625,7 +668,8 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, on
                 batch={activeBatch}
                 activeItemId={activeBatchItemId}
                 onOpen={(item) => void openBatchItem(item)}
-                onCancel={() => void cancelBatch(activeBatch.id)}
+                onDiscard={() => void discardBatch(activeBatch.id)}
+                onResume={() => void resumeBatch(activeBatch.id)}
                 onExport={(format) => openModuleBatchExport(kind, activeBatch.id, format)}
               />
               <ModuleDocumentPreview document={document} activePage={activePage} activeImageUrl={activeImageUrl} regions={regions} showRegions={showRegions} onPage={setActivePage} />
@@ -948,19 +992,35 @@ function ModuleBatchRail(props: {
   batch: ModuleBatch;
   activeItemId: string | null;
   onOpen: (item: ModuleBatchItem) => void;
-  onCancel: () => void;
+  onDiscard: () => void;
+  onResume: () => void;
   onExport: (format: "csv" | "json") => void;
 }) {
+  const finishedCount = props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count;
+  const uploadedCount = props.batch.uploaded_count ?? props.batch.items.length;
+  const preprocessingCount = props.batch.preprocessing_count ?? props.batch.items.filter((item) => item.status === "preprocessing").length;
+  const runningCount = props.batch.running_count ?? props.batch.items.filter((item) => item.status === "running").length;
+  const queuedCount = props.batch.queued_count ?? props.batch.items.filter((item) => item.status === "queued").length;
   return (
     <aside className="module-batch-rail">
       <div className="module-batch-head">
         <div>
           <p className="eyebrow">배치</p>
-          <strong>{props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count} / {props.batch.total_count}</strong>
+          <strong>{finishedCount} / {props.batch.total_count}</strong>
+          <span>{uploadedCount} / {props.batch.total_count} 업로드됨 · {preprocessingCount} 전처리 · {runningCount} 실행 · {queuedCount} 대기</span>
         </div>
-        <button type="button" className="secondary compact danger-outline" disabled={!batchCanCancel(props.batch)} onClick={props.onCancel}>
-          중단
-        </button>
+        <div className="module-batch-head-actions">
+          {batchCanResume(props.batch) && (
+            <button type="button" className="secondary compact" onClick={props.onResume}>
+              계속 처리
+            </button>
+          )}
+          {batchCanDiscard(props.batch) && (
+            <button type="button" className="secondary compact danger-outline" onClick={props.onDiscard}>
+              중단·정리
+            </button>
+          )}
+        </div>
       </div>
       <progress value={props.batch.progress} max={1} />
       <div className="module-batch-actions">
@@ -1360,6 +1420,24 @@ function chunkFiles<T>(items: T[], size: number) {
   return chunks;
 }
 
+function sortUploadFiles(files: File[]) {
+  return [...files].sort((left, right) =>
+    fileDisplayName(left).localeCompare(fileDisplayName(right), undefined, {
+      numeric: true,
+      sensitivity: "base"
+    })
+  );
+}
+
+function fileDisplayName(file: File) {
+  return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+}
+
+function clientFileId(file: File, index: number) {
+  const relativePath = "webkitRelativePath" in file && typeof file.webkitRelativePath === "string" ? file.webkitRelativePath : "";
+  return `${index}:${relativePath || file.name}:${file.size}:${file.lastModified}`;
+}
+
 async function pollJob<T>(path: string): Promise<ModuleJob<T>> {
   for (let attempt = 0; attempt < 90; attempt += 1) {
     const job = await api<ModuleJob<T>>(path);
@@ -1489,12 +1567,23 @@ function configSummary(config: DocumentClassifier | RequiredFieldChecklist) {
   return `${config.items.length}개 항목 · ${config.regions.length}개 영역 · ${new Date(config.updated_at).toLocaleDateString()}`;
 }
 
-function batchCanCancel(batch: ModuleBatch) {
-  return ["running", "cancel_requested", "canceling"].includes(batch.status);
+function batchCanResume(batch: ModuleBatch) {
+  const uploadedCount = batch.uploaded_count ?? batch.items.length;
+  const queuedCount = batch.queued_count ?? batch.items.filter((item) => item.status === "queued").length;
+  const activeStaleCount =
+    (batch.preprocessing_count ?? batch.items.filter((item) => item.status === "preprocessing").length) +
+    (batch.running_count ?? batch.items.filter((item) => item.status === "running").length);
+  return !["completed", "completed_with_errors", "failed", "canceled"].includes(batch.status) && uploadedCount === batch.total_count && (queuedCount > 0 || activeStaleCount > 0);
+}
+
+function batchCanDiscard(batch: ModuleBatch) {
+  return !["completed", "completed_with_errors", "canceled"].includes(batch.status);
 }
 
 function moduleStatusLabel(status: string | null | undefined) {
   const labels: Record<string, string> = {
+    uploading: "업로드 중",
+    preprocessing: "전처리 중",
     queued: "대기 중",
     running: "실행 중",
     completed: "완료",

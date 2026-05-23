@@ -31,6 +31,10 @@ WORKFLOW_NODE_KINDS = {"input", "classifier", "branch", "kie", "required-checker
 WORKFLOW_TERMINAL_STATUSES = {"completed", "needs_review", "failed", "canceled"}
 
 
+class WorkflowPaused(RuntimeError):
+    pass
+
+
 class WorkflowDefinitionError(ValueError):
     def __init__(self, errors: list[str]):
         self.errors = errors
@@ -66,22 +70,32 @@ def workflow_definition_to_read(workflow: WorkflowDefinition, db: Session) -> di
     }
 
 
-def workflow_run_to_read(run: WorkflowRun) -> dict[str, Any]:
-    items = sorted(run.items, key=lambda item: (item.filename.casefold(), item.id))
+def workflow_run_to_read(run: WorkflowRun, *, include_items: bool = True) -> dict[str, Any]:
+    items = sorted(run.items, key=_workflow_item_sort_key)
+    counters = _workflow_run_counters(run, items)
     completed = [item for item in items if item.status in WORKFLOW_TERMINAL_STATUSES]
     failed = [item for item in items if item.status == "failed"]
     needs_review = [item for item in items if item.status == "needs_review"]
     return {
         "id": run.id,
         "workflow_id": run.workflow_id,
-        "status": _workflow_run_status(run, items),
+        "status": counters["status"],
         "total_count": run.total_count,
         "completed_count": len(completed),
         "failed_count": len(failed),
         "needs_review_count": len(needs_review),
-        "progress": len(completed) / run.total_count if run.total_count else 0,
+        "uploaded_count": counters["uploaded_count"],
+        "preprocessing_count": counters["preprocessing_count"],
+        "ready_count": counters["ready_count"],
+        "queued_count": counters["queued_count"],
+        "running_count": counters["running_count"],
+        "canceled_count": counters["canceled_count"],
+        "progress_phase": counters["progress_phase"],
+        "progress": counters["progress"],
         "error_message": run.error_message,
-        "items": [workflow_run_item_to_read(item) for item in items],
+        "upload_duration_ms": run.upload_duration_ms,
+        "inference_duration_ms": run.inference_duration_ms,
+        "items": [workflow_run_item_to_read(item) for item in items] if include_items else [],
         "created_at": run.created_at,
         "completed_at": run.completed_at,
     }
@@ -93,8 +107,11 @@ def workflow_run_item_to_read(item: WorkflowRunItem) -> dict[str, Any]:
         "run_id": item.run_id,
         "document_id": item.document_id,
         "filename": item.filename,
+        "upload_index": item.upload_index,
         "status": item.status,
         "error_message": item.error_message,
+        "upload_duration_ms": item.upload_duration_ms,
+        "inference_duration_ms": item.inference_duration_ms,
         "result": _json_or_empty(item.result_json),
         "created_at": item.created_at,
         "completed_at": item.completed_at,
@@ -136,11 +153,11 @@ def run_workflow_run(run_id: str) -> None:
             return
         run.status = "running"
         db.commit()
-        item_ids = [item.id for item in sorted(run.items, key=lambda item: (item.filename.casefold(), item.id))]
+        item_ids = [item.id for item in sorted(run.items, key=_workflow_item_sort_key) if item.status == "queued"]
     finally:
         db.close()
 
-    max_workers = max(1, min(get_settings().batch_max_workers, len(item_ids)))
+    max_workers = max(1, min(get_settings().workflow_max_workers, len(item_ids)))
     submitted_item_ids: set[str] = set()
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -164,7 +181,7 @@ def run_workflow_run(run_id: str) -> None:
 
 
 def workflow_run_export_payload(run: WorkflowRun) -> dict[str, Any]:
-    items = sorted(run.items, key=lambda item: (item.filename.casefold(), item.id))
+    items = sorted(run.items, key=_workflow_item_sort_key)
     rows = [_workflow_export_row(item) for item in items]
     return {
         "workflow_run_id": run.id,
@@ -192,6 +209,12 @@ def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
         item = db.get(WorkflowRunItem, item_id)
         if not item:
             return
+        run = db.get(WorkflowRun, item.run_id)
+        if run and run.status == "paused":
+            return
+        if item.status != "queued":
+            return
+        inference_started_at = datetime.utcnow()
         item.status = "running"
         item.error_message = None
         item.result_json = _json_dumps(
@@ -212,6 +235,7 @@ def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
         result = _execute_graph_for_item(db, item, graph)
         item.status = result["status"]
         item.error_message = result.get("error_message")
+        item.inference_duration_ms = _elapsed_ms(inference_started_at)
         item.result_json = _json_dumps(result)
         item.completed_at = datetime.utcnow()
         log_audit_event(
@@ -223,14 +247,17 @@ def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
             metadata={"document_id": item.document_id, "workflow_run_id": item.run_id},
         )
         db.commit()
+    except WorkflowPaused:
+        db.rollback()
     except Exception as exc:
         db.rollback()
-        _mark_workflow_item_failed(item_id, str(exc), db=db)
+        duration = _elapsed_ms(inference_started_at) if "inference_started_at" in locals() else None
+        _mark_workflow_item_failed(item_id, str(exc), db=db, inference_duration_ms=duration)
     finally:
         db.close()
 
 
-def _mark_workflow_item_failed(item_id: str, message: str, db: Session | None = None) -> None:
+def _mark_workflow_item_failed(item_id: str, message: str, db: Session | None = None, inference_duration_ms: int | None = None) -> None:
     owns_session = db is None
     session = db or SessionLocal()
     try:
@@ -240,6 +267,8 @@ def _mark_workflow_item_failed(item_id: str, message: str, db: Session | None = 
         existing = _json_or_empty(failed.result_json)
         failed.status = "failed"
         failed.error_message = message
+        if inference_duration_ms is not None:
+            failed.inference_duration_ms = inference_duration_ms
         failed.completed_at = datetime.utcnow()
         failed.result_json = _json_dumps(
             {
@@ -267,6 +296,18 @@ def _mark_workflow_item_failed(item_id: str, message: str, db: Session | None = 
     finally:
         if owns_session:
             session.close()
+
+
+def _elapsed_ms(started_at: datetime, ended_at: datetime | None = None) -> int:
+    ended = ended_at or datetime.utcnow()
+    return max(0, int((ended - started_at).total_seconds() * 1000))
+
+
+def _accumulate_run_inference_duration(run: WorkflowRun, ended_at: datetime) -> None:
+    if not run.inference_started_at:
+        return
+    run.inference_duration_ms = (run.inference_duration_ms or 0) + _elapsed_ms(run.inference_started_at, ended_at)
+    run.inference_started_at = None
 
 
 def _save_workflow_item_progress(
@@ -311,6 +352,7 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
     error_message: str | None = None
 
     while current_id:
+        _raise_if_workflow_paused(db, item, node_results, branch_path, visited, completed_node_ids, current_id)
         if current_id in visited:
             raise RuntimeError("Workflow cycle detected during execution")
         visited.append(current_id)
@@ -330,6 +372,7 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
         if kind == "classifier":
             node_result = _execute_classifier_node(db, item.document_id, node)
             node_results[current_id] = node_result
+            _raise_if_workflow_paused(db, item, node_results, branch_path, visited, completed_node_ids, current_id)
             if node_result["status"] == "failed":
                 status = "failed"
                 error_message = node_result.get("error_message")
@@ -373,6 +416,7 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
         if kind == "kie":
             node_result = _execute_kie_node(db, item.document_id, node)
             node_results[current_id] = node_result
+            _raise_if_workflow_paused(db, item, node_results, branch_path, visited, completed_node_ids, current_id)
             if node_result["status"] == "failed":
                 status = "failed"
                 error_message = node_result.get("error_message")
@@ -393,6 +437,7 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
         if kind == "required-checker":
             node_result = _execute_required_node(db, item.document_id, node)
             node_results[current_id] = node_result
+            _raise_if_workflow_paused(db, item, node_results, branch_path, visited, completed_node_ids, current_id)
             if node_result["status"] == "failed":
                 status = "failed"
                 error_message = node_result.get("error_message")
@@ -445,6 +490,33 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
         "node_results": node_results,
         **summary,
     }
+
+
+def _raise_if_workflow_paused(
+    db: Session,
+    item: WorkflowRunItem,
+    node_results: dict[str, Any],
+    branch_path: str | None,
+    visited: list[str],
+    completed_node_ids: list[str],
+    current_node_id: str | None,
+) -> None:
+    run = db.get(WorkflowRun, item.run_id)
+    if run and run.status == "paused":
+        item.status = "paused"
+        item.error_message = "Paused by user"
+        _save_workflow_item_progress(
+            db,
+            item,
+            node_results=node_results,
+            branch_path=branch_path,
+            visited=visited,
+            completed_node_ids=completed_node_ids,
+            current_node_id=current_node_id,
+            current_node_kind=None,
+            current_node_label=None,
+        )
+        raise WorkflowPaused()
 
 
 def _execute_classifier_node(db: Session, document_id: str, node: dict[str, Any]) -> dict[str, Any]:
@@ -573,10 +645,22 @@ def _finalize_workflow_run(run_id: str) -> None:
         run = db.get(WorkflowRun, run_id)
         if not run:
             return
+        now = datetime.utcnow()
         statuses = [item.status for item in run.items]
         if not statuses:
             run.status = "failed"
             run.error_message = "Workflow run has no items"
+        elif run.status == "paused" or any(status == "paused" for status in statuses):
+            run.status = "paused"
+            run.completed_at = None
+            _accumulate_run_inference_duration(run, now)
+            db.commit()
+            return
+        elif any(status in {"queued", "running", "preprocessing"} for status in statuses):
+            run.status = "running"
+            run.completed_at = None
+            db.commit()
+            return
         elif any(status == "failed" for status in statuses):
             run.status = "completed_with_errors"
         elif any(status == "needs_review" for status in statuses):
@@ -585,7 +669,8 @@ def _finalize_workflow_run(run_id: str) -> None:
             run.status = "canceled"
         else:
             run.status = "completed"
-        run.completed_at = datetime.utcnow()
+        run.completed_at = now
+        _accumulate_run_inference_duration(run, now)
         log_audit_event(
             db,
             entity_type="workflow_run",
@@ -604,6 +689,7 @@ def _fail_run(db: Session, run: WorkflowRun, message: str) -> None:
     run.status = "failed"
     run.error_message = message
     run.completed_at = now
+    _accumulate_run_inference_duration(run, now)
     for item in run.items:
         item.status = "failed"
         item.error_message = message
@@ -893,18 +979,68 @@ def _workflow_summary(node_results: dict[str, Any], branch_path: str | None) -> 
 
 
 def _workflow_run_status(run: WorkflowRun, items: list[WorkflowRunItem]) -> str:
-    if run.status in WORKFLOW_TERMINAL_STATUSES or run.status in {"completed_with_errors", "running", "queued", "failed"}:
+    if run.status in WORKFLOW_TERMINAL_STATUSES or run.status in {"completed_with_errors", "failed"}:
         return run.status
+    if run.status == "paused":
+        return "paused"
     statuses = [item.status for item in items]
+    if len(statuses) < run.total_count:
+        return "uploading"
     if not statuses:
         return run.status
+    if any(status == "preprocessing" for status in statuses):
+        return "preprocessing"
     if any(status == "running" for status in statuses):
         return "running"
+    if any(status == "paused" for status in statuses):
+        return "paused"
+    if run.status == "running" and any(status == "queued" for status in statuses):
+        return "running"
+    if any(status == "queued" for status in statuses):
+        return "queued"
     if any(status == "failed" for status in statuses):
         return "completed_with_errors"
     if any(status == "needs_review" for status in statuses):
         return "needs_review"
     return "completed"
+
+
+def _workflow_item_sort_key(item: WorkflowRunItem) -> tuple[int, int, str, str]:
+    if item.upload_index is None:
+        return (1, 0, item.filename.casefold(), item.id)
+    return (0, item.upload_index, item.filename.casefold(), item.id)
+
+
+def _workflow_run_counters(run: WorkflowRun, items: list[WorkflowRunItem]) -> dict[str, Any]:
+    statuses = [item.status for item in items]
+    terminal_count = sum(1 for status in statuses if status in WORKFLOW_TERMINAL_STATUSES)
+    preprocessing_count = sum(1 for status in statuses if status == "preprocessing")
+    queued_count = sum(1 for status in statuses if status == "queued")
+    running_count = sum(1 for status in statuses if status == "running")
+    canceled_count = sum(1 for status in statuses if status == "canceled")
+    paused_count = sum(1 for status in statuses if status == "paused")
+    status = _workflow_run_status(run, items)
+    if len(statuses) < run.total_count:
+        progress_phase = "uploading"
+    elif preprocessing_count:
+        progress_phase = "preprocessing"
+    elif status == "paused" or paused_count:
+        progress_phase = "paused"
+    elif running_count or (run.status == "running" and queued_count):
+        progress_phase = "running"
+    else:
+        progress_phase = status
+    return {
+        "status": status,
+        "uploaded_count": len(statuses),
+        "preprocessing_count": preprocessing_count,
+        "ready_count": max(0, len(statuses) - preprocessing_count),
+        "queued_count": queued_count,
+        "running_count": running_count,
+        "canceled_count": canceled_count,
+        "progress_phase": progress_phase,
+        "progress": terminal_count / run.total_count if run.total_count else 0,
+    }
 
 
 def _workflow_export_row(item: WorkflowRunItem) -> dict[str, Any]:
@@ -916,6 +1052,8 @@ def _workflow_export_row(item: WorkflowRunItem) -> dict[str, Any]:
         "workflow_run_item_id": item.id,
         "status": item.status,
         "error_message": item.error_message or result.get("error_message"),
+        "upload_duration_ms": item.upload_duration_ms,
+        "inference_duration_ms": item.inference_duration_ms,
         "classification_status": classification.get("status"),
         "class_name": classification.get("class_name"),
         "branch_path": result.get("branch_path"),
@@ -939,6 +1077,8 @@ def _workflow_export_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "workflow_run_item_id",
         "status",
         "error_message",
+        "upload_duration_ms",
+        "inference_duration_ms",
         "classification_status",
         "class_name",
         "branch_path",

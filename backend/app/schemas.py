@@ -173,6 +173,7 @@ class DocumentRead(BaseModel):
     size_bytes: int
     page_count: int
     status: str
+    error_message: str | None = None
     document_type: str | None = None
     language: str | None = None
     ai_summary: str | None = None
@@ -404,6 +405,13 @@ class ClassificationBatchRead(BaseModel):
     completed_count: int
     failed_count: int
     canceled_count: int
+    uploaded_count: int = 0
+    preprocessing_count: int = 0
+    ready_count: int = 0
+    queued_count: int = 0
+    running_count: int = 0
+    needs_review_count: int = 0
+    progress_phase: str = "queued"
     progress: float
     items: list[ClassificationBatchItemRead]
     created_at: datetime
@@ -552,6 +560,13 @@ class RequiredFieldCheckBatchRead(BaseModel):
     completed_count: int
     failed_count: int
     canceled_count: int
+    uploaded_count: int = 0
+    preprocessing_count: int = 0
+    ready_count: int = 0
+    queued_count: int = 0
+    running_count: int = 0
+    needs_review_count: int = 0
+    progress_phase: str = "queued"
     progress: float
     items: list[RequiredFieldCheckBatchItemRead]
     created_at: datetime
@@ -629,6 +644,39 @@ class SystemStatusRead(BaseModel):
     has_vlm_credentials: bool
     is_mock: bool
     upload_max_batch_files: int
+    upload_chunk_files: int
+    preprocess_max_workers: int
+    workflow_max_workers: int
+    document_page_max_long_edge: int
+    document_page_jpeg_quality: int
+
+
+class UploadOwnerCounters(BaseModel):
+    uploaded_count: int = 0
+    preprocessing_count: int = 0
+    ready_count: int = 0
+    queued_count: int = 0
+    running_count: int = 0
+    completed_count: int = 0
+    failed_count: int = 0
+    canceled_count: int = 0
+    needs_review_count: int = 0
+    progress_phase: str = "queued"
+
+
+class BatchInitRequest(BaseModel):
+    schema_id: str
+    total_count: int = Field(ge=1)
+
+
+class ClassificationBatchInitRequest(BaseModel):
+    classifier_id: str
+    total_count: int = Field(ge=1)
+
+
+class RequiredFieldCheckBatchInitRequest(BaseModel):
+    checklist_id: str
+    total_count: int = Field(ge=1)
 
 
 class BatchItemRead(BaseModel):
@@ -650,6 +698,13 @@ class BatchRead(BaseModel):
     completed_count: int
     failed_count: int
     canceled_count: int
+    uploaded_count: int = 0
+    preprocessing_count: int = 0
+    ready_count: int = 0
+    queued_count: int = 0
+    running_count: int = 0
+    needs_review_count: int = 0
+    progress_phase: str = "queued"
     progress: float
     items: list[BatchItemRead]
     created_at: datetime
@@ -721,8 +776,11 @@ class WorkflowRunItemRead(BaseModel):
     run_id: str
     document_id: str
     filename: str
+    upload_index: int | None = None
     status: str
     error_message: str | None = None
+    upload_duration_ms: int | None = None
+    inference_duration_ms: int | None = None
     result: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     completed_at: datetime | None
@@ -736,8 +794,17 @@ class WorkflowRunRead(BaseModel):
     completed_count: int
     failed_count: int
     needs_review_count: int
+    uploaded_count: int = 0
+    preprocessing_count: int = 0
+    ready_count: int = 0
+    queued_count: int = 0
+    running_count: int = 0
+    canceled_count: int = 0
+    progress_phase: str = "queued"
     progress: float
     error_message: str | None = None
+    upload_duration_ms: int | None = None
+    inference_duration_ms: int | None = None
     items: list[WorkflowRunItemRead]
     created_at: datetime
     completed_at: datetime | None

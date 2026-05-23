@@ -2,6 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,8 +40,12 @@ DEFAULT_ENV_VALUES = {
     "OBJECT_STORAGE_PREFIX": "",
     "UPLOAD_MAX_FILE_BYTES": "52428800",
     "UPLOAD_MAX_BATCH_FILES": "10000",
+    "UPLOAD_CHUNK_FILES": "10",
     "UPLOAD_MAX_PDF_PAGES": "30",
     "UPLOAD_MAX_IMAGE_PIXELS": "50000000",
+    "PREPROCESS_MAX_WORKERS": "2",
+    "DOCUMENT_PAGE_MAX_LONG_EDGE": "3000",
+    "DOCUMENT_PAGE_JPEG_QUALITY": "88",
     "PROCESSING_TMP_DIR": "",
     "UPLOAD_RETENTION_HOURS": "",
     "RETENTION_CLEANUP_INTERVAL_SECONDS": "86400",
@@ -58,6 +63,7 @@ DEFAULT_ENV_VALUES = {
     "VLM_TOP_P": "",
     "VLM_SERVICE_TIER": "",
     "BATCH_MAX_WORKERS": "4",
+    "WORKFLOW_MAX_WORKERS": "1",
     "VLM_MAX_CONCURRENT_REQUESTS": "8",
     "KIE_FIELD_GROUP_SIZE": "2",
     "LIBREOFFICE_PATH": DEFAULT_LIBREOFFICE_PATH,
@@ -91,8 +97,12 @@ class Settings(BaseSettings):
     object_storage_prefix: str | None = None
     upload_max_file_bytes: int = 50 * 1024 * 1024
     upload_max_batch_files: int = 10000
+    upload_chunk_files: int = 10
     upload_max_pdf_pages: int = 30
     upload_max_image_pixels: int = 50_000_000
+    preprocess_max_workers: int = 2
+    document_page_max_long_edge: int = 3000
+    document_page_jpeg_quality: int = 88
     processing_tmp_dir: str | None = None
     upload_retention_hours: int | None = None
     retention_cleanup_interval_seconds: int = 86400
@@ -111,6 +121,7 @@ class Settings(BaseSettings):
     vlm_top_p: str | None = None
     vlm_service_tier: str | None = None
     batch_max_workers: int = 4
+    workflow_max_workers: int = 1
     vlm_max_concurrent_requests: int = 8
     kie_field_group_size: int = 2
 
@@ -122,6 +133,13 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @field_validator("upload_retention_hours", mode="before")
+    @classmethod
+    def blank_optional_int_to_none(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def resolved_database_url(self) -> str:

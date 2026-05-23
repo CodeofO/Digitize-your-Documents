@@ -76,9 +76,11 @@ from app.models import (
 from app.raw_extractor import RawExtractionError, RawExtractionOptions, create_raw_outputs, save_raw_upload, validate_raw_upload
 from app.schemas import (
     ArchiveSearchResult,
+    BatchInitRequest,
     AuditEventRead,
     BatchItemRead,
     BatchRead,
+    ClassificationBatchInitRequest,
     ClassificationBatchItemRead,
     ClassificationBatchRead,
     ClassificationJobCreate,
@@ -98,6 +100,7 @@ from app.schemas import (
     ExtractionJobRead,
     ExtractionResultPatch,
     RawExtractionRead,
+    RequiredFieldCheckBatchInitRequest,
     RequiredFieldCheckBatchItemRead,
     RequiredFieldCheckBatchRead,
     RequiredFieldCheckJobCreate,
@@ -226,6 +229,11 @@ def system_status() -> SystemStatusRead:
         has_vlm_credentials=bool(settings.resolved_vlm_api_key and settings.resolved_vlm_model_name),
         is_mock=provider == "mock",
         upload_max_batch_files=settings.upload_max_batch_files,
+        upload_chunk_files=settings.upload_chunk_files,
+        preprocess_max_workers=settings.preprocess_max_workers,
+        workflow_max_workers=settings.workflow_max_workers,
+        document_page_max_long_edge=settings.document_page_max_long_edge,
+        document_page_jpeg_quality=settings.document_page_jpeg_quality,
     )
 
 
@@ -427,7 +435,7 @@ def get_document_page_image(document_id: str, page_number: int, db: Session = De
     path = materialize_storage_ref(page.image_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Document page image missing")
-    return FileResponse(path, media_type="image/png")
+    return FileResponse(path, media_type=_image_media_type(path))
 
 
 @app.get("/api/documents/{document_id}/pages/{page_number}/thumbnail")
@@ -1369,7 +1377,7 @@ async def create_workflow_run(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
-    _, files = await _read_batch_upload_form(request)
+    form, files = await _read_batch_upload_form(request)
     workflow = db.get(WorkflowDefinition, workflow_id)
     if not workflow or workflow.archived:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -1381,32 +1389,9 @@ async def create_workflow_run(
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
 
-    run = WorkflowRun(workflow_id=workflow.id, status="running", total_count=len(files))
+    run = WorkflowRun(workflow_id=workflow.id, status="uploading", total_count=len(files))
     db.add(run)
     db.flush()
-    for file in sorted(files, key=_upload_file_sort_key):
-        try:
-            document = _create_document_from_upload(file, db)
-        finally:
-            await file.close()
-        db.flush()
-        db.add(
-            WorkflowRunItem(
-                run_id=run.id,
-                document_id=document.id,
-                filename=document.filename,
-                status="queued",
-                result_json=json.dumps({"document_id": document.id, "filename": document.filename, "node_results": {}}, ensure_ascii=False),
-            )
-        )
-        log_audit_event(
-            db,
-            entity_type="workflow_run_item",
-            entity_id=run.id,
-            action="queued",
-            message=f"Queued workflow document {document.filename}",
-            metadata={"document_id": document.id},
-        )
     log_audit_event(
         db,
         entity_type="workflow_run",
@@ -1414,6 +1399,22 @@ async def create_workflow_run(
         action="created",
         message=f"Created workflow run with {len(files)} file(s)",
         metadata={"workflow_id": workflow.id, "file_count": len(files)},
+    )
+    db.commit()
+    await _append_workflow_upload_items(run, form, files, db)
+    db.refresh(run)
+    _validate_owner_can_start(run, run.items)
+    now = datetime.utcnow()
+    run.status = "running"
+    run.upload_duration_ms = _workflow_upload_duration_ms(run)
+    run.inference_started_at = now
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="started",
+        message=f"Started workflow run with {run.total_count} file(s)",
+        metadata={"workflow_id": run.workflow_id, "file_count": run.total_count},
     )
     db.commit()
     db.refresh(run)
@@ -1438,7 +1439,7 @@ def init_workflow_run(
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
 
-    run = WorkflowRun(workflow_id=workflow.id, status="queued", total_count=payload.total_count)
+    run = WorkflowRun(workflow_id=workflow.id, status="uploading", total_count=payload.total_count)
     db.add(run)
     db.flush()
     log_audit_event(
@@ -1460,40 +1461,13 @@ async def append_workflow_run_items(
     request: Request,
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
-    _, files = await _read_batch_upload_form(request)
+    form, files = await _read_batch_upload_form(request)
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
-    if run.status != "queued":
+    if run.status not in {"uploading", "queued"}:
         raise HTTPException(status_code=409, detail="Workflow run already started")
-    current_count = len(run.items)
-    if current_count + len(files) > run.total_count:
-        raise HTTPException(status_code=413, detail="Workflow run upload exceeds declared file count")
-
-    for file in sorted(files, key=_upload_file_sort_key):
-        try:
-            document = _create_document_from_upload(file, db)
-        finally:
-            await file.close()
-        db.flush()
-        db.add(
-            WorkflowRunItem(
-                run_id=run.id,
-                document_id=document.id,
-                filename=document.filename,
-                status="queued",
-                result_json=json.dumps({"document_id": document.id, "filename": document.filename, "node_results": {}}, ensure_ascii=False),
-            )
-        )
-        log_audit_event(
-            db,
-            entity_type="workflow_run_item",
-            entity_id=run.id,
-            action="queued",
-            message=f"Queued workflow document {document.filename}",
-            metadata={"document_id": document.id},
-        )
-    db.commit()
+    await _append_workflow_upload_items(run, form, files, db)
     db.refresh(run)
     return WorkflowRunRead(**workflow_run_to_read(run))
 
@@ -1507,11 +1481,13 @@ def start_workflow_run(
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
-    if run.status != "queued":
+    if run.status not in {"uploading", "queued"}:
         return WorkflowRunRead(**workflow_run_to_read(run))
-    if len(run.items) != run.total_count:
-        raise HTTPException(status_code=422, detail=f"Workflow run has {len(run.items)} of {run.total_count} expected files")
+    _validate_owner_can_start(run, run.items)
+    now = datetime.utcnow()
     run.status = "running"
+    run.upload_duration_ms = _workflow_upload_duration_ms(run)
+    run.inference_started_at = now
     log_audit_event(
         db,
         entity_type="workflow_run",
@@ -1519,6 +1495,141 @@ def start_workflow_run(
         action="started",
         message=f"Started workflow run with {run.total_count} file(s)",
         metadata={"workflow_id": run.workflow_id, "file_count": run.total_count},
+    )
+    db.commit()
+    db.refresh(run)
+    response = WorkflowRunRead(**workflow_run_to_read(run))
+    background_tasks.add_task(run_workflow_run, run.id)
+    return response
+
+
+@app.post("/api/workflow-runs/{run_id}/discard", response_model=WorkflowRunRead)
+def discard_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    document_ids = [item.document_id for item in run.items]
+    item_count = len(run.items)
+    for item in list(run.items):
+        db.delete(item)
+    _delete_document_payloads(document_ids, db)
+    run.status = "canceled"
+    run.error_message = "Stopped and discarded uploaded payloads"
+    run.completed_at = datetime.utcnow()
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="discarded",
+        message=f"Discarded workflow run payloads for {item_count} item(s)",
+        metadata={"workflow_id": run.workflow_id, "discarded_count": item_count},
+    )
+    db.commit()
+    db.refresh(run)
+    return WorkflowRunRead(**workflow_run_to_read(run))
+
+
+@app.post("/api/workflow-runs/{run_id}/resume", response_model=WorkflowRunRead)
+def resume_workflow_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> WorkflowRunRead:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if run.status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}:
+        raise HTTPException(status_code=409, detail="Workflow run is already terminal")
+    if not run.items:
+        raise HTTPException(status_code=422, detail="No uploaded workflow items are available to continue")
+    _validate_owner_upload_complete(run, run.items)
+    resumed_count = _prepare_workflow_run_resume(run)
+    run.status = "running" if resumed_count else workflow_run_to_read(run)["status"]
+    run.completed_at = None if resumed_count else run.completed_at
+    if resumed_count:
+        run.inference_started_at = datetime.utcnow()
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="resumed",
+        message=f"Continued workflow run with {resumed_count} queued item(s)",
+        metadata={"workflow_id": run.workflow_id, "queued_count": resumed_count},
+    )
+    db.commit()
+    db.refresh(run)
+    response = WorkflowRunRead(**workflow_run_to_read(run))
+    if resumed_count:
+        background_tasks.add_task(run_workflow_run, run.id)
+    return response
+
+
+@app.post("/api/workflow-runs/{run_id}/pause", response_model=WorkflowRunRead)
+def pause_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if run.status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}:
+        raise HTTPException(status_code=409, detail="Workflow run is already terminal")
+    if run.status == "paused":
+        return WorkflowRunRead(**workflow_run_to_read(run))
+
+    paused_count = 0
+    now = datetime.utcnow()
+    for item in run.items:
+        if item.status == "queued":
+            item.status = "paused"
+            item.error_message = "Paused by user"
+            item.completed_at = now
+            paused_count += 1
+    run.status = "paused"
+    run.completed_at = None
+    run.error_message = "Paused by user"
+    _accumulate_workflow_run_inference_duration(run, now)
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="paused",
+        message=f"Paused workflow run; {paused_count} queued item(s) held",
+        metadata={"workflow_id": run.workflow_id, "paused_count": paused_count},
+    )
+    db.commit()
+    db.refresh(run)
+    return WorkflowRunRead(**workflow_run_to_read(run))
+
+
+@app.post("/api/workflow-runs/{run_id}/restart", response_model=WorkflowRunRead)
+def restart_workflow_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> WorkflowRunRead:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if run.status in {"completed", "needs_review", "canceled"} and not any(item.status in {"failed", "paused", "canceled"} for item in run.items):
+        raise HTTPException(status_code=409, detail="Workflow run has no failed or paused items to restart")
+    if any(item.status == "running" for item in run.items):
+        raise HTTPException(status_code=409, detail="Workflow run still has running item(s). Pause first and wait until running count is 0.")
+    if not run.items:
+        raise HTTPException(status_code=422, detail="No uploaded workflow items are available to restart")
+    _validate_owner_upload_complete(run, run.items)
+    queued_count = _prepare_workflow_run_restart(run)
+    if not queued_count:
+        raise HTTPException(status_code=422, detail="No restartable workflow items are available")
+    run.status = "running"
+    run.completed_at = None
+    run.error_message = None
+    run.upload_duration_ms = _workflow_upload_duration_ms(run)
+    run.inference_started_at = datetime.utcnow()
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="restarted",
+        message=f"Restarted workflow run with {queued_count} queued item(s)",
+        metadata={"workflow_id": run.workflow_id, "queued_count": queued_count},
     )
     db.commit()
     db.refresh(run)
@@ -1539,6 +1650,14 @@ def get_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunR
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
     return WorkflowRunRead(**workflow_run_to_read(run))
+
+
+@app.get("/api/workflow-runs/{run_id}/summary", response_model=WorkflowRunRead)
+def get_workflow_run_summary(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    return WorkflowRunRead(**workflow_run_to_read(run, include_items=False))
 
 
 @app.get("/api/workflow-runs/{run_id}/export")
@@ -1580,42 +1699,9 @@ async def create_batch(
         raise HTTPException(status_code=400, detail="At least one file is required")
     _validate_upload_file_count(files)
 
-    batch = Batch(schema_id=schema.id, schema_version=1, status="running", total_count=len(files))
+    batch = Batch(schema_id=schema.id, schema_version=1, status="uploading", total_count=len(files))
     db.add(batch)
     db.flush()
-    job_ids: list[str] = []
-    for file in sorted(files, key=_upload_file_sort_key):
-        try:
-            document = _create_document_from_upload(file, db)
-        finally:
-            await file.close()
-        job = ExtractionJob(
-            document_id=document.id,
-            schema_id=schema.id,
-            schema_version=1,
-            status="queued",
-        )
-        db.add(job)
-        db.flush()
-        db.add(BatchItem(batch_id=batch.id, document_id=document.id, job_id=job.id, filename=document.filename))
-        log_audit_event(
-            db,
-            entity_type="document",
-            entity_id=document.id,
-            action="uploaded",
-            message=f"Batch uploaded {document.filename}",
-            metadata={"batch_id": batch.id, "filename": document.filename},
-        )
-        log_audit_event(
-            db,
-            entity_type="extraction_job",
-            entity_id=job.id,
-            action="created",
-            message="Batch extraction job created",
-            metadata={"batch_id": batch.id, "document_id": document.id, "schema_id": schema.id},
-        )
-        job_ids.append(job.id)
-
     log_audit_event(
         db,
         entity_type="batch",
@@ -1625,10 +1711,137 @@ async def create_batch(
         metadata={"schema_id": schema.id, "file_count": len(files)},
     )
     db.commit()
+    await _append_extraction_batch_items(batch, form, files, db)
+    db.refresh(batch)
+    _validate_owner_can_start(batch, batch.items)
+    batch.status = "running"
+    job_ids = _queued_extraction_job_ids(batch)
+    log_audit_event(
+        db,
+        entity_type="batch",
+        entity_id=batch.id,
+        action="started",
+        message=f"Started batch with {len(job_ids)} queued job(s)",
+        metadata={"schema_id": schema.id, "queued_count": len(job_ids)},
+    )
+    db.commit()
     db.refresh(batch)
     response = _batch_read(batch)
     db.close()
     background_tasks.add_task(run_batch_jobs, batch.id, job_ids)
+    return response
+
+
+@app.post("/api/batches/init", response_model=BatchRead)
+def init_batch(payload: BatchInitRequest, db: Session = Depends(get_db)) -> BatchRead:
+    schema = db.get(Schema, payload.schema_id)
+    if not schema:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    _validate_declared_batch_file_count(payload.total_count)
+    batch = Batch(schema_id=schema.id, schema_version=1, status="uploading", total_count=payload.total_count)
+    db.add(batch)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="batch",
+        entity_id=batch.id,
+        action="upload_initialized",
+        message=f"Initialized batch upload with {payload.total_count} file(s)",
+        metadata={"schema_id": schema.id, "file_count": payload.total_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    return _batch_read(batch)
+
+
+@app.post("/api/batches/{batch_id}/items", response_model=BatchRead)
+async def append_batch_items(batch_id: str, request: Request, db: Session = Depends(get_db)) -> BatchRead:
+    form, files = await _read_batch_upload_form(request)
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if batch.status not in {"uploading", "queued"}:
+        raise HTTPException(status_code=409, detail="Batch already started")
+    await _append_extraction_batch_items(batch, form, files, db)
+    db.refresh(batch)
+    return _batch_read(batch)
+
+
+@app.post("/api/batches/{batch_id}/start", response_model=BatchRead)
+def start_batch(batch_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> BatchRead:
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if batch.status not in {"uploading", "queued"}:
+        return _batch_read(batch)
+    _validate_owner_can_start(batch, batch.items)
+    batch.status = "running"
+    job_ids = _queued_extraction_job_ids(batch)
+    log_audit_event(
+        db,
+        entity_type="batch",
+        entity_id=batch.id,
+        action="started",
+        message=f"Started batch with {len(job_ids)} queued job(s)",
+        metadata={"schema_id": batch.schema_id, "queued_count": len(job_ids)},
+    )
+    db.commit()
+    db.refresh(batch)
+    response = _batch_read(batch)
+    db.close()
+    background_tasks.add_task(run_batch_jobs, batch.id, job_ids)
+    return response
+
+
+@app.post("/api/batches/{batch_id}/discard", response_model=BatchRead)
+def discard_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    discarded_count = _discard_batch_items(batch, db)
+    batch.status = "canceled"
+    batch.completed_at = datetime.utcnow()
+    log_audit_event(
+        db,
+        entity_type="batch",
+        entity_id=batch.id,
+        action="discarded",
+        message=f"Discarded batch payloads for {discarded_count} item(s)",
+        metadata={"schema_id": batch.schema_id, "discarded_count": discarded_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    return _batch_read(batch)
+
+
+@app.post("/api/batches/{batch_id}/resume", response_model=BatchRead)
+def resume_batch(batch_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> BatchRead:
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if batch.status in {"completed", "completed_with_errors", "failed", "canceled"}:
+        raise HTTPException(status_code=409, detail="Batch is already terminal")
+    if not batch.items:
+        raise HTTPException(status_code=422, detail="No uploaded batch items are available to continue")
+    _validate_owner_upload_complete(batch, batch.items)
+    _prepare_job_batch_resume(batch.items)
+    job_ids = _queued_extraction_job_ids(batch)
+    batch.status = "running" if job_ids else _batch_read(batch).status
+    batch.completed_at = None if job_ids else batch.completed_at
+    log_audit_event(
+        db,
+        entity_type="batch",
+        entity_id=batch.id,
+        action="resumed",
+        message=f"Continued batch with {len(job_ids)} queued job(s)",
+        metadata={"schema_id": batch.schema_id, "queued_count": len(job_ids)},
+    )
+    db.commit()
+    db.refresh(batch)
+    response = _batch_read(batch)
+    if job_ids:
+        db.close()
+        background_tasks.add_task(run_batch_jobs, batch.id, job_ids)
     return response
 
 
@@ -1644,6 +1857,14 @@ def get_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     return _batch_read(batch)
+
+
+@app.get("/api/batches/{batch_id}/summary", response_model=BatchRead)
+def get_batch_summary(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return _batch_read(batch, include_items=False)
 
 
 @app.post("/api/batches/{batch_id}/cancel", response_model=BatchRead)
@@ -1761,37 +1982,9 @@ async def create_classification_batch(
         raise HTTPException(status_code=400, detail="At least one file is required")
     _validate_upload_file_count(files)
 
-    batch = ClassificationBatch(classifier_id=classifier.id, status="running", total_count=len(files))
+    batch = ClassificationBatch(classifier_id=classifier.id, status="uploading", total_count=len(files))
     db.add(batch)
     db.flush()
-    job_ids: list[str] = []
-    for file in sorted(files, key=_upload_file_sort_key):
-        try:
-            document = _create_document_from_upload(file, db)
-        finally:
-            await file.close()
-        db.flush()
-        job = ClassificationJob(document_id=document.id, classifier_id=classifier.id, status="queued")
-        db.add(job)
-        db.flush()
-        db.add(
-            ClassificationBatchItem(
-                batch_id=batch.id,
-                document_id=document.id,
-                job_id=job.id,
-                filename=document.filename,
-            )
-        )
-        log_audit_event(
-            db,
-            entity_type="classification_job",
-            entity_id=job.id,
-            action="queued",
-            message="Queued classification batch job",
-            metadata={"batch_id": batch.id, "document_id": document.id, "classifier_id": classifier.id},
-        )
-        job_ids.append(job.id)
-
     log_audit_event(
         db,
         entity_type="classification_batch",
@@ -1801,10 +1994,141 @@ async def create_classification_batch(
         metadata={"classifier_id": classifier.id, "file_count": len(files)},
     )
     db.commit()
+    await _append_classification_batch_items(batch, form, files, db)
+    db.refresh(batch)
+    _validate_owner_can_start(batch, batch.items)
+    batch.status = "running"
+    job_ids = _queued_classification_job_ids(batch)
+    log_audit_event(
+        db,
+        entity_type="classification_batch",
+        entity_id=batch.id,
+        action="started",
+        message=f"Started classification batch with {len(job_ids)} queued job(s)",
+        metadata={"classifier_id": classifier.id, "queued_count": len(job_ids)},
+    )
+    db.commit()
     db.refresh(batch)
     response = _classification_batch_read(batch)
     db.close()
     background_tasks.add_task(run_classification_batch, batch.id, job_ids)
+    return response
+
+
+@app.post("/api/classification-batches/init", response_model=ClassificationBatchRead)
+def init_classification_batch(payload: ClassificationBatchInitRequest, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    classifier = db.get(DocumentClassifier, payload.classifier_id)
+    if not classifier or classifier.archived:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
+    _validate_declared_batch_file_count(payload.total_count)
+    batch = ClassificationBatch(classifier_id=classifier.id, status="uploading", total_count=payload.total_count)
+    db.add(batch)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="classification_batch",
+        entity_id=batch.id,
+        action="upload_initialized",
+        message=f"Initialized classification batch upload with {payload.total_count} file(s)",
+        metadata={"classifier_id": classifier.id, "file_count": payload.total_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    return _classification_batch_read(batch)
+
+
+@app.post("/api/classification-batches/{batch_id}/items", response_model=ClassificationBatchRead)
+async def append_classification_batch_items(batch_id: str, request: Request, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    form, files = await _read_batch_upload_form(request)
+    batch = db.get(ClassificationBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Classification batch not found")
+    if batch.status not in {"uploading", "queued"}:
+        raise HTTPException(status_code=409, detail="Classification batch already started")
+    await _append_classification_batch_items(batch, form, files, db)
+    db.refresh(batch)
+    return _classification_batch_read(batch)
+
+
+@app.post("/api/classification-batches/{batch_id}/start", response_model=ClassificationBatchRead)
+def start_classification_batch(batch_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    batch = db.get(ClassificationBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Classification batch not found")
+    if batch.status not in {"uploading", "queued"}:
+        return _classification_batch_read(batch)
+    _validate_owner_can_start(batch, batch.items)
+    batch.status = "running"
+    job_ids = _queued_classification_job_ids(batch)
+    log_audit_event(
+        db,
+        entity_type="classification_batch",
+        entity_id=batch.id,
+        action="started",
+        message=f"Started classification batch with {len(job_ids)} queued job(s)",
+        metadata={"classifier_id": batch.classifier_id, "queued_count": len(job_ids)},
+    )
+    db.commit()
+    db.refresh(batch)
+    response = _classification_batch_read(batch)
+    db.close()
+    background_tasks.add_task(run_classification_batch, batch.id, job_ids)
+    return response
+
+
+@app.post("/api/classification-batches/{batch_id}/discard", response_model=ClassificationBatchRead)
+def discard_classification_batch(batch_id: str, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    batch = db.get(ClassificationBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Classification batch not found")
+    discarded_count = _discard_batch_items(batch, db)
+    batch.status = "canceled"
+    batch.completed_at = datetime.utcnow()
+    log_audit_event(
+        db,
+        entity_type="classification_batch",
+        entity_id=batch.id,
+        action="discarded",
+        message=f"Discarded classification batch payloads for {discarded_count} item(s)",
+        metadata={"classifier_id": batch.classifier_id, "discarded_count": discarded_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    return _classification_batch_read(batch)
+
+
+@app.post("/api/classification-batches/{batch_id}/resume", response_model=ClassificationBatchRead)
+def resume_classification_batch(
+    batch_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> ClassificationBatchRead:
+    batch = db.get(ClassificationBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Classification batch not found")
+    if batch.status in {"completed", "completed_with_errors", "failed", "canceled"}:
+        raise HTTPException(status_code=409, detail="Classification batch is already terminal")
+    if not batch.items:
+        raise HTTPException(status_code=422, detail="No uploaded classification items are available to continue")
+    _validate_owner_upload_complete(batch, batch.items)
+    _prepare_job_batch_resume(batch.items)
+    job_ids = _queued_classification_job_ids(batch)
+    batch.status = "running" if job_ids else _classification_batch_read(batch).status
+    batch.completed_at = None if job_ids else batch.completed_at
+    log_audit_event(
+        db,
+        entity_type="classification_batch",
+        entity_id=batch.id,
+        action="resumed",
+        message=f"Continued classification batch with {len(job_ids)} queued job(s)",
+        metadata={"classifier_id": batch.classifier_id, "queued_count": len(job_ids)},
+    )
+    db.commit()
+    db.refresh(batch)
+    response = _classification_batch_read(batch)
+    if job_ids:
+        db.close()
+        background_tasks.add_task(run_classification_batch, batch.id, job_ids)
     return response
 
 
@@ -1823,6 +2147,14 @@ def get_classification_batch(batch_id: str, db: Session = Depends(get_db)) -> Cl
     if not batch:
         raise HTTPException(status_code=404, detail="Classification batch not found")
     return _classification_batch_read(batch)
+
+
+@app.get("/api/classification-batches/{batch_id}/summary", response_model=ClassificationBatchRead)
+def get_classification_batch_summary(batch_id: str, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    batch = db.get(ClassificationBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Classification batch not found")
+    return _classification_batch_read(batch, include_items=False)
 
 
 @app.post("/api/classification-batches/{batch_id}/cancel", response_model=ClassificationBatchRead)
@@ -1900,37 +2232,9 @@ async def create_required_field_check_batch(
         raise HTTPException(status_code=400, detail="At least one file is required")
     _validate_upload_file_count(files)
 
-    batch = RequiredFieldCheckBatch(checklist_id=checklist.id, status="running", total_count=len(files))
+    batch = RequiredFieldCheckBatch(checklist_id=checklist.id, status="uploading", total_count=len(files))
     db.add(batch)
     db.flush()
-    job_ids: list[str] = []
-    for file in sorted(files, key=_upload_file_sort_key):
-        try:
-            document = _create_document_from_upload(file, db)
-        finally:
-            await file.close()
-        db.flush()
-        job = RequiredFieldCheckJob(document_id=document.id, checklist_id=checklist.id, status="queued")
-        db.add(job)
-        db.flush()
-        db.add(
-            RequiredFieldCheckBatchItem(
-                batch_id=batch.id,
-                document_id=document.id,
-                job_id=job.id,
-                filename=document.filename,
-            )
-        )
-        log_audit_event(
-            db,
-            entity_type="required_field_check_job",
-            entity_id=job.id,
-            action="queued",
-            message="Queued required field check batch job",
-            metadata={"batch_id": batch.id, "document_id": document.id, "checklist_id": checklist.id},
-        )
-        job_ids.append(job.id)
-
     log_audit_event(
         db,
         entity_type="required_field_check_batch",
@@ -1940,10 +2244,152 @@ async def create_required_field_check_batch(
         metadata={"checklist_id": checklist.id, "file_count": len(files)},
     )
     db.commit()
+    await _append_required_field_batch_items(batch, form, files, db)
+    db.refresh(batch)
+    _validate_owner_can_start(batch, batch.items)
+    batch.status = "running"
+    job_ids = _queued_required_field_job_ids(batch)
+    log_audit_event(
+        db,
+        entity_type="required_field_check_batch",
+        entity_id=batch.id,
+        action="started",
+        message=f"Started required field check batch with {len(job_ids)} queued job(s)",
+        metadata={"checklist_id": checklist.id, "queued_count": len(job_ids)},
+    )
+    db.commit()
     db.refresh(batch)
     response = _required_field_batch_read(batch)
     db.close()
     background_tasks.add_task(run_required_field_check_batch, batch.id, job_ids)
+    return response
+
+
+@app.post("/api/required-field-check-batches/init", response_model=RequiredFieldCheckBatchRead)
+def init_required_field_check_batch(
+    payload: RequiredFieldCheckBatchInitRequest,
+    db: Session = Depends(get_db),
+) -> RequiredFieldCheckBatchRead:
+    checklist = db.get(RequiredFieldChecklist, payload.checklist_id)
+    if not checklist or checklist.archived:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    _validate_declared_batch_file_count(payload.total_count)
+    batch = RequiredFieldCheckBatch(checklist_id=checklist.id, status="uploading", total_count=payload.total_count)
+    db.add(batch)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="required_field_check_batch",
+        entity_id=batch.id,
+        action="upload_initialized",
+        message=f"Initialized required field check batch upload with {payload.total_count} file(s)",
+        metadata={"checklist_id": checklist.id, "file_count": payload.total_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    return _required_field_batch_read(batch)
+
+
+@app.post("/api/required-field-check-batches/{batch_id}/items", response_model=RequiredFieldCheckBatchRead)
+async def append_required_field_check_batch_items(
+    batch_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> RequiredFieldCheckBatchRead:
+    form, files = await _read_batch_upload_form(request)
+    batch = db.get(RequiredFieldCheckBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    if batch.status not in {"uploading", "queued"}:
+        raise HTTPException(status_code=409, detail="Required field check batch already started")
+    await _append_required_field_batch_items(batch, form, files, db)
+    db.refresh(batch)
+    return _required_field_batch_read(batch)
+
+
+@app.post("/api/required-field-check-batches/{batch_id}/start", response_model=RequiredFieldCheckBatchRead)
+def start_required_field_check_batch(
+    batch_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> RequiredFieldCheckBatchRead:
+    batch = db.get(RequiredFieldCheckBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    if batch.status not in {"uploading", "queued"}:
+        return _required_field_batch_read(batch)
+    _validate_owner_can_start(batch, batch.items)
+    batch.status = "running"
+    job_ids = _queued_required_field_job_ids(batch)
+    log_audit_event(
+        db,
+        entity_type="required_field_check_batch",
+        entity_id=batch.id,
+        action="started",
+        message=f"Started required field check batch with {len(job_ids)} queued job(s)",
+        metadata={"checklist_id": batch.checklist_id, "queued_count": len(job_ids)},
+    )
+    db.commit()
+    db.refresh(batch)
+    response = _required_field_batch_read(batch)
+    db.close()
+    background_tasks.add_task(run_required_field_check_batch, batch.id, job_ids)
+    return response
+
+
+@app.post("/api/required-field-check-batches/{batch_id}/discard", response_model=RequiredFieldCheckBatchRead)
+def discard_required_field_check_batch(batch_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+    batch = db.get(RequiredFieldCheckBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    discarded_count = _discard_batch_items(batch, db)
+    batch.status = "canceled"
+    batch.completed_at = datetime.utcnow()
+    log_audit_event(
+        db,
+        entity_type="required_field_check_batch",
+        entity_id=batch.id,
+        action="discarded",
+        message=f"Discarded required field check batch payloads for {discarded_count} item(s)",
+        metadata={"checklist_id": batch.checklist_id, "discarded_count": discarded_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    return _required_field_batch_read(batch)
+
+
+@app.post("/api/required-field-check-batches/{batch_id}/resume", response_model=RequiredFieldCheckBatchRead)
+def resume_required_field_check_batch(
+    batch_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> RequiredFieldCheckBatchRead:
+    batch = db.get(RequiredFieldCheckBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    if batch.status in {"completed", "completed_with_errors", "failed", "canceled"}:
+        raise HTTPException(status_code=409, detail="Required field check batch is already terminal")
+    if not batch.items:
+        raise HTTPException(status_code=422, detail="No uploaded required field items are available to continue")
+    _validate_owner_upload_complete(batch, batch.items)
+    _prepare_job_batch_resume(batch.items)
+    job_ids = _queued_required_field_job_ids(batch)
+    batch.status = "running" if job_ids else _required_field_batch_read(batch).status
+    batch.completed_at = None if job_ids else batch.completed_at
+    log_audit_event(
+        db,
+        entity_type="required_field_check_batch",
+        entity_id=batch.id,
+        action="resumed",
+        message=f"Continued required field check batch with {len(job_ids)} queued job(s)",
+        metadata={"checklist_id": batch.checklist_id, "queued_count": len(job_ids)},
+    )
+    db.commit()
+    db.refresh(batch)
+    response = _required_field_batch_read(batch)
+    if job_ids:
+        db.close()
+        background_tasks.add_task(run_required_field_check_batch, batch.id, job_ids)
     return response
 
 
@@ -1962,6 +2408,14 @@ def get_required_field_check_batch(batch_id: str, db: Session = Depends(get_db))
     if not batch:
         raise HTTPException(status_code=404, detail="Required field check batch not found")
     return _required_field_batch_read(batch)
+
+
+@app.get("/api/required-field-check-batches/{batch_id}/summary", response_model=RequiredFieldCheckBatchRead)
+def get_required_field_check_batch_summary(batch_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+    batch = db.get(RequiredFieldCheckBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    return _required_field_batch_read(batch, include_items=False)
 
 
 @app.post("/api/required-field-check-batches/{batch_id}/cancel", response_model=RequiredFieldCheckBatchRead)
@@ -2125,6 +2579,7 @@ def _document_read(document: Document) -> DocumentRead:
         size_bytes=document.size_bytes,
         page_count=document.page_count,
         status=document.status,
+        error_message=document.error_message,
         document_type=document.document_type,
         language=document.language,
         ai_summary=document.ai_summary,
@@ -2169,7 +2624,7 @@ def _repair_image_document_if_needed(document: Document, db: Session) -> None:
 
     if get_settings().storage_backend.strip().lower() == "s3":
         image_path = Path(str(page_info["image_path"]))
-        page.image_path = persist_artifact(image_path, f"documents/{document.id}/pages/{image_path.name}", "image/png")
+        page.image_path = persist_artifact(image_path, f"documents/{document.id}/pages/{image_path.name}", _image_media_type(image_path))
     else:
         page.image_path = str(page_info["image_path"])
     page.width = next_width
@@ -2197,25 +2652,78 @@ def _raw_extraction_read(raw: RawExtraction) -> RawExtractionRead:
 
 def _create_document_from_upload(file: UploadFile, db: Session) -> Document:
     try:
-        filename, original_path, size_bytes = save_upload_file(file)
-        pages = rasterize_document(original_path)
-        storage_ref, pages = _persist_document_artifacts(original_path, pages)
+        document, original_path = _create_uploaded_document(file, db)
+        _preprocess_document_pages(document, original_path, db)
     except DocumentProcessingError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Failed to process uploaded document") from exc
+    return document
 
+
+def _persist_document_artifacts(original_path: Path, pages: list[dict[str, int | str]]) -> tuple[str, list[dict[str, int | str]]]:
+    settings = get_settings()
+    if settings.storage_backend.strip().lower() != "s3":
+        return str(original_path), pages
+    document_key = original_path.parent.name
+    original_ref = _persist_original_artifact(original_path)
+    return original_ref, _persist_document_pages(document_key, pages)
+
+
+def _create_uploaded_document(file: UploadFile, db: Session) -> tuple[Document, Path]:
+    filename, original_path, size_bytes = save_upload_file(file)
     document = Document(
         filename=filename,
         mime_type=file.content_type or "application/octet-stream",
         size_bytes=size_bytes,
-        page_count=len(pages),
-        storage_path=storage_ref,
-        status="ready",
+        page_count=0,
+        storage_path=_persist_original_artifact(original_path),
+        status="preprocessing",
     )
     db.add(document)
     db.flush()
+    return document, original_path
+
+
+def _create_failed_upload_document(file: UploadFile, message: str, db: Session) -> Document:
+    document = Document(
+        filename=file.filename or "upload",
+        mime_type=file.content_type or "application/octet-stream",
+        size_bytes=0,
+        page_count=0,
+        storage_path="",
+        status="failed",
+        error_message=message,
+    )
+    db.add(document)
+    db.flush()
+    return document
+
+
+def _preprocess_document_pages(document: Document, original_path: Path, db: Session, *, raise_errors: bool = True) -> bool:
+    try:
+        pages = rasterize_document(original_path)
+        pages = _persist_document_pages(original_path.parent.name, pages)
+    except DocumentProcessingError as exc:
+        document.status = "failed"
+        document.error_message = str(exc)
+        if raise_errors:
+            raise
+        return False
+    except Exception as exc:
+        document.status = "failed"
+        document.error_message = "Failed to process uploaded document"
+        if raise_errors:
+            raise DocumentProcessingError("Failed to process uploaded document") from exc
+        return False
+
+    for existing in list(document.pages):
+        db.delete(existing)
+    db.flush()
+    persisted_pages: list[dict[str, int | str]] = []
     for page in pages:
+        image_path = Path(str(page["image_path"]))
+        persisted_pages.append({**page, "image_path": str(image_path)})
         db.add(
             DocumentPage(
                 document_id=document.id,
@@ -2225,21 +2733,37 @@ def _create_document_from_upload(file: UploadFile, db: Session) -> Document:
                 height=int(page["height"]),
             )
         )
-    return document
+    document.page_count = len(persisted_pages)
+    document.status = "ready"
+    document.error_message = None
+    return True
 
 
-def _persist_document_artifacts(original_path: Path, pages: list[dict[str, int | str]]) -> tuple[str, list[dict[str, int | str]]]:
-    settings = get_settings()
-    if settings.storage_backend.strip().lower() != "s3":
-        return str(original_path), pages
+def _persist_original_artifact(original_path: Path) -> str:
+    if get_settings().storage_backend.strip().lower() != "s3":
+        return str(original_path)
     document_key = original_path.parent.name
-    original_ref = persist_artifact(original_path, f"documents/{document_key}/original{original_path.suffix}")
+    return persist_artifact(original_path, f"documents/{document_key}/original{original_path.suffix}")
+
+
+def _persist_document_pages(document_key: str, pages: list[dict[str, int | str]]) -> list[dict[str, int | str]]:
+    if get_settings().storage_backend.strip().lower() != "s3":
+        return pages
     persisted_pages: list[dict[str, int | str]] = []
     for page in pages:
         image_path = Path(str(page["image_path"]))
-        page_ref = persist_artifact(image_path, f"documents/{document_key}/pages/{image_path.name}", "image/png")
+        page_ref = persist_artifact(image_path, f"documents/{document_key}/pages/{image_path.name}", _image_media_type(image_path))
         persisted_pages.append({**page, "image_path": page_ref})
-    return original_ref, persisted_pages
+    return persisted_pages
+
+
+def _image_media_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    return "application/octet-stream"
 
 
 def _schema_read(schema: Schema) -> SchemaRead:
@@ -2477,35 +3001,26 @@ def _job_read(job: ExtractionJob) -> ExtractionJobRead:
     )
 
 
-def _batch_read(batch: Batch) -> BatchRead:
+def _batch_read(batch: Batch, *, include_items: bool = True) -> BatchRead:
     items = [_batch_item_read(item) for item in _sorted_batch_items(batch.items)]
-    completed_statuses = {"completed", "needs_review"}
-    completed_count = sum(1 for item in items if item.status in completed_statuses)
-    failed_count = sum(1 for item in items if item.status == "failed")
-    canceled_count = sum(1 for item in items if item.status == "canceled")
-    finished_count = completed_count + failed_count + canceled_count
-    if batch.total_count and finished_count >= batch.total_count:
-        if canceled_count == batch.total_count:
-            status = "canceled"
-        elif failed_count or canceled_count:
-            status = "completed_with_errors"
-        else:
-            status = "completed"
-    elif canceled_count:
-        status = "canceling"
-    else:
-        status = "running"
-    progress = finished_count / batch.total_count if batch.total_count else 0
+    counters = _owner_counters(batch.total_count, [item.status for item in items], batch.status)
     return BatchRead(
         id=batch.id,
         schema_id=batch.schema_id,
-        status=status,
+        status=counters["status"],
         total_count=batch.total_count,
-        completed_count=completed_count,
-        failed_count=failed_count,
-        canceled_count=canceled_count,
-        progress=progress,
-        items=items,
+        completed_count=counters["completed_count"],
+        failed_count=counters["failed_count"],
+        canceled_count=counters["canceled_count"],
+        uploaded_count=counters["uploaded_count"],
+        preprocessing_count=counters["preprocessing_count"],
+        ready_count=counters["ready_count"],
+        queued_count=counters["queued_count"],
+        running_count=counters["running_count"],
+        needs_review_count=counters["needs_review_count"],
+        progress_phase=counters["progress_phase"],
+        progress=counters["progress"],
+        items=items if include_items else [],
         created_at=batch.created_at,
         completed_at=batch.completed_at,
     )
@@ -2524,19 +3039,26 @@ def _batch_item_read(item: BatchItem) -> BatchItemRead:
     )
 
 
-def _classification_batch_read(batch: ClassificationBatch) -> ClassificationBatchRead:
+def _classification_batch_read(batch: ClassificationBatch, *, include_items: bool = True) -> ClassificationBatchRead:
     items = [_classification_batch_item_read(item) for item in _sorted_module_items(batch.items)]
-    status, completed_count, failed_count, canceled_count, progress = _module_batch_status(batch.total_count, items)
+    counters = _owner_counters(batch.total_count, [item.status for item in items], batch.status)
     return ClassificationBatchRead(
         id=batch.id,
         classifier_id=batch.classifier_id,
-        status=status,
+        status=counters["status"],
         total_count=batch.total_count,
-        completed_count=completed_count,
-        failed_count=failed_count,
-        canceled_count=canceled_count,
-        progress=progress,
-        items=items,
+        completed_count=counters["completed_count"],
+        failed_count=counters["failed_count"],
+        canceled_count=counters["canceled_count"],
+        uploaded_count=counters["uploaded_count"],
+        preprocessing_count=counters["preprocessing_count"],
+        ready_count=counters["ready_count"],
+        queued_count=counters["queued_count"],
+        running_count=counters["running_count"],
+        needs_review_count=counters["needs_review_count"],
+        progress_phase=counters["progress_phase"],
+        progress=counters["progress"],
+        items=items if include_items else [],
         created_at=batch.created_at,
         completed_at=batch.completed_at,
     )
@@ -2555,19 +3077,26 @@ def _classification_batch_item_read(item: ClassificationBatchItem) -> Classifica
     )
 
 
-def _required_field_batch_read(batch: RequiredFieldCheckBatch) -> RequiredFieldCheckBatchRead:
+def _required_field_batch_read(batch: RequiredFieldCheckBatch, *, include_items: bool = True) -> RequiredFieldCheckBatchRead:
     items = [_required_field_batch_item_read(item) for item in _sorted_module_items(batch.items)]
-    status, completed_count, failed_count, canceled_count, progress = _module_batch_status(batch.total_count, items)
+    counters = _owner_counters(batch.total_count, [item.status for item in items], batch.status)
     return RequiredFieldCheckBatchRead(
         id=batch.id,
         checklist_id=batch.checklist_id,
-        status=status,
+        status=counters["status"],
         total_count=batch.total_count,
-        completed_count=completed_count,
-        failed_count=failed_count,
-        canceled_count=canceled_count,
-        progress=progress,
-        items=items,
+        completed_count=counters["completed_count"],
+        failed_count=counters["failed_count"],
+        canceled_count=counters["canceled_count"],
+        uploaded_count=counters["uploaded_count"],
+        preprocessing_count=counters["preprocessing_count"],
+        ready_count=counters["ready_count"],
+        queued_count=counters["queued_count"],
+        running_count=counters["running_count"],
+        needs_review_count=counters["needs_review_count"],
+        progress_phase=counters["progress_phase"],
+        progress=counters["progress"],
+        items=items if include_items else [],
         created_at=batch.created_at,
         completed_at=batch.completed_at,
     )
@@ -2586,25 +3115,63 @@ def _required_field_batch_item_read(item: RequiredFieldCheckBatchItem) -> Requir
     )
 
 
-def _module_batch_status(total_count: int, items: list[Any]) -> tuple[str, int, int, int, float]:
+def _owner_counters(total_count: int, statuses: list[str], owner_status: str) -> dict[str, Any]:
     completed_statuses = {"completed", "needs_review"}
-    completed_count = sum(1 for item in items if item.status in completed_statuses)
-    failed_count = sum(1 for item in items if item.status == "failed")
-    canceled_count = sum(1 for item in items if item.status == "canceled")
-    finished_count = completed_count + failed_count + canceled_count
-    if total_count and finished_count >= total_count:
+    terminal_statuses = {"completed", "needs_review", "failed", "canceled"}
+    uploaded_count = len(statuses)
+    preprocessing_count = sum(1 for status in statuses if status in {"uploading", "preprocessing"})
+    queued_count = sum(1 for status in statuses if status == "queued")
+    running_count = sum(1 for status in statuses if status == "running")
+    needs_review_count = sum(1 for status in statuses if status == "needs_review")
+    completed_count = sum(1 for status in statuses if status in completed_statuses)
+    failed_count = sum(1 for status in statuses if status == "failed")
+    canceled_count = sum(1 for status in statuses if status == "canceled")
+    finished_count = sum(1 for status in statuses if status in terminal_statuses)
+    ready_count = max(0, uploaded_count - preprocessing_count)
+    if owner_status in {"canceled", "failed"} and not statuses:
+        status = owner_status
+        progress_phase = owner_status
+    elif total_count and finished_count >= total_count:
         if canceled_count == total_count:
             status = "canceled"
         elif failed_count or canceled_count:
             status = "completed_with_errors"
         else:
             status = "completed"
+        progress_phase = status
+    elif uploaded_count < total_count:
+        status = "uploading"
+        progress_phase = "uploading"
+    elif preprocessing_count:
+        status = "preprocessing"
+        progress_phase = "preprocessing"
+    elif running_count or owner_status == "running":
+        status = "running"
+        progress_phase = "running"
     elif canceled_count:
         status = "canceling"
+        progress_phase = "running"
+    elif queued_count:
+        status = "queued"
+        progress_phase = "queued"
     else:
-        status = "running"
+        status = owner_status
+        progress_phase = owner_status
     progress = finished_count / total_count if total_count else 0
-    return status, completed_count, failed_count, canceled_count, progress
+    return {
+        "status": status,
+        "uploaded_count": uploaded_count,
+        "preprocessing_count": preprocessing_count,
+        "ready_count": ready_count,
+        "queued_count": queued_count,
+        "running_count": running_count,
+        "completed_count": completed_count,
+        "failed_count": failed_count,
+        "canceled_count": canceled_count,
+        "needs_review_count": needs_review_count,
+        "progress_phase": progress_phase,
+        "progress": progress,
+    }
 
 
 def _cancel_module_batch(batch: Any, entity_type: str, db: Session) -> None:
@@ -2645,6 +3212,138 @@ def _close_batch_if_all_jobs_terminal(batch: Any, completed_at: datetime) -> Non
     batch.completed_at = completed_at
 
 
+def _prepare_workflow_run_resume(run: WorkflowRun) -> int:
+    queued_count = 0
+    now = datetime.utcnow()
+    for item in run.items:
+        if item.status == "queued":
+            queued_count += 1
+            continue
+        if item.status not in {"running", "preprocessing"}:
+            continue
+        if item.document and item.document.status == "ready" and item.document.pages:
+            item.status = "queued"
+            item.error_message = None
+            item.completed_at = None
+            queued_count += 1
+        else:
+            item.status = "failed"
+            item.error_message = item.document.error_message if item.document else "Document preprocessing was interrupted"
+            item.completed_at = now
+    return queued_count
+
+
+def _prepare_workflow_run_restart(run: WorkflowRun) -> int:
+    queued_count = 0
+    now = datetime.utcnow()
+    restartable_statuses = {"failed", "paused", "canceled", "preprocessing", "running"}
+    for item in run.items:
+        if item.status == "queued":
+            queued_count += 1
+            continue
+        if item.status not in restartable_statuses:
+            continue
+        if item.document and item.document.status == "ready" and item.document.pages:
+            item.status = "queued"
+            item.error_message = None
+            item.completed_at = None
+            item.result_json = _initial_workflow_item_payload(item.document)
+            queued_count += 1
+        else:
+            item.status = "failed"
+            item.error_message = item.document.error_message if item.document else "Document preprocessing was interrupted"
+            item.completed_at = now
+    return queued_count
+
+
+def _workflow_upload_duration_ms(run: WorkflowRun) -> int | None:
+    durations = [item.upload_duration_ms for item in run.items if item.upload_duration_ms is not None]
+    if not durations:
+        return None
+    return sum(durations)
+
+
+def _duration_ms(started_at: datetime, ended_at: datetime | None = None) -> int:
+    ended = ended_at or datetime.utcnow()
+    return max(0, int((ended - started_at).total_seconds() * 1000))
+
+
+def _accumulate_workflow_run_inference_duration(run: WorkflowRun, ended_at: datetime) -> None:
+    if not run.inference_started_at:
+        return
+    run.inference_duration_ms = (run.inference_duration_ms or 0) + _duration_ms(run.inference_started_at, ended_at)
+    run.inference_started_at = None
+
+
+def _prepare_job_batch_resume(items: list[Any]) -> None:
+    now = datetime.utcnow()
+    for item in items:
+        job = item.job
+        document = item.document
+        if not job:
+            continue
+        if job.status == "queued":
+            continue
+        if job.status not in {"running", "preprocessing"}:
+            continue
+        if document and document.status == "ready" and document.pages:
+            job.status = "queued"
+            job.error_message = None
+            job.started_at = None
+            job.completed_at = None
+        else:
+            job.status = "failed"
+            job.error_message = document.error_message if document else "Document preprocessing was interrupted"
+            job.completed_at = now
+
+
+def _discard_batch_items(batch: Any, db: Session) -> int:
+    items = list(batch.items)
+    document_ids = [item.document_id for item in items]
+    for item in items:
+        db.delete(item)
+    _delete_document_payloads(document_ids, db)
+    return len(items)
+
+
+def _delete_document_payloads(document_ids: list[str], db: Session) -> None:
+    unique_document_ids = sorted({document_id for document_id in document_ids if document_id})
+    if not unique_document_ids:
+        return
+    _delete_jobs_for_documents(unique_document_ids, db)
+    documents = db.query(Document).filter(Document.id.in_(unique_document_ids)).all()
+    for document in documents:
+        _delete_document_storage(document)
+        for page in list(document.pages):
+            db.delete(page)
+        db.delete(document)
+
+
+def _delete_jobs_for_documents(document_ids: list[str], db: Session) -> None:
+    for model in (ExtractionJob, ClassificationJob, RequiredFieldCheckJob):
+        jobs = db.query(model).filter(model.document_id.in_(document_ids)).all()
+        for job in jobs:
+            if job.result:
+                db.delete(job.result)
+            db.delete(job)
+
+
+def _delete_document_storage(document: Document) -> None:
+    refs = [document.storage_path, *(page.image_path for page in document.pages)]
+    local_deleted = False
+    if document.storage_path and not is_s3_ref(document.storage_path):
+        storage_root = get_settings().resolved_storage_dir.resolve()
+        document_dir = Path(document.storage_path).resolve().parent
+        if document_dir != storage_root and storage_root in document_dir.parents:
+            delete_storage_ref(document_dir)
+            local_deleted = True
+    if local_deleted:
+        return
+    for ref in refs:
+        if ref:
+            delete_storage_ref(ref)
+
+
 def _sorted_batch_items(items) -> list[BatchItem]:
     return sorted(items, key=_batch_item_sort_key)
 
@@ -2671,7 +3370,7 @@ async def _read_batch_upload_form(request: Request) -> tuple[FormData, list[Uplo
     try:
         form = await request.form(
             max_files=_multipart_max_files(settings.upload_max_batch_files),
-            max_fields=32,
+            max_fields=max(32, settings.upload_chunk_files * 3 + 16),
         )
     except StarletteHTTPException as exc:
         detail = str(exc.detail)
@@ -2727,6 +3426,471 @@ def _batch_file_limit_message() -> str:
     if limit > 0:
         return f"Batch file count exceeds the configured limit of {limit}"
     return "Batch file count exceeds the multipart parser limit"
+
+
+def _ordered_upload_entries(form: FormData, files: list[UploadFile]) -> list[tuple[UploadFile, str | None, int | None]]:
+    raw_client_ids = [value if isinstance(value, str) and value.strip() else None for value in form.getlist("client_file_ids")]
+    if len(raw_client_ids) != len(files):
+        raw_client_ids = [None] * len(files)
+    raw_upload_indexes: list[int | None] = []
+    for value in form.getlist("upload_indexes"):
+        if isinstance(value, str) and value.strip():
+            try:
+                raw_upload_indexes.append(int(value))
+            except ValueError:
+                raw_upload_indexes.append(None)
+        else:
+            raw_upload_indexes.append(None)
+    if len(raw_upload_indexes) != len(files):
+        raw_upload_indexes = [None] * len(files)
+    return sorted(
+        zip(files, raw_client_ids, raw_upload_indexes, strict=False),
+        key=lambda entry: (entry[2] is None, entry[2] if entry[2] is not None else 0, *_upload_file_sort_key(entry[0])),
+    )
+
+
+def _existing_client_file_ids(db: Session, item_model: Any, owner_field: str, owner_id: str, client_file_ids: list[str | None]) -> set[str]:
+    ids = [client_file_id for client_file_id in client_file_ids if client_file_id]
+    if not ids:
+        return set()
+    rows = (
+        db.query(item_model.client_file_id)
+        .filter(getattr(item_model, owner_field) == owner_id, item_model.client_file_id.in_(ids))
+        .all()
+    )
+    return {row[0] for row in rows if row[0]}
+
+
+def _ensure_upload_append_capacity(
+    db: Session,
+    item_model: Any,
+    owner_field: str,
+    owner_id: str,
+    total_count: int,
+    incoming_count: int,
+) -> None:
+    current_count = db.query(item_model).filter(getattr(item_model, owner_field) == owner_id).count()
+    if current_count + incoming_count > total_count:
+        raise HTTPException(status_code=413, detail="Batch upload exceeds declared file count")
+
+
+def _upload_failure_message(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        return str(exc.detail)
+    if isinstance(exc, DocumentProcessingError):
+        return str(exc)
+    return "Failed to process uploaded document"
+
+
+def _initial_workflow_item_payload(document: Document) -> str:
+    return json.dumps({"document_id": document.id, "filename": document.filename, "node_results": {}}, ensure_ascii=False)
+
+
+async def _append_workflow_upload_items(run: WorkflowRun, form: FormData, files: list[UploadFile], db: Session) -> None:
+    entries = _ordered_upload_entries(form, files)
+    existing_ids = _existing_client_file_ids(db, WorkflowRunItem, "run_id", run.id, [client_id for _, client_id, _ in entries])
+    incoming_count = sum(1 for _, client_id, _ in entries if not client_id or client_id not in existing_ids)
+    _ensure_upload_append_capacity(db, WorkflowRunItem, "run_id", run.id, run.total_count, incoming_count)
+
+    for file, client_file_id, upload_index in entries:
+        upload_started_at = datetime.utcnow()
+        try:
+            db.refresh(run)
+            if not _owner_accepts_uploads(run):
+                continue
+            if client_file_id and client_file_id in existing_ids:
+                continue
+            document, original_path = _create_uploaded_document(file, db)
+            item = WorkflowRunItem(
+                run_id=run.id,
+                document_id=document.id,
+                filename=document.filename,
+                upload_index=upload_index,
+                status="preprocessing",
+                client_file_id=client_file_id,
+                result_json=_initial_workflow_item_payload(document),
+            )
+            db.add(item)
+            log_audit_event(
+                db,
+                entity_type="workflow_run_item",
+                entity_id=run.id,
+                action="preprocessing",
+                message=f"Preprocessing workflow document {document.filename}",
+                metadata={"document_id": document.id},
+            )
+            db.commit()
+
+            ok = _preprocess_document_pages(document, original_path, db, raise_errors=False)
+            db.refresh(run)
+            if not _owner_accepts_uploads(run):
+                db.rollback()
+                continue
+            if ok:
+                item.status = "queued"
+                item.error_message = None
+                item.upload_duration_ms = _duration_ms(upload_started_at)
+                log_audit_event(
+                    db,
+                    entity_type="workflow_run_item",
+                    entity_id=run.id,
+                    action="queued",
+                    message=f"Queued workflow document {document.filename}",
+                    metadata={"document_id": document.id},
+                )
+            else:
+                item.status = "failed"
+                item.error_message = document.error_message
+                item.completed_at = datetime.utcnow()
+                item.upload_duration_ms = _duration_ms(upload_started_at, item.completed_at)
+                item.result_json = json.dumps(
+                    {
+                        "document_id": document.id,
+                        "filename": document.filename,
+                        "node_results": {},
+                        "error_message": document.error_message,
+                    },
+                    ensure_ascii=False,
+                )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            _record_failed_workflow_upload_item(run, file, client_file_id, upload_index, _duration_ms(upload_started_at), _upload_failure_message(exc), db)
+        finally:
+            await file.close()
+
+
+def _record_failed_workflow_upload_item(
+    run: WorkflowRun,
+    file: UploadFile,
+    client_file_id: str | None,
+    upload_index: int | None,
+    upload_duration_ms: int | None,
+    message: str,
+    db: Session,
+) -> None:
+    document = _create_failed_upload_document(file, message, db)
+    item = WorkflowRunItem(
+        run_id=run.id,
+        document_id=document.id,
+        filename=document.filename,
+        upload_index=upload_index,
+        status="failed",
+        error_message=message,
+        client_file_id=client_file_id,
+        upload_duration_ms=upload_duration_ms,
+        result_json=json.dumps(
+            {"document_id": document.id, "filename": document.filename, "node_results": {}, "error_message": message},
+            ensure_ascii=False,
+        ),
+        completed_at=datetime.utcnow(),
+    )
+    db.add(item)
+    log_audit_event(
+        db,
+        entity_type="workflow_run_item",
+        entity_id=run.id,
+        action="failed",
+        message=message,
+        metadata={"document_id": document.id},
+    )
+    db.commit()
+
+
+async def _append_extraction_batch_items(batch: Batch, form: FormData, files: list[UploadFile], db: Session) -> None:
+    entries = _ordered_upload_entries(form, files)
+    existing_ids = _existing_client_file_ids(db, BatchItem, "batch_id", batch.id, [client_id for _, client_id, _ in entries])
+    incoming_count = sum(1 for _, client_id, _ in entries if not client_id or client_id not in existing_ids)
+    _ensure_upload_append_capacity(db, BatchItem, "batch_id", batch.id, batch.total_count, incoming_count)
+
+    for file, client_file_id, _ in entries:
+        try:
+            db.refresh(batch)
+            if not _owner_accepts_uploads(batch):
+                continue
+            if client_file_id and client_file_id in existing_ids:
+                continue
+            document, original_path = _create_uploaded_document(file, db)
+            job = ExtractionJob(document_id=document.id, schema_id=batch.schema_id, schema_version=batch.schema_version, status="preprocessing")
+            db.add(job)
+            db.flush()
+            db.add(BatchItem(batch_id=batch.id, document_id=document.id, job_id=job.id, filename=document.filename, client_file_id=client_file_id))
+            log_audit_event(
+                db,
+                entity_type="document",
+                entity_id=document.id,
+                action="uploaded",
+                message=f"Batch uploaded {document.filename}",
+                metadata={"batch_id": batch.id, "filename": document.filename},
+            )
+            db.commit()
+
+            ok = _preprocess_document_pages(document, original_path, db, raise_errors=False)
+            db.refresh(batch)
+            if not _owner_accepts_uploads(batch):
+                db.rollback()
+                continue
+            if ok:
+                job.status = "queued"
+                job.error_message = None
+                log_audit_event(
+                    db,
+                    entity_type="extraction_job",
+                    entity_id=job.id,
+                    action="created",
+                    message="Batch extraction job created",
+                    metadata={"batch_id": batch.id, "document_id": document.id, "schema_id": batch.schema_id},
+                )
+            else:
+                job.status = "failed"
+                job.error_message = document.error_message
+                job.completed_at = datetime.utcnow()
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            _record_failed_extraction_batch_item(batch, file, client_file_id, _upload_failure_message(exc), db)
+        finally:
+            await file.close()
+
+
+def _record_failed_extraction_batch_item(batch: Batch, file: UploadFile, client_file_id: str | None, message: str, db: Session) -> None:
+    document = _create_failed_upload_document(file, message, db)
+    job = ExtractionJob(
+        document_id=document.id,
+        schema_id=batch.schema_id,
+        schema_version=batch.schema_version,
+        status="failed",
+        error_message=message,
+        completed_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.flush()
+    db.add(BatchItem(batch_id=batch.id, document_id=document.id, job_id=job.id, filename=document.filename, client_file_id=client_file_id))
+    log_audit_event(db, entity_type="extraction_job", entity_id=job.id, action="failed", message=message, metadata={"batch_id": batch.id})
+    db.commit()
+
+
+async def _append_classification_batch_items(batch: ClassificationBatch, form: FormData, files: list[UploadFile], db: Session) -> None:
+    entries = _ordered_upload_entries(form, files)
+    existing_ids = _existing_client_file_ids(db, ClassificationBatchItem, "batch_id", batch.id, [client_id for _, client_id, _ in entries])
+    incoming_count = sum(1 for _, client_id, _ in entries if not client_id or client_id not in existing_ids)
+    _ensure_upload_append_capacity(db, ClassificationBatchItem, "batch_id", batch.id, batch.total_count, incoming_count)
+
+    for file, client_file_id, _ in entries:
+        try:
+            db.refresh(batch)
+            if not _owner_accepts_uploads(batch):
+                continue
+            if client_file_id and client_file_id in existing_ids:
+                continue
+            document, original_path = _create_uploaded_document(file, db)
+            job = ClassificationJob(document_id=document.id, classifier_id=batch.classifier_id, status="preprocessing")
+            db.add(job)
+            db.flush()
+            db.add(
+                ClassificationBatchItem(
+                    batch_id=batch.id,
+                    document_id=document.id,
+                    job_id=job.id,
+                    filename=document.filename,
+                    client_file_id=client_file_id,
+                )
+            )
+            db.commit()
+
+            ok = _preprocess_document_pages(document, original_path, db, raise_errors=False)
+            db.refresh(batch)
+            if not _owner_accepts_uploads(batch):
+                db.rollback()
+                continue
+            if ok:
+                job.status = "queued"
+                job.error_message = None
+                log_audit_event(
+                    db,
+                    entity_type="classification_job",
+                    entity_id=job.id,
+                    action="queued",
+                    message="Queued classification batch job",
+                    metadata={"batch_id": batch.id, "document_id": document.id, "classifier_id": batch.classifier_id},
+                )
+            else:
+                job.status = "failed"
+                job.error_message = document.error_message
+                job.completed_at = datetime.utcnow()
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            _record_failed_classification_batch_item(batch, file, client_file_id, _upload_failure_message(exc), db)
+        finally:
+            await file.close()
+
+
+def _record_failed_classification_batch_item(
+    batch: ClassificationBatch,
+    file: UploadFile,
+    client_file_id: str | None,
+    message: str,
+    db: Session,
+) -> None:
+    document = _create_failed_upload_document(file, message, db)
+    job = ClassificationJob(
+        document_id=document.id,
+        classifier_id=batch.classifier_id,
+        status="failed",
+        error_message=message,
+        completed_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.flush()
+    db.add(
+        ClassificationBatchItem(
+            batch_id=batch.id,
+            document_id=document.id,
+            job_id=job.id,
+            filename=document.filename,
+            client_file_id=client_file_id,
+        )
+    )
+    log_audit_event(db, entity_type="classification_job", entity_id=job.id, action="failed", message=message, metadata={"batch_id": batch.id})
+    db.commit()
+
+
+async def _append_required_field_batch_items(batch: RequiredFieldCheckBatch, form: FormData, files: list[UploadFile], db: Session) -> None:
+    entries = _ordered_upload_entries(form, files)
+    existing_ids = _existing_client_file_ids(db, RequiredFieldCheckBatchItem, "batch_id", batch.id, [client_id for _, client_id, _ in entries])
+    incoming_count = sum(1 for _, client_id, _ in entries if not client_id or client_id not in existing_ids)
+    _ensure_upload_append_capacity(db, RequiredFieldCheckBatchItem, "batch_id", batch.id, batch.total_count, incoming_count)
+
+    for file, client_file_id, _ in entries:
+        try:
+            db.refresh(batch)
+            if not _owner_accepts_uploads(batch):
+                continue
+            if client_file_id and client_file_id in existing_ids:
+                continue
+            document, original_path = _create_uploaded_document(file, db)
+            job = RequiredFieldCheckJob(document_id=document.id, checklist_id=batch.checklist_id, status="preprocessing")
+            db.add(job)
+            db.flush()
+            db.add(
+                RequiredFieldCheckBatchItem(
+                    batch_id=batch.id,
+                    document_id=document.id,
+                    job_id=job.id,
+                    filename=document.filename,
+                    client_file_id=client_file_id,
+                )
+            )
+            db.commit()
+
+            ok = _preprocess_document_pages(document, original_path, db, raise_errors=False)
+            db.refresh(batch)
+            if not _owner_accepts_uploads(batch):
+                db.rollback()
+                continue
+            if ok:
+                job.status = "queued"
+                job.error_message = None
+                log_audit_event(
+                    db,
+                    entity_type="required_field_check_job",
+                    entity_id=job.id,
+                    action="queued",
+                    message="Queued required field check batch job",
+                    metadata={"batch_id": batch.id, "document_id": document.id, "checklist_id": batch.checklist_id},
+                )
+            else:
+                job.status = "failed"
+                job.error_message = document.error_message
+                job.completed_at = datetime.utcnow()
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            _record_failed_required_field_batch_item(batch, file, client_file_id, _upload_failure_message(exc), db)
+        finally:
+            await file.close()
+
+
+def _record_failed_required_field_batch_item(
+    batch: RequiredFieldCheckBatch,
+    file: UploadFile,
+    client_file_id: str | None,
+    message: str,
+    db: Session,
+) -> None:
+    document = _create_failed_upload_document(file, message, db)
+    job = RequiredFieldCheckJob(
+        document_id=document.id,
+        checklist_id=batch.checklist_id,
+        status="failed",
+        error_message=message,
+        completed_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.flush()
+    db.add(
+        RequiredFieldCheckBatchItem(
+            batch_id=batch.id,
+            document_id=document.id,
+            job_id=job.id,
+            filename=document.filename,
+            client_file_id=client_file_id,
+        )
+    )
+    log_audit_event(db, entity_type="required_field_check_job", entity_id=job.id, action="failed", message=message, metadata={"batch_id": batch.id})
+    db.commit()
+
+
+def _queued_extraction_job_ids(batch: Batch) -> list[str]:
+    return [item.job_id for item in batch.items if item.job and item.job.status == "queued"]
+
+
+def _owner_accepts_uploads(owner: Any) -> bool:
+    return getattr(owner, "status", None) in {"uploading", "queued"}
+
+
+def _queued_classification_job_ids(batch: ClassificationBatch) -> list[str]:
+    return [item.job_id for item in batch.items if item.job and item.job.status == "queued"]
+
+
+def _queued_required_field_job_ids(batch: RequiredFieldCheckBatch) -> list[str]:
+    return [item.job_id for item in batch.items if item.job and item.job.status == "queued"]
+
+
+def _validate_owner_can_start(owner: Any, items: list[Any]) -> None:
+    _validate_owner_upload_complete(owner, items)
+    preprocessing_count = sum(1 for item in items if _upload_item_status(item) == "preprocessing")
+    if preprocessing_count:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": f"{preprocessing_count} file(s) are still preprocessing", "preprocessing_count": preprocessing_count},
+        )
+
+
+def _validate_owner_upload_complete(owner: Any, items: list[Any]) -> None:
+    uploaded_count = len(items)
+    if uploaded_count != owner.total_count:
+        missing_count = max(0, owner.total_count - uploaded_count)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Upload is incomplete. Re-select the original files to continue uploading before starting execution.",
+                "uploaded_count": uploaded_count,
+                "total_count": owner.total_count,
+                "missing_count": missing_count,
+            },
+        )
+
+
+def _upload_item_status(item: Any) -> str:
+    status = getattr(item, "status", None)
+    if isinstance(status, str):
+        return status
+    job = getattr(item, "job", None)
+    if job and isinstance(job.status, str):
+        return job.status
+    return "unknown"
 
 
 def _batch_export_row(item: BatchItem, field_names: list[str]) -> dict[str, Any]:

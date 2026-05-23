@@ -138,7 +138,7 @@ def _prepare_classification_job(job_id: str) -> ClassificationContext | None:
     db = SessionLocal()
     try:
         job = db.get(ClassificationJob, job_id)
-        if not job or job.status == "canceled":
+        if not job or job.status != "queued":
             return None
         job.status = "running"
         job.started_at = datetime.utcnow()
@@ -164,7 +164,7 @@ def _prepare_required_field_job(job_id: str) -> RequiredFieldContext | None:
     db = SessionLocal()
     try:
         job = db.get(RequiredFieldCheckJob, job_id)
-        if not job or job.status == "canceled":
+        if not job or job.status != "queued":
             return None
         job.status = "running"
         job.started_at = datetime.utcnow()

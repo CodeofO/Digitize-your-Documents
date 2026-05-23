@@ -54,6 +54,7 @@ frontend/src/*
 !docs/
 docs/*
 !docs/deployment.md
+!docs/readme-media.html
 !assets/
 assets/*
 !assets/readme/

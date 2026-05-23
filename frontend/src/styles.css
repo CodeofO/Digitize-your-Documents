@@ -42,6 +42,16 @@ body,
   box-sizing: border-box;
 }
 
+.visually-hidden {
+  height: 1px;
+  left: -9999px;
+  opacity: 0;
+  overflow: hidden;
+  position: absolute;
+  top: auto;
+  width: 1px;
+}
+
 body {
   background: var(--tds-gray-50);
   margin: 0;
