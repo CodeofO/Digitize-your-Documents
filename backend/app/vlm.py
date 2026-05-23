@@ -1,6 +1,8 @@
 import base64
+from contextlib import contextmanager
 import json
 import mimetypes
+import threading
 from typing import Any
 
 from app.config import get_settings
@@ -76,6 +78,42 @@ def vlm_error_detail(exc: Exception) -> str | dict[str, str]:
     return str(exc)
 
 
+_VLM_SLOT_LOCK = threading.Lock()
+_VLM_SLOT_LIMIT = 0
+_VLM_SLOT_SEMAPHORE: threading.BoundedSemaphore | None = None
+
+
+@contextmanager
+def _vlm_request_slot():
+    semaphore = _vlm_request_semaphore()
+    semaphore.acquire()
+    try:
+        yield
+    finally:
+        semaphore.release()
+
+
+def _vlm_request_semaphore() -> threading.BoundedSemaphore:
+    global _VLM_SLOT_LIMIT, _VLM_SLOT_SEMAPHORE
+    limit = max(1, get_settings().vlm_max_concurrent_requests)
+    with _VLM_SLOT_LOCK:
+        if _VLM_SLOT_SEMAPHORE is None or _VLM_SLOT_LIMIT != limit:
+            _VLM_SLOT_LIMIT = limit
+            _VLM_SLOT_SEMAPHORE = threading.BoundedSemaphore(limit)
+        return _VLM_SLOT_SEMAPHORE
+
+
+def _invoke_vlm_with_limit(
+    system_prompt: str,
+    prompt: str,
+    image_inputs: list[dict[str, str]],
+    output_schema: dict[str, Any],
+    api_style: str,
+) -> dict[str, Any]:
+    with _vlm_request_slot():
+        return _invoke_structured_llm(system_prompt, prompt, image_inputs, output_schema, api_style)
+
+
 def format_vlm_exception(exc: Exception) -> str:
     if isinstance(exc, VlmRuntimeError):
         return exc.as_text()
@@ -113,7 +151,7 @@ def extract_with_vlm(
 
     prompt = _build_user_prompt(fields)
     inputs = image_inputs or _image_inputs_from_paths(image_paths or [])
-    return _invoke_structured_llm(SYSTEM_PROMPT, prompt, inputs, build_structured_output_schema(fields), api_style)
+    return _invoke_vlm_with_limit(SYSTEM_PROMPT, prompt, inputs, build_structured_output_schema(fields), api_style)
 
 
 def recommend_schema_with_vlm(image_paths: list[str]) -> dict[str, Any]:
@@ -129,7 +167,7 @@ def recommend_schema_with_vlm(image_paths: list[str]) -> dict[str, Any]:
         "Prefer visible business-critical fields over generic metadata. "
         "Choose key_name values in the document's primary language."
     )
-    return _invoke_structured_llm(
+    return _invoke_vlm_with_limit(
         SCHEMA_RECOMMENDATION_PROMPT,
         prompt,
         _image_inputs_from_paths(image_paths),
@@ -153,7 +191,7 @@ def recommend_schema_description_with_vlm(
     _ensure_vlm_credentials(settings)
 
     prompt = _build_schema_description_prompt(schema_name, current_description, fields)
-    return _invoke_structured_llm(
+    return _invoke_vlm_with_limit(
         SCHEMA_DESCRIPTION_PROMPT,
         prompt,
         [],
@@ -174,7 +212,7 @@ def classify_document_with_vlm(
 
     _ensure_vlm_credentials(settings)
     prompt = _build_classification_prompt(classes, allow_unknown)
-    return _invoke_structured_llm(
+    return _invoke_vlm_with_limit(
         DOCUMENT_CLASSIFIER_PROMPT,
         prompt,
         _image_inputs_from_paths(image_paths),
@@ -197,7 +235,7 @@ def check_required_fields_with_vlm(
     _ensure_vlm_credentials(settings)
     prompt = _build_required_field_prompt(items, regions)
     inputs = image_inputs or _image_inputs_from_paths(image_paths or [])
-    return _invoke_structured_llm(
+    return _invoke_vlm_with_limit(
         REQUIRED_FIELD_CHECKER_PROMPT,
         prompt,
         inputs,
@@ -218,7 +256,7 @@ def recommend_required_field_checklist_with_vlm(image_paths: list[str]) -> dict[
         "Prefer visible required fields and signatures over values that require external validation. "
         "Use concise item_name values in the document's primary language."
     )
-    return _invoke_structured_llm(
+    return _invoke_vlm_with_limit(
         REQUIRED_FIELD_CHECKLIST_RECOMMENDATION_PROMPT,
         prompt,
         _image_inputs_from_paths(image_paths),

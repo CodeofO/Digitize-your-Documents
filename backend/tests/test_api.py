@@ -85,15 +85,23 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
                 "model_name": "test-model",
                 "libreoffice_path": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
                 "provider": "openai",
+                "batch_max_workers": 5,
+                "vlm_max_concurrent_requests": 7,
+                "kie_field_group_size": 3,
             },
         )
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["libreoffice_path"] == "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        assert "vlm_max_concurrent_requests" in payload
+        assert "kie_field_group_size" in payload
         assert payload["runtime_settings_writable"] is True
 
     contents = env_path.read_text(encoding="utf-8")
     assert 'LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"' in contents
+    assert 'BATCH_MAX_WORKERS="5"' in contents
+    assert 'VLM_MAX_CONCURRENT_REQUESTS="7"' in contents
+    assert 'KIE_FIELD_GROUP_SIZE="3"' in contents
 
 
 def test_vlm_settings_are_readonly_in_production(monkeypatch, tmp_path) -> None:
@@ -275,6 +283,52 @@ def test_vlm_runtime_kwargs_include_speed_controls(monkeypatch) -> None:
         assert kwargs["max_completion_tokens"] == 1024
         assert kwargs["top_p"] == 0.8
         assert kwargs["service_tier"] == "auto"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_kie_field_groups_run_with_bounded_parallelism(monkeypatch) -> None:
+    from app import extraction as extraction_module
+    from app.extraction import DocumentPageSnapshot, DocumentSnapshot
+    from app.schemas import FieldDefinition
+
+    monkeypatch.setenv("KIE_FIELD_GROUP_SIZE", "1")
+    monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "2")
+    get_settings.cache_clear()
+
+    active = 0
+    max_active = 0
+    calls = 0
+    lock = threading.Lock()
+
+    def fake_extract_with_vlm(fields, image_inputs=None):
+        nonlocal active, max_active, calls
+        with lock:
+            active += 1
+            calls += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return {field.key_name: {"value": f"value-{field.key_name}", "page": 1, "confidence": 1, "evidence": "mock"} for field in fields}
+
+    try:
+        monkeypatch.setattr(extraction_module, "extract_with_vlm", fake_extract_with_vlm)
+        fields = [
+            FieldDefinition(key_name=f"field_{index}", description="test field", output_format="string")
+            for index in range(4)
+        ]
+        document = DocumentSnapshot(
+            id="doc_1",
+            storage_path="/tmp/doc_1/source.png",
+            pages=[DocumentPageSnapshot(page_number=1, image_path="/tmp/doc_1/page_1.png")],
+        )
+
+        values = extraction_module._extract_grouped_values(document, fields, [], "job_1")
+
+        assert calls == 4
+        assert max_active == 2
+        assert set(values) == {field.key_name for field in fields}
     finally:
         get_settings.cache_clear()
 

@@ -58,6 +58,8 @@ DEFAULT_ENV_VALUES = {
     "VLM_TOP_P": "",
     "VLM_SERVICE_TIER": "",
     "BATCH_MAX_WORKERS": "4",
+    "VLM_MAX_CONCURRENT_REQUESTS": "8",
+    "KIE_FIELD_GROUP_SIZE": "2",
     "LIBREOFFICE_PATH": DEFAULT_LIBREOFFICE_PATH,
 }
 
@@ -109,6 +111,8 @@ class Settings(BaseSettings):
     vlm_top_p: str | None = None
     vlm_service_tier: str | None = None
     batch_max_workers: int = 4
+    vlm_max_concurrent_requests: int = 8
+    kie_field_group_size: int = 2
 
     openai_api_key: str | None = None
     openai_model_name: str | None = None

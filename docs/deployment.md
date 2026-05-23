@@ -62,6 +62,9 @@ docker compose -f docker-compose.hosting.example.yml up -d backend
 | `UPLOAD_MAX_FILE_BYTES`, `UPLOAD_MAX_BATCH_FILES`, `UPLOAD_MAX_PDF_PAGES`, `UPLOAD_MAX_IMAGE_PIXELS` | 업로드 남용 방지 제한 |
 | `ALLOW_RUNTIME_SETTINGS` | production에서는 기본 `false` |
 | `VLM_*` | VLM provider/model/API key |
+| `BATCH_MAX_WORKERS` | 문서 단위 병렬 worker 수 |
+| `VLM_MAX_CONCURRENT_REQUESTS` | 전체 모듈/워크플로우가 공유하는 VLM 동시 요청 상한 |
+| `KIE_FIELD_GROUP_SIZE` | KIE에서 한 VLM 요청에 묶을 field 수 |
 
 `STORAGE_BACKEND=local`에서는 `/data` 같은 persistent volume이 반드시 필요하다. volume이 없는 ephemeral filesystem에 두면 재배포 시 업로드와 결과가 사라진다.
 

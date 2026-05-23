@@ -247,6 +247,8 @@ type VlmSettings = {
   top_p: string | null;
   service_tier: string | null;
   batch_max_workers: number;
+  vlm_max_concurrent_requests: number;
+  kie_field_group_size: number;
   has_api_key: boolean;
   env_path: string;
   runtime_settings_writable: boolean;
@@ -618,6 +620,8 @@ export default function App() {
   const [vlmTopP, setVlmTopP] = useState("");
   const [vlmServiceTier, setVlmServiceTier] = useState("");
   const [batchMaxWorkers, setBatchMaxWorkers] = useState("4");
+  const [vlmMaxConcurrentRequests, setVlmMaxConcurrentRequests] = useState("8");
+  const [kieFieldGroupSize, setKieFieldGroupSize] = useState("2");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingRecommendation, setPendingRecommendation] = useState<SchemaRecommendation | null>(null);
@@ -1032,6 +1036,8 @@ export default function App() {
       setVlmTopP(settings.top_p ?? "");
       setVlmServiceTier(settings.service_tier ?? "");
       setBatchMaxWorkers(String(settings.batch_max_workers ?? 4));
+      setVlmMaxConcurrentRequests(String(settings.vlm_max_concurrent_requests ?? 8));
+      setKieFieldGroupSize(String(settings.kie_field_group_size ?? 2));
     } catch {
       setVlmSettings(null);
     }
@@ -1055,6 +1061,8 @@ export default function App() {
           top_p: vlmTopP,
           service_tier: vlmServiceTier,
           batch_max_workers: Number.parseInt(batchMaxWorkers, 10) || 4,
+          vlm_max_concurrent_requests: Number.parseInt(vlmMaxConcurrentRequests, 10) || 8,
+          kie_field_group_size: Number.parseInt(kieFieldGroupSize, 10) || 2,
           provider: "auto"
         })
       });
@@ -2441,6 +2449,8 @@ export default function App() {
           topP={vlmTopP}
           serviceTier={vlmServiceTier}
           batchMaxWorkers={batchMaxWorkers}
+          vlmMaxConcurrentRequests={vlmMaxConcurrentRequests}
+          kieFieldGroupSize={kieFieldGroupSize}
           settingsMessage={settingsMessage}
           busy={busy}
           onVlmApiKey={setVlmApiKey}
@@ -2452,6 +2462,8 @@ export default function App() {
           onTopP={setVlmTopP}
           onServiceTier={setVlmServiceTier}
           onBatchMaxWorkers={setBatchMaxWorkers}
+          onVlmMaxConcurrentRequests={setVlmMaxConcurrentRequests}
+          onKieFieldGroupSize={setKieFieldGroupSize}
           onSave={() => void saveVlmSettings()}
           onClearParsingHistory={() => void clearParsingHistory()}
           onClose={() => setSettingsOpen(false)}
@@ -3193,6 +3205,8 @@ function SettingsDialog(props: {
   topP: string;
   serviceTier: string;
   batchMaxWorkers: string;
+  vlmMaxConcurrentRequests: string;
+  kieFieldGroupSize: string;
   settingsMessage: string | null;
   busy: string | null;
   onVlmApiKey: (value: string) => void;
@@ -3204,6 +3218,8 @@ function SettingsDialog(props: {
   onTopP: (value: string) => void;
   onServiceTier: (value: string) => void;
   onBatchMaxWorkers: (value: string) => void;
+  onVlmMaxConcurrentRequests: (value: string) => void;
+  onKieFieldGroupSize: (value: string) => void;
   onSave: () => void;
   onClearParsingHistory: () => void;
   onClose: () => void;
@@ -3295,6 +3311,26 @@ function SettingsDialog(props: {
               placeholder="4"
               disabled={!settingsWritable}
               onChange={(event) => props.onBatchMaxWorkers(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>VLM 동시 요청 수</span>
+            <input
+              inputMode="numeric"
+              value={props.vlmMaxConcurrentRequests}
+              placeholder="8"
+              disabled={!settingsWritable}
+              onChange={(event) => props.onVlmMaxConcurrentRequests(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>KIE field group 크기</span>
+            <input
+              inputMode="numeric"
+              value={props.kieFieldGroupSize}
+              placeholder="2"
+              disabled={!settingsWritable}
+              onChange={(event) => props.onKieFieldGroupSize(event.target.value)}
             />
           </label>
           <button type="button" className="primary compact" disabled={Boolean(props.busy) || !settingsWritable} onClick={props.onSave}>

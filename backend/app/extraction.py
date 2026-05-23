@@ -251,9 +251,25 @@ def _extract_grouped_values(
     job_id: str,
 ) -> dict[str, Any]:
     requests = _build_extraction_requests(document, fields, regions, job_id)
+    if not requests:
+        return {}
+    if len(requests) == 1:
+        return extract_with_vlm(requests[0]["fields"], image_inputs=requests[0]["image_inputs"])
+
     merged: dict[str, Any] = {}
-    for request in requests:
-        group_values = extract_with_vlm(request["fields"], image_inputs=request["image_inputs"])
+    settings = get_settings()
+    max_workers = max(1, min(settings.vlm_max_concurrent_requests, len(requests)))
+    results: list[dict[str, Any] | None] = [None] * len(requests)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(extract_with_vlm, request["fields"], image_inputs=request["image_inputs"]): index
+            for index, request in enumerate(requests)
+        }
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    for group_values in results:
+        if not group_values:
+            continue
         for key, value in group_values.items():
             merged[key] = value
     return merged
@@ -270,23 +286,25 @@ def _build_extraction_requests(
     field_region_refs = _field_region_refs(fields, region_map)
     full_page_fields = [field for field in fields if field.key_name not in field_region_refs]
     requests: list[dict[str, Any]] = []
+    field_group_size = max(1, get_settings().kie_field_group_size)
 
     if full_page_fields:
-        requests.append(
-            {
-                "group_id": "full_page",
-                "fields": full_page_fields,
-                "image_inputs": [
-                    {
-                        "path": page.image_path,
-                        "label": "Full document page "
-                        f"{page.page_number}. Use this image for these full-document fields only: "
-                        f"{', '.join(field.key_name for field in full_page_fields)}.",
-                    }
-                    for page in document.pages
-                ],
-            }
-        )
+        for group_index, field_group in enumerate(_chunk_fields(full_page_fields, field_group_size), start=1):
+            requests.append(
+                {
+                    "group_id": f"full_page_{group_index}",
+                    "fields": field_group,
+                    "image_inputs": [
+                        {
+                            "path": page.image_path,
+                            "label": "Full document page "
+                            f"{page.page_number}. Use this image for these full-document fields only: "
+                            f"{', '.join(field.key_name for field in field_group)}.",
+                        }
+                        for page in document.pages
+                    ],
+                }
+            )
 
     if not field_region_refs:
         return requests
@@ -302,39 +320,45 @@ def _build_extraction_requests(
             raise RuntimeError(f"Region page {region.page} does not exist for fields: {', '.join(region_ref['field_names'])}")
         masked_path = _mask_region_image(page, region, crop_dir / f"region_{index + 1}_masked.png")
         crop_path = _crop_region_image(page, region, crop_dir / f"region_{index + 1}_crop.png")
-        requests.append(
-            {
-                "group_id": region_ref["key"],
-                "fields": region_fields,
-                "image_inputs": [
-                    {
-                        "path": page.image_path,
-                        "label": (
-                            f"Full page context for extraction region '{region_ref['label']}' on page {region.page}. "
-                            "Use this image only to understand the overall document layout and nearby labels; "
-                            f"extract values only for these fields: {', '.join(region_ref['field_names'])}."
-                        ),
-                    },
-                    {
-                        "path": str(masked_path),
-                        "label": (
-                            f"Masked full page context for extraction region '{region_ref['label']}' on page {region.page}. "
-                            f"Everything outside the region is dimmed. Use this image to understand the region's original page position "
-                            f"for these fields only: {', '.join(region_ref['field_names'])}."
-                        ),
-                    },
-                    {
-                        "path": str(crop_path),
-                        "label": (
-                            f"Cropped extraction region '{region_ref['label']}' on page {region.page}. "
-                            f"Use this crop as the primary reading source for these fields only: {', '.join(region_ref['field_names'])}."
-                        ),
-                    },
-                ],
-            }
-        )
+        for group_index, field_group in enumerate(_chunk_fields(region_fields, field_group_size), start=1):
+            field_names = [field.key_name for field in field_group]
+            requests.append(
+                {
+                    "group_id": f"{region_ref['key']}_{group_index}",
+                    "fields": field_group,
+                    "image_inputs": [
+                        {
+                            "path": page.image_path,
+                            "label": (
+                                f"Full page context for extraction region '{region_ref['label']}' on page {region.page}. "
+                                "Use this image only to understand the overall document layout and nearby labels; "
+                                f"extract values only for these fields: {', '.join(field_names)}."
+                            ),
+                        },
+                        {
+                            "path": str(masked_path),
+                            "label": (
+                                f"Masked full page context for extraction region '{region_ref['label']}' on page {region.page}. "
+                                f"Everything outside the region is dimmed. Use this image to understand the region's original page position "
+                                f"for these fields only: {', '.join(field_names)}."
+                            ),
+                        },
+                        {
+                            "path": str(crop_path),
+                            "label": (
+                                f"Cropped extraction region '{region_ref['label']}' on page {region.page}. "
+                                f"Use this crop as the primary reading source for these fields only: {', '.join(field_names)}."
+                            ),
+                        },
+                    ],
+                }
+            )
 
     return requests
+
+
+def _chunk_fields(fields: list[FieldDefinition], size: int) -> list[list[FieldDefinition]]:
+    return [fields[index:index + size] for index in range(0, len(fields), size)]
 
 
 def _field_region_refs(

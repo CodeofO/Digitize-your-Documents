@@ -205,6 +205,8 @@ class VlmSettingsRead(BaseModel):
     top_p: str | None
     service_tier: str | None
     batch_max_workers: int
+    vlm_max_concurrent_requests: int
+    kie_field_group_size: int
     has_api_key: bool
     env_path: str
     runtime_settings_writable: bool
@@ -221,6 +223,8 @@ class VlmSettingsUpdate(BaseModel):
     top_p: str | None = None
     service_tier: str | None = None
     batch_max_workers: int | None = Field(default=None, ge=1, le=64)
+    vlm_max_concurrent_requests: int | None = Field(default=None, ge=1, le=64)
+    kie_field_group_size: int | None = Field(default=None, ge=1, le=20)
 
 
 class SchemaRecommendationRequest(BaseModel):

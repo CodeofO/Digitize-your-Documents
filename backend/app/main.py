@@ -237,6 +237,8 @@ def get_vlm_settings() -> VlmSettingsRead:
         top_p=settings.vlm_top_p,
         service_tier=settings.vlm_service_tier,
         batch_max_workers=settings.batch_max_workers,
+        vlm_max_concurrent_requests=settings.vlm_max_concurrent_requests,
+        kie_field_group_size=settings.kie_field_group_size,
         has_api_key=bool(settings.resolved_vlm_api_key),
         env_path=str(ROOT_ENV_PATH),
         runtime_settings_writable=settings.runtime_settings_writable,
@@ -263,6 +265,8 @@ def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
         "VLM_TOP_P": (payload.top_p or "").strip(),
         "VLM_SERVICE_TIER": (payload.service_tier or "").strip(),
         "BATCH_MAX_WORKERS": str(payload.batch_max_workers or get_settings().batch_max_workers),
+        "VLM_MAX_CONCURRENT_REQUESTS": str(payload.vlm_max_concurrent_requests or get_settings().vlm_max_concurrent_requests),
+        "KIE_FIELD_GROUP_SIZE": str(payload.kie_field_group_size or get_settings().kie_field_group_size),
     }
     api_key = (payload.api_key or "").strip()
     if api_key:
