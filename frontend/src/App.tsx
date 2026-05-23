@@ -44,6 +44,7 @@ const KIE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const KIE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
 const BATCH_FILE_ROW_HEIGHT = 84;
 const BATCH_FILE_OVERSCAN = 8;
+const MAX_BATCH_UPLOAD_FILES = 5000;
 const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
   {
     key_name: "문서번호",
@@ -1840,6 +1841,11 @@ export default function App() {
       selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
     );
     const ignoredCount = selected.length - supported.length;
+    if (supported.length > MAX_BATCH_UPLOAD_FILES) {
+      setBatchFiles([]);
+      setBatchMessage(`한 번에 최대 ${MAX_BATCH_UPLOAD_FILES.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
+      return;
+    }
     setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
     setBatchFiles(supported);
   }
@@ -1850,6 +1856,12 @@ export default function App() {
       selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
     );
     const ignoredCount = selected.length - supported.length;
+    if (supported.length > MAX_BATCH_UPLOAD_FILES) {
+      setBatchFiles([]);
+      setDraftBatchIndex(0);
+      setBatchMessage(`한 번에 최대 ${MAX_BATCH_UPLOAD_FILES.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
+      return;
+    }
     if (!supported.length) {
       setBatchFiles([]);
       setDraftBatchIndex(0);

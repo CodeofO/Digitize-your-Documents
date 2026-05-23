@@ -16,12 +16,15 @@ import {
   UploadCloud,
   X
 } from "lucide-react";
-import { ChangeEvent, DragEvent, PointerEvent, useEffect, useState } from "react";
+import { ChangeEvent, CSSProperties, DragEvent, PointerEvent, UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 
 const MODULE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const MODULE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
+const MAX_BATCH_UPLOAD_FILES = 5000;
+const MODULE_VIRTUAL_ROW_HEIGHT = 58;
+const MODULE_VIRTUAL_OVERSCAN = 8;
 
 type ModuleKind = "classifier" | "required-checker";
 type EvidenceType = string;
@@ -189,6 +192,64 @@ const evidenceTypeLabels: Record<string, string> = {
   visual_mark: "시각 표시",
   other: "기타"
 };
+
+function useVirtualRows(count: number, activeIndex: number) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(360);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+
+    const updateHeight = () => setViewportHeight(element.clientHeight || 360);
+    updateHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateHeight);
+      return () => window.removeEventListener("resize", updateHeight);
+    }
+
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element || activeIndex < 0 || count <= 0) return;
+
+    const rowTop = activeIndex * MODULE_VIRTUAL_ROW_HEIGHT;
+    const rowBottom = rowTop + MODULE_VIRTUAL_ROW_HEIGHT;
+    const viewTop = element.scrollTop;
+    const viewBottom = viewTop + element.clientHeight;
+    if (rowTop < viewTop) {
+      element.scrollTop = Math.max(0, rowTop - MODULE_VIRTUAL_ROW_HEIGHT * 2);
+      setScrollTop(element.scrollTop);
+    } else if (rowBottom > viewBottom) {
+      element.scrollTop = Math.max(0, rowBottom - element.clientHeight + MODULE_VIRTUAL_ROW_HEIGHT * 2);
+      setScrollTop(element.scrollTop);
+    }
+  }, [activeIndex, count]);
+
+  const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    setScrollTop(event.currentTarget.scrollTop);
+  }, []);
+
+  const start = Math.max(0, Math.floor(scrollTop / MODULE_VIRTUAL_ROW_HEIGHT) - MODULE_VIRTUAL_OVERSCAN);
+  const visibleCount = Math.ceil(viewportHeight / MODULE_VIRTUAL_ROW_HEIGHT) + MODULE_VIRTUAL_OVERSCAN * 2;
+  const end = Math.min(count, start + visibleCount);
+  const spacerStyle = useMemo<CSSProperties>(
+    () => ({ height: Math.max(1, count) * MODULE_VIRTUAL_ROW_HEIGHT }),
+    [count]
+  );
+  const windowStyle = useMemo<CSSProperties>(
+    () => ({ transform: `translateY(${start * MODULE_VIRTUAL_ROW_HEIGHT}px)` }),
+    [start]
+  );
+
+  return { containerRef, onScroll, start, end, spacerStyle, windowStyle };
+}
 
 export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorkspaceProps) {
   const isClassifier = kind === "classifier";
@@ -486,8 +547,16 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
     const supported = incoming
       .filter((file) => MODULE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    if (supported.length > MAX_BATCH_UPLOAD_FILES) {
+      setSelectedFiles([]);
+      setSelectedFileIndex(0);
+      setMessage(null);
+      setError(`한 번에 최대 ${MAX_BATCH_UPLOAD_FILES.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
+      return;
+    }
     setSelectedFiles(supported);
     setSelectedFileIndex(0);
+    setError(null);
     setMessage(supported.length ? `${supported.length}개 파일을 선택했습니다.` : null);
   }
 
@@ -708,12 +777,11 @@ function ModuleUploadDropzone(props: {
               <strong>{props.selectedFiles.length}개 파일</strong>
               <span>실행 대기</span>
             </div>
-            {props.selectedFiles.map((file, index) => (
-              <button key={`${file.name}_${index}`} className={index === props.selectedFileIndex ? "active" : ""} onClick={() => props.onSelectIndex(index)}>
-                <span>{file.name}</span>
-                <small>{formatBytes(file.size)}</small>
-              </button>
-            ))}
+            <ModuleSelectedFileList
+              files={props.selectedFiles}
+              selectedFileIndex={props.selectedFileIndex}
+              onSelectIndex={props.onSelectIndex}
+            />
           </aside>
           <ModuleDraftPreview file={props.selectedFile} previewUrl={props.selectedPreviewUrl} />
         </div>
@@ -739,6 +807,33 @@ function ModuleUploadDropzone(props: {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+function ModuleSelectedFileList(props: {
+  files: File[];
+  selectedFileIndex: number;
+  onSelectIndex: (index: number) => void;
+}) {
+  const virtual = useVirtualRows(props.files.length, props.selectedFileIndex);
+  const visibleFiles = props.files.slice(virtual.start, virtual.end);
+
+  return (
+    <div className="module-virtual-list" ref={virtual.containerRef} onScroll={virtual.onScroll}>
+      <div className="virtual-list-spacer" style={virtual.spacerStyle}>
+        <div className="virtual-list-window" style={virtual.windowStyle}>
+          {visibleFiles.map((file, offset) => {
+            const index = virtual.start + offset;
+            return (
+              <button key={`${file.name}_${index}`} className={index === props.selectedFileIndex ? "active" : ""} onClick={() => props.onSelectIndex(index)}>
+                <span>{file.name}</span>
+                <small>{formatBytes(file.size)}</small>
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
@@ -863,15 +958,33 @@ function ModuleBatchRail(props: {
           JSON
         </button>
       </div>
-      <div className="module-batch-list">
-        {props.batch.items.map((item) => (
-          <button key={item.id} className={item.id === props.activeItemId ? "active" : ""} onClick={() => props.onOpen(item)}>
-            <span>{item.filename}</span>
-            <small>{moduleStatusLabel(item.status)}</small>
-          </button>
-        ))}
-      </div>
+      <ModuleBatchItemList batch={props.batch} activeItemId={props.activeItemId} onOpen={props.onOpen} />
     </aside>
+  );
+}
+
+function ModuleBatchItemList(props: {
+  batch: ModuleBatch;
+  activeItemId: string | null;
+  onOpen: (item: ModuleBatchItem) => void;
+}) {
+  const activeIndex = Math.max(0, props.batch.items.findIndex((item) => item.id === props.activeItemId));
+  const virtual = useVirtualRows(props.batch.items.length, activeIndex);
+  const visibleItems = props.batch.items.slice(virtual.start, virtual.end);
+
+  return (
+    <div className="module-batch-list module-virtual-list" ref={virtual.containerRef} onScroll={virtual.onScroll}>
+      <div className="virtual-list-spacer" style={virtual.spacerStyle}>
+        <div className="virtual-list-window" style={virtual.windowStyle}>
+          {visibleItems.map((item) => (
+            <button key={item.id} className={item.id === props.activeItemId ? "active" : ""} onClick={() => props.onOpen(item)}>
+              <span>{item.filename}</span>
+              <small>{moduleStatusLabel(item.status)}</small>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 

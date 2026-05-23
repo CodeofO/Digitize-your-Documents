@@ -234,6 +234,48 @@ def test_batch_upload_rejects_too_many_files(monkeypatch) -> None:
         get_settings.cache_clear()
 
 
+def test_large_batch_multipart_allows_configured_counts_above_parser_default(monkeypatch) -> None:
+    monkeypatch.setenv("UPLOAD_MAX_BATCH_FILES", "5000")
+    get_settings.cache_clear()
+    try:
+        with get_client() as client:
+            files = [
+                ("files", (f"document_{index:04d}.png", ONE_BY_ONE_PNG, "image/png"))
+                for index in range(1001)
+            ]
+            response = client.post(
+                "/api/classification-batches",
+                data={"classifier_id": "missing"},
+                files=files,
+            )
+            assert response.status_code == 404, response.text
+            assert response.json()["detail"] == "Document classifier not found"
+    finally:
+        monkeypatch.delenv("UPLOAD_MAX_BATCH_FILES", raising=False)
+        get_settings.cache_clear()
+
+
+def test_large_batch_multipart_returns_413_over_configured_limit(monkeypatch) -> None:
+    monkeypatch.setenv("UPLOAD_MAX_BATCH_FILES", "1001")
+    get_settings.cache_clear()
+    try:
+        with get_client() as client:
+            files = [
+                ("files", (f"document_{index:04d}.png", ONE_BY_ONE_PNG, "image/png"))
+                for index in range(1002)
+            ]
+            response = client.post(
+                "/api/classification-batches",
+                data={"classifier_id": "missing"},
+                files=files,
+            )
+            assert response.status_code == 413, response.text
+            assert "1001" in response.json()["detail"]
+    finally:
+        monkeypatch.delenv("UPLOAD_MAX_BATCH_FILES", raising=False)
+        get_settings.cache_clear()
+
+
 def test_retention_cleanup_removes_expired_uploads(monkeypatch) -> None:
     from app.database import SessionLocal
 

@@ -16,6 +16,8 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
+from starlette.datastructures import FormData
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.audit import log_audit_event
 from app.auth import (
@@ -168,7 +170,7 @@ async def auth_and_security_middleware(request: Request, call_next):
     try:
         if request.url.path.startswith("/api/") and request.method.upper() != "OPTIONS" and not is_public_api_path(request.url.path):
             require_session_for_request(request, settings)
-    except HTTPException as exc:
+    except StarletteHTTPException as exc:
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
     response = await call_next(request)
@@ -1358,12 +1360,13 @@ def delete_workflow(workflow_id: str, db: Session = Depends(get_db)) -> Workflow
 
 
 @app.post("/api/workflows/{workflow_id}/runs", response_model=WorkflowRunRead)
-def create_workflow_run(
+async def create_workflow_run(
     workflow_id: str,
+    request: Request,
     background_tasks: BackgroundTasks,
-    files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    _, files = await _read_batch_upload_form(request)
     workflow = db.get(WorkflowDefinition, workflow_id)
     if not workflow or workflow.archived:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -1453,12 +1456,13 @@ def export_workflow_run(
 
 
 @app.post("/api/batches", response_model=BatchRead)
-def create_batch(
+async def create_batch(
+    request: Request,
     background_tasks: BackgroundTasks,
-    schema_id: str = Form(...),
-    files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ) -> BatchRead:
+    form, files = await _read_batch_upload_form(request)
+    schema_id = _required_form_value(form, "schema_id")
     schema = db.get(Schema, schema_id)
     if not schema:
         raise HTTPException(status_code=404, detail="Schema not found")
@@ -1630,12 +1634,13 @@ def export_batch(
 
 
 @app.post("/api/classification-batches", response_model=ClassificationBatchRead)
-def create_classification_batch(
+async def create_classification_batch(
+    request: Request,
     background_tasks: BackgroundTasks,
-    classifier_id: str = Form(...),
-    files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ) -> ClassificationBatchRead:
+    form, files = await _read_batch_upload_form(request)
+    classifier_id = _required_form_value(form, "classifier_id")
     classifier = db.get(DocumentClassifier, classifier_id)
     if not classifier or classifier.archived:
         raise HTTPException(status_code=404, detail="Document classifier not found")
@@ -1765,12 +1770,13 @@ def export_classification_batch(
 
 
 @app.post("/api/required-field-check-batches", response_model=RequiredFieldCheckBatchRead)
-def create_required_field_check_batch(
+async def create_required_field_check_batch(
+    request: Request,
     background_tasks: BackgroundTasks,
-    checklist_id: str = Form(...),
-    files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ) -> RequiredFieldCheckBatchRead:
+    form, files = await _read_batch_upload_form(request)
+    checklist_id = _required_form_value(form, "checklist_id")
     checklist = db.get(RequiredFieldChecklist, checklist_id)
     if not checklist or checklist.archived:
         raise HTTPException(status_code=404, detail="Required field checklist not found")
@@ -2541,10 +2547,54 @@ def _upload_file_sort_key(file: UploadFile) -> tuple[str, str]:
     return (filename.casefold(), filename)
 
 
+async def _read_batch_upload_form(request: Request) -> tuple[FormData, list[UploadFile]]:
+    settings = get_settings()
+    try:
+        form = await request.form(
+            max_files=_multipart_max_files(settings.upload_max_batch_files),
+            max_fields=32,
+        )
+    except StarletteHTTPException as exc:
+        detail = str(exc.detail)
+        if "Too many files" in detail or "Maximum number of files" in detail:
+            raise HTTPException(status_code=413, detail=_batch_file_limit_message()) from exc
+        raise HTTPException(status_code=400, detail=f"Invalid multipart upload: {detail}") from exc
+
+    files = [item for item in form.getlist("files") if _is_upload_file(item)]
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+    _validate_upload_file_count(files)
+    return form, files
+
+
+def _multipart_max_files(upload_limit: int) -> int:
+    if upload_limit > 0:
+        return max(1000, upload_limit)
+    return 10000
+
+
+def _is_upload_file(value: Any) -> bool:
+    return hasattr(value, "filename") and hasattr(value, "file")
+
+
+def _required_form_value(form: FormData, key: str) -> str:
+    value = form.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail=f"{key} is required")
+    return value.strip()
+
+
 def _validate_upload_file_count(files: list[UploadFile]) -> None:
     limit = get_settings().upload_max_batch_files
     if limit > 0 and len(files) > limit:
-        raise HTTPException(status_code=413, detail=f"Batch file count exceeds the configured limit of {limit}")
+        raise HTTPException(status_code=413, detail=_batch_file_limit_message())
+
+
+def _batch_file_limit_message() -> str:
+    limit = get_settings().upload_max_batch_files
+    if limit > 0:
+        return f"Batch file count exceeds the configured limit of {limit}"
+    return "Batch file count exceeds the multipart parser limit"
 
 
 def _batch_export_row(item: BatchItem, field_names: list[str]) -> dict[str, Any]:

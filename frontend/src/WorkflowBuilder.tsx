@@ -37,11 +37,14 @@ import {
   UploadCloud,
   X
 } from "lucide-react";
-import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, CSSProperties, UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 
 const WORKFLOW_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
+const MAX_WORKFLOW_RUN_FILES = 5000;
+const WORKFLOW_RUN_ROW_HEIGHT = 64;
+const WORKFLOW_RUN_OVERSCAN = 8;
 
 type WorkflowNodeKind = "input" | "classifier" | "branch" | "kie" | "required-checker" | "merge" | "export";
 
@@ -482,6 +485,13 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   function onFileInput(event: ChangeEvent<HTMLInputElement>) {
     const nextFiles = Array.from(event.target.files ?? []);
     nextFiles.sort((a, b) => a.name.localeCompare(b.name));
+    if (nextFiles.length > MAX_WORKFLOW_RUN_FILES) {
+      setFiles([]);
+      setError(`한 번에 최대 ${MAX_WORKFLOW_RUN_FILES.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
+      event.currentTarget.value = "";
+      return;
+    }
+    setError(null);
     setFiles(nextFiles);
     event.currentTarget.value = "";
   }
@@ -912,28 +922,94 @@ function workflowRunHeadline(run: WorkflowRun) {
   return "작업 완료";
 }
 
+function useWorkflowRunVirtualRows(count: number, activeIndex: number) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(420);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+
+    const updateHeight = () => setViewportHeight(element.clientHeight || 420);
+    updateHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateHeight);
+      return () => window.removeEventListener("resize", updateHeight);
+    }
+
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element || activeIndex < 0 || count <= 0) return;
+
+    const rowTop = activeIndex * WORKFLOW_RUN_ROW_HEIGHT;
+    const rowBottom = rowTop + WORKFLOW_RUN_ROW_HEIGHT;
+    const viewTop = element.scrollTop;
+    const viewBottom = viewTop + element.clientHeight;
+    if (rowTop < viewTop) {
+      element.scrollTop = Math.max(0, rowTop - WORKFLOW_RUN_ROW_HEIGHT * 2);
+      setScrollTop(element.scrollTop);
+    } else if (rowBottom > viewBottom) {
+      element.scrollTop = Math.max(0, rowBottom - element.clientHeight + WORKFLOW_RUN_ROW_HEIGHT * 2);
+      setScrollTop(element.scrollTop);
+    }
+  }, [activeIndex, count]);
+
+  const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    setScrollTop(event.currentTarget.scrollTop);
+  }, []);
+
+  const start = Math.max(0, Math.floor(scrollTop / WORKFLOW_RUN_ROW_HEIGHT) - WORKFLOW_RUN_OVERSCAN);
+  const visibleCount = Math.ceil(viewportHeight / WORKFLOW_RUN_ROW_HEIGHT) + WORKFLOW_RUN_OVERSCAN * 2;
+  const end = Math.min(count, start + visibleCount);
+  const spacerStyle = useMemo<CSSProperties>(
+    () => ({ height: Math.max(1, count) * WORKFLOW_RUN_ROW_HEIGHT }),
+    [count]
+  );
+  const windowStyle = useMemo<CSSProperties>(
+    () => ({ transform: `translateY(${start * WORKFLOW_RUN_ROW_HEIGHT}px)` }),
+    [start]
+  );
+
+  return { containerRef, onScroll, start, end, spacerStyle, windowStyle };
+}
+
 function WorkflowRunRail(props: { run: WorkflowRun; selectedItem: WorkflowRunItem | null; onSelectItem: (itemId: string) => void }) {
+  const activeIndex = Math.max(0, props.run.items.findIndex((item) => item.id === props.selectedItem?.id));
+  const virtual = useWorkflowRunVirtualRows(props.run.items.length, activeIndex);
+  const visibleItems = props.run.items.slice(virtual.start, virtual.end);
+
   return (
     <aside className="workflow-run-rail">
       <div className="workflow-run-rail-head">
         <span>{props.run.items.length}개 문서</span>
         <small>{workflowStatusLabel(props.run.status)}</small>
       </div>
-      <div className="workflow-run-list">
-        {props.run.items.map((item) => {
-          const result = item.result ?? {};
-          const classification = result.classification?.class_name || result.classification?.status || "-";
-          const activeNode = item.status === "queued" ? "대기 중" : result.current_node_label || workflowStatusLabel(item.status);
-          return (
-            <button key={item.id} type="button" className={item.id === props.selectedItem?.id ? "active" : ""} onClick={() => props.onSelectItem(item.id)}>
-              <span>
-                <i className={`workflow-status-dot ${item.status}`} />
-                <strong>{item.filename}</strong>
-              </span>
-              <small>{classification} · {activeNode}</small>
-            </button>
-          );
-        })}
+      <div className="workflow-run-list workflow-virtual-list" ref={virtual.containerRef} onScroll={virtual.onScroll}>
+        <div className="virtual-list-spacer" style={virtual.spacerStyle}>
+          <div className="virtual-list-window" style={virtual.windowStyle}>
+            {visibleItems.map((item) => {
+              const result = item.result ?? {};
+              const classification = result.classification?.class_name || result.classification?.status || "-";
+              const activeNode = item.status === "queued" ? "대기 중" : result.current_node_label || workflowStatusLabel(item.status);
+              return (
+                <button key={item.id} type="button" className={item.id === props.selectedItem?.id ? "active" : ""} onClick={() => props.onSelectItem(item.id)}>
+                  <span>
+                    <i className={`workflow-status-dot ${item.status}`} />
+                    <strong>{item.filename}</strong>
+                  </span>
+                  <small>{classification} · {activeNode}</small>
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
     </aside>
   );

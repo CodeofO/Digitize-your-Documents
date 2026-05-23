@@ -812,6 +812,12 @@ textarea {
   overflow: auto;
 }
 
+.workflow-run-list.workflow-virtual-list button {
+  box-sizing: border-box;
+  height: 58px;
+  width: 100%;
+}
+
 .workflow-run-list button {
   align-items: flex-start;
   background: #ffffff;
@@ -2217,8 +2223,23 @@ textarea {
   flex-direction: column;
   gap: 6px;
   margin-top: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 8px;
+  width: 100%;
+}
+
+.module-virtual-list,
+.workflow-run-list.workflow-virtual-list {
+  display: block;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+
+.module-virtual-list button {
+  box-sizing: border-box;
+  height: 52px;
   width: 100%;
 }
 
@@ -2283,6 +2304,11 @@ textarea {
   gap: 6px;
   min-height: 0;
   overflow: auto;
+}
+
+.module-batch-list.module-virtual-list {
+  display: block;
+  position: relative;
 }
 
 .module-batch-list span,
