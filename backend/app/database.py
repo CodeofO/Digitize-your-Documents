@@ -59,23 +59,28 @@ def _run_lightweight_migrations() -> None:
         ],
         "batch_items": [
             ("client_file_id", "VARCHAR"),
+            ("upload_index", "INTEGER"),
         ],
         "classification_batch_items": [
             ("client_file_id", "VARCHAR"),
+            ("upload_index", "INTEGER"),
         ],
         "required_field_check_batch_items": [
             ("client_file_id", "VARCHAR"),
+            ("upload_index", "INTEGER"),
         ],
         "workflow_runs": [
             ("upload_duration_ms", "INTEGER"),
             ("inference_duration_ms", "INTEGER"),
             ("inference_started_at", "DATETIME"),
+            ("execution_generation", "INTEGER NOT NULL DEFAULT 0"),
         ],
         "workflow_run_items": [
             ("client_file_id", "VARCHAR"),
             ("upload_index", "INTEGER"),
             ("upload_duration_ms", "INTEGER"),
             ("inference_duration_ms", "INTEGER"),
+            ("execution_generation", "INTEGER NOT NULL DEFAULT 0"),
         ],
     }
 

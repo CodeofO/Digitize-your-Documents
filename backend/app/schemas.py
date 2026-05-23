@@ -205,7 +205,6 @@ class VlmSettingsRead(BaseModel):
     max_completion_tokens: str | None
     top_p: str | None
     service_tier: str | None
-    batch_max_workers: int
     vlm_max_concurrent_requests: int
     kie_field_group_size: int
     has_api_key: bool
@@ -223,7 +222,6 @@ class VlmSettingsUpdate(BaseModel):
     max_completion_tokens: str | None = None
     top_p: str | None = None
     service_tier: str | None = None
-    batch_max_workers: int | None = Field(default=None, ge=1, le=64)
     vlm_max_concurrent_requests: int | None = Field(default=None, ge=1, le=64)
     kie_field_group_size: int | None = Field(default=None, ge=1, le=20)
 
@@ -391,6 +389,7 @@ class ClassificationBatchItemRead(BaseModel):
     document_id: str
     job_id: str
     filename: str
+    upload_index: int | None = None
     status: str
     result_id: str | None = None
     error_message: str | None = None
@@ -546,6 +545,7 @@ class RequiredFieldCheckBatchItemRead(BaseModel):
     document_id: str
     job_id: str
     filename: str
+    upload_index: int | None = None
     status: str
     result_id: str | None = None
     error_message: str | None = None
@@ -646,7 +646,7 @@ class SystemStatusRead(BaseModel):
     upload_max_batch_files: int
     upload_chunk_files: int
     preprocess_max_workers: int
-    workflow_max_workers: int
+    vlm_max_concurrent_requests: int
     document_page_max_long_edge: int
     document_page_jpeg_quality: int
 
@@ -684,6 +684,7 @@ class BatchItemRead(BaseModel):
     document_id: str
     job_id: str
     filename: str
+    upload_index: int | None = None
     status: str
     result_id: str | None = None
     error_message: str | None = None

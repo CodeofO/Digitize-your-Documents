@@ -48,7 +48,9 @@ def test_system_status_mock_mode(monkeypatch) -> None:
         assert payload["is_mock"] is True
         assert payload["upload_max_batch_files"] == 1234
         assert payload["upload_chunk_files"] == 10
-        assert payload["workflow_max_workers"] == 1
+        assert payload["vlm_max_concurrent_requests"] == 8
+        assert "batch_max_workers" not in payload
+        assert "workflow_max_workers" not in payload
         assert payload["document_page_max_long_edge"] == 3000
         assert payload["document_page_jpeg_quality"] == 88
         assert "vlm_api_key" not in payload
@@ -91,7 +93,6 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
                 "model_name": "test-model",
                 "libreoffice_path": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
                 "provider": "openai",
-                "batch_max_workers": 5,
                 "vlm_max_concurrent_requests": 7,
                 "kie_field_group_size": 3,
             },
@@ -100,12 +101,15 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
         payload = response.json()
         assert payload["libreoffice_path"] == "/Applications/LibreOffice.app/Contents/MacOS/soffice"
         assert "vlm_max_concurrent_requests" in payload
+        assert "batch_max_workers" not in payload
+        assert "workflow_max_workers" not in payload
         assert "kie_field_group_size" in payload
         assert payload["runtime_settings_writable"] is True
 
     contents = env_path.read_text(encoding="utf-8")
     assert 'LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"' in contents
-    assert 'BATCH_MAX_WORKERS="5"' in contents
+    assert "BATCH_MAX_WORKERS" not in contents
+    assert "WORKFLOW_MAX_WORKERS" not in contents
     assert 'VLM_MAX_CONCURRENT_REQUESTS="7"' in contents
     assert 'KIE_FIELD_GROUP_SIZE="3"' in contents
 
@@ -217,6 +221,30 @@ def test_upload_rejects_file_size_over_limit(monkeypatch) -> None:
             assert response.status_code == 413
     finally:
         monkeypatch.delenv("UPLOAD_MAX_FILE_BYTES", raising=False)
+        get_settings.cache_clear()
+
+
+def test_upload_downscales_preview_over_pixel_limit(monkeypatch) -> None:
+    image = Image.new("RGB", (20, 10), (255, 255, 255))
+    stream = io.BytesIO()
+    image.save(stream, format="PNG")
+
+    monkeypatch.setenv("UPLOAD_MAX_IMAGE_PIXELS", "100")
+    monkeypatch.setenv("DOCUMENT_PAGE_MAX_LONG_EDGE", "0")
+    get_settings.cache_clear()
+    try:
+        with get_client() as client:
+            response = client.post(
+                "/api/documents",
+                files={"file": ("oversized.png", stream.getvalue(), "image/png")},
+            )
+            assert response.status_code == 200, response.text
+            page = response.json()["pages"][0]
+            assert page["width"] * page["height"] <= 100
+            assert page["width"] * page["height"] <= 98
+    finally:
+        monkeypatch.delenv("UPLOAD_MAX_IMAGE_PIXELS", raising=False)
+        monkeypatch.delenv("DOCUMENT_PAGE_MAX_LONG_EDGE", raising=False)
         get_settings.cache_clear()
 
 
@@ -377,6 +405,69 @@ def test_kie_field_groups_run_with_bounded_parallelism(monkeypatch) -> None:
         assert calls == 4
         assert max_active == 2
         assert set(values) == {field.key_name for field in fields}
+    finally:
+        get_settings.cache_clear()
+
+
+def test_module_batch_workers_use_vlm_concurrent_request_limit(monkeypatch) -> None:
+    from app import document_modules
+
+    active = 0
+    max_active = 0
+    finalized = False
+    lock = threading.Lock()
+
+    def fake_runner(_job_id: str) -> None:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+
+    def fake_failer(_job_id: str, message: str) -> None:
+        raise AssertionError(message)
+
+    def fake_finalizer() -> None:
+        nonlocal finalized
+        finalized = True
+
+    monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "2")
+    get_settings.cache_clear()
+    try:
+        document_modules._run_parallel_batch(["job_1", "job_2", "job_3", "job_4"], fake_runner, fake_failer, fake_finalizer)
+        assert max_active == 2
+        assert finalized is True
+    finally:
+        get_settings.cache_clear()
+
+
+def test_extraction_batch_workers_use_vlm_concurrent_request_limit(monkeypatch) -> None:
+    from app import extraction as extraction_module
+
+    active = 0
+    max_active = 0
+    finalized: list[str] = []
+    lock = threading.Lock()
+
+    def fake_run_job(_job_id: str) -> None:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+
+    monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "2")
+    monkeypatch.setattr(extraction_module, "run_extraction_job", fake_run_job)
+    monkeypatch.setattr(extraction_module, "_finalize_batch", lambda batch_id: finalized.append(batch_id))
+    get_settings.cache_clear()
+    try:
+        extraction_module.run_batch_jobs("batch_1", ["job_1", "job_2", "job_3", "job_4"])
+        assert max_active == 2
+        assert finalized == ["batch_1"]
     finally:
         get_settings.cache_clear()
 
@@ -1297,11 +1388,11 @@ def test_batch_finalizes_after_mock_jobs() -> None:
         get_settings.cache_clear()
 
 
-def test_batch_high_worker_count_does_not_exhaust_db_pool() -> None:
-    previous_workers = os.environ.get("BATCH_MAX_WORKERS")
+def test_batch_high_concurrent_request_count_does_not_exhaust_db_pool() -> None:
+    previous_workers = os.environ.get("VLM_MAX_CONCURRENT_REQUESTS")
     try:
         os.environ["VLM_PROVIDER"] = "mock"
-        os.environ["BATCH_MAX_WORKERS"] = "16"
+        os.environ["VLM_MAX_CONCURRENT_REQUESTS"] = "16"
         get_settings.cache_clear()
         with get_client() as client:
             schema = create_schema(client)
@@ -1328,9 +1419,9 @@ def test_batch_high_worker_count_does_not_exhaust_db_pool() -> None:
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         if previous_workers is None:
-            os.environ.pop("BATCH_MAX_WORKERS", None)
+            os.environ.pop("VLM_MAX_CONCURRENT_REQUESTS", None)
         else:
-            os.environ["BATCH_MAX_WORKERS"] = previous_workers
+            os.environ["VLM_MAX_CONCURRENT_REQUESTS"] = previous_workers
         get_settings.cache_clear()
 
 
@@ -1667,7 +1758,7 @@ def test_workflow_definition_validation_and_branch_run_mock_mode() -> None:
 
 
 def test_workflow_resume_and_discard_partial_upload(monkeypatch) -> None:
-    monkeypatch.setattr("app.main.run_workflow_run", lambda run_id: None)
+    monkeypatch.setattr("app.main.run_workflow_run", lambda *args: None)
 
     with get_client() as client:
         schema = create_schema(client, name="workflow_resume_schema")
@@ -1700,15 +1791,19 @@ def test_workflow_resume_and_discard_partial_upload(monkeypatch) -> None:
         assert payload["total_count"] == 2
         assert payload["missing_count"] == 1
 
+        paused = client.post(f"/api/workflow-runs/{run_id}/pause")
+        assert paused.status_code == 200, paused.text
+        assert paused.json()["status"] == "paused"
+
         appended = client.post(
             f"/api/workflow-runs/{run_id}/items",
             data={"client_file_ids": ["1:second.png:1:1"]},
             files=[("files", ("second.png", ONE_BY_ONE_PNG, "image/png"))],
         )
         assert appended.status_code == 200, appended.text
-        resumed = client.post(f"/api/workflow-runs/{run_id}/resume")
-        assert resumed.status_code == 200, resumed.text
-        payload = resumed.json()
+        started = client.post(f"/api/workflow-runs/{run_id}/start")
+        assert started.status_code == 200, started.text
+        payload = started.json()
         assert payload["status"] == "running"
         assert payload["total_count"] == 2
         assert payload["queued_count"] == 2
@@ -1723,7 +1818,7 @@ def test_workflow_resume_and_discard_partial_upload(monkeypatch) -> None:
 
 
 def test_workflow_items_preserve_upload_index_order(monkeypatch) -> None:
-    monkeypatch.setattr("app.main.run_workflow_run", lambda run_id: None)
+    monkeypatch.setattr("app.main.run_workflow_run", lambda *args: None)
 
     with get_client() as client:
         schema = create_schema(client, name="workflow_upload_index_schema")
@@ -1756,8 +1851,91 @@ def test_workflow_items_preserve_upload_index_order(monkeypatch) -> None:
         assert [item["upload_index"] for item in payload["items"]] == [0, 1]
 
 
+def test_workflow_resume_skips_existing_upload_indexes_when_client_ids_change(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_workflow_run", lambda *args: None)
+
+    with get_client() as client:
+        schema = create_schema(client, name="workflow_resume_index_schema")
+        classifier = create_document_classifier(client, name="workflow_resume_index_classifier")
+        checklist = create_required_field_checklist(client, name="workflow_resume_index_checklist")
+        workflow = client.post(
+            "/api/workflows",
+            json={"name": "resume_index_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        assert workflow.status_code == 200, workflow.text
+
+        initialized = client.post(f"/api/workflows/{workflow.json()['id']}/runs/init", json={"total_count": 3})
+        assert initialized.status_code == 200, initialized.text
+        run_id = initialized.json()["id"]
+
+        first = client.post(
+            f"/api/workflow-runs/{run_id}/items",
+            data={"client_file_ids": ["original:0", "original:1"], "upload_indexes": ["0", "1"]},
+            files=[
+                ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+            ],
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["uploaded_count"] == 2
+
+        resumed = client.post(
+            f"/api/workflow-runs/{run_id}/items",
+            data={
+                "client_file_ids": ["changed:0", "changed:1", "changed:2"],
+                "upload_indexes": ["0", "1", "2"],
+            },
+            files=[
+                ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+                ("files", ("third.png", ONE_BY_ONE_PNG, "image/png")),
+            ],
+        )
+        assert resumed.status_code == 200, resumed.text
+        payload = resumed.json()
+        assert payload["uploaded_count"] == 3
+        assert [item["upload_index"] for item in payload["items"]] == [0, 1, 2]
+
+
+def test_workflow_restart_seals_missing_upload_slots(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_workflow_run", lambda *args: None)
+
+    with get_client() as client:
+        schema = create_schema(client, name="workflow_seal_schema")
+        classifier = create_document_classifier(client, name="workflow_seal_classifier")
+        checklist = create_required_field_checklist(client, name="workflow_seal_checklist")
+        workflow = client.post(
+            "/api/workflows",
+            json={"name": "seal_missing_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        assert workflow.status_code == 200, workflow.text
+
+        initialized = client.post(f"/api/workflows/{workflow.json()['id']}/runs/init", json={"total_count": 3})
+        assert initialized.status_code == 200, initialized.text
+        run_id = initialized.json()["id"]
+
+        appended = client.post(
+            f"/api/workflow-runs/{run_id}/items",
+            data={"client_file_ids": ["original:0"], "upload_indexes": ["0"]},
+            files=[("files", ("first.png", ONE_BY_ONE_PNG, "image/png"))],
+        )
+        assert appended.status_code == 200, appended.text
+        paused = client.post(f"/api/workflow-runs/{run_id}/pause")
+        assert paused.status_code == 200, paused.text
+
+        restarted = client.post(f"/api/workflow-runs/{run_id}/restart")
+        assert restarted.status_code == 200, restarted.text
+        payload = restarted.json()
+        assert payload["status"] == "running"
+        assert payload["uploaded_count"] == 3
+        assert payload["failed_count"] == 2
+        assert payload["queued_count"] == 1
+        assert sorted(item["upload_index"] for item in payload["items"]) == [0, 1, 2]
+        assert sum(1 for item in payload["items"] if item["filename"].startswith("missing_upload_")) == 2
+
+
 def test_workflow_pause_preserves_uploads_and_restart_requeues(monkeypatch) -> None:
-    monkeypatch.setattr("app.main.run_workflow_run", lambda run_id: None)
+    monkeypatch.setattr("app.main.run_workflow_run", lambda *args: None)
 
     with get_client() as client:
         schema = create_schema(client, name="workflow_pause_schema")
@@ -1866,6 +2044,13 @@ def test_workflow_restart_retries_failed_items_without_reupload(monkeypatch) -> 
             payload = client.get(f"/api/workflow-runs/{run_id}").json()
             assert payload["status"] == "completed"
             assert payload["uploaded_count"] == 2
+            assert [item["document_id"] for item in payload["items"]] == document_ids
+            assert {item["status"] for item in payload["items"]} == {"completed"}
+
+            restarted_completed = client.post(f"/api/workflow-runs/{run_id}/restart")
+            assert restarted_completed.status_code == 200, restarted_completed.text
+            payload = client.get(f"/api/workflow-runs/{run_id}").json()
+            assert payload["status"] == "completed"
             assert [item["document_id"] for item in payload["items"]] == document_ids
             assert {item["status"] for item in payload["items"]} == {"completed"}
     finally:
@@ -1987,7 +2172,7 @@ def test_workflow_progress_payload_marks_current_and_completed_nodes(monkeypatch
         get_settings.cache_clear()
 
 
-def test_workflow_run_uses_workflow_max_workers(monkeypatch) -> None:
+def test_workflow_run_uses_vlm_max_concurrent_requests(monkeypatch) -> None:
     active = 0
     max_active = 0
     lock = threading.Lock()
@@ -2021,7 +2206,7 @@ def test_workflow_run_uses_workflow_max_workers(monkeypatch) -> None:
     monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_execute)
     try:
         os.environ["VLM_PROVIDER"] = "mock"
-        os.environ["WORKFLOW_MAX_WORKERS"] = "2"
+        os.environ["VLM_MAX_CONCURRENT_REQUESTS"] = "2"
         get_settings.cache_clear()
         with get_client() as client:
             schema = create_schema(client, name="workflow_parallel_schema")
@@ -2041,7 +2226,7 @@ def test_workflow_run_uses_workflow_max_workers(monkeypatch) -> None:
             assert run["status"] == "completed"
             assert max_active == 2
     finally:
-        os.environ["WORKFLOW_MAX_WORKERS"] = "1"
+        os.environ.pop("VLM_MAX_CONCURRENT_REQUESTS", None)
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
 
@@ -2071,7 +2256,7 @@ def test_workflow_parallel_item_failure_does_not_stop_other_items(monkeypatch) -
     monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_execute)
     try:
         os.environ["VLM_PROVIDER"] = "mock"
-        os.environ["BATCH_MAX_WORKERS"] = "3"
+        os.environ["VLM_MAX_CONCURRENT_REQUESTS"] = "3"
         get_settings.cache_clear()
         with get_client() as client:
             schema = create_schema(client, name="workflow_failure_schema")
@@ -2094,7 +2279,7 @@ def test_workflow_parallel_item_failure_does_not_stop_other_items(monkeypatch) -
             assert statuses["doc_0.png"] == "completed"
             assert statuses["doc_2.png"] == "completed"
     finally:
-        os.environ["BATCH_MAX_WORKERS"] = "4"
+        os.environ.pop("VLM_MAX_CONCURRENT_REQUESTS", None)
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
 

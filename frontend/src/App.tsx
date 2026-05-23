@@ -240,7 +240,7 @@ type SystemStatus = {
   upload_max_batch_files: number;
   upload_chunk_files: number;
   preprocess_max_workers: number;
-  workflow_max_workers: number;
+  vlm_max_concurrent_requests: number;
   document_page_max_long_edge: number;
   document_page_jpeg_quality: number;
 };
@@ -254,7 +254,6 @@ type VlmSettings = {
   max_completion_tokens: string | null;
   top_p: string | null;
   service_tier: string | null;
-  batch_max_workers: number;
   vlm_max_concurrent_requests: number;
   kie_field_group_size: number;
   has_api_key: boolean;
@@ -689,7 +688,6 @@ export default function App() {
   const [vlmMaxCompletionTokens, setVlmMaxCompletionTokens] = useState("");
   const [vlmTopP, setVlmTopP] = useState("");
   const [vlmServiceTier, setVlmServiceTier] = useState("");
-  const [batchMaxWorkers, setBatchMaxWorkers] = useState("4");
   const [vlmMaxConcurrentRequests, setVlmMaxConcurrentRequests] = useState("8");
   const [kieFieldGroupSize, setKieFieldGroupSize] = useState("2");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
@@ -1137,7 +1135,6 @@ export default function App() {
       setVlmMaxCompletionTokens(settings.max_completion_tokens ?? "");
       setVlmTopP(settings.top_p ?? "");
       setVlmServiceTier(settings.service_tier ?? "");
-      setBatchMaxWorkers(String(settings.batch_max_workers ?? 4));
       setVlmMaxConcurrentRequests(String(settings.vlm_max_concurrent_requests ?? 8));
       setKieFieldGroupSize(String(settings.kie_field_group_size ?? 2));
     } catch {
@@ -1162,7 +1159,6 @@ export default function App() {
           max_completion_tokens: vlmMaxCompletionTokens,
           top_p: vlmTopP,
           service_tier: vlmServiceTier,
-          batch_max_workers: Number.parseInt(batchMaxWorkers, 10) || 4,
           vlm_max_concurrent_requests: Number.parseInt(vlmMaxConcurrentRequests, 10) || 8,
           kie_field_group_size: Number.parseInt(kieFieldGroupSize, 10) || 2,
           provider: "auto"
@@ -2035,8 +2031,10 @@ export default function App() {
         setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 업로드 중`);
         const form = new FormData();
         chunk.forEach((file, index) => {
+          const uploadIndex = chunkStart + index;
           form.append("files", file);
-          form.append("client_file_ids", clientFileId(file, chunkStart + index));
+          form.append("client_file_ids", clientFileId(file, uploadIndex));
+          form.append("upload_indexes", String(uploadIndex));
         });
         latestBatch = await api<Batch>(`/api/batches/${initializedBatch.id}/items`, { method: "POST", body: form });
         uploadedCount += chunk.length;
@@ -2629,7 +2627,6 @@ export default function App() {
           maxCompletionTokens={vlmMaxCompletionTokens}
           topP={vlmTopP}
           serviceTier={vlmServiceTier}
-          batchMaxWorkers={batchMaxWorkers}
           vlmMaxConcurrentRequests={vlmMaxConcurrentRequests}
           kieFieldGroupSize={kieFieldGroupSize}
           settingsMessage={settingsMessage}
@@ -2642,7 +2639,6 @@ export default function App() {
           onMaxCompletionTokens={setVlmMaxCompletionTokens}
           onTopP={setVlmTopP}
           onServiceTier={setVlmServiceTier}
-          onBatchMaxWorkers={setBatchMaxWorkers}
           onVlmMaxConcurrentRequests={setVlmMaxConcurrentRequests}
           onKieFieldGroupSize={setKieFieldGroupSize}
           onSave={() => void saveVlmSettings()}
@@ -3555,7 +3551,6 @@ function SettingsDialog(props: {
   maxCompletionTokens: string;
   topP: string;
   serviceTier: string;
-  batchMaxWorkers: string;
   vlmMaxConcurrentRequests: string;
   kieFieldGroupSize: string;
   settingsMessage: string | null;
@@ -3568,7 +3563,6 @@ function SettingsDialog(props: {
   onMaxCompletionTokens: (value: string) => void;
   onTopP: (value: string) => void;
   onServiceTier: (value: string) => void;
-  onBatchMaxWorkers: (value: string) => void;
   onVlmMaxConcurrentRequests: (value: string) => void;
   onKieFieldGroupSize: (value: string) => void;
   onSave: () => void;
@@ -3653,16 +3647,6 @@ function SettingsDialog(props: {
           <label>
             <span>Service tier</span>
             <input value={props.serviceTier} placeholder="비워두기" disabled={!settingsWritable} onChange={(event) => props.onServiceTier(event.target.value)} />
-          </label>
-          <label>
-            <span>배치 worker 수</span>
-            <input
-              inputMode="numeric"
-              value={props.batchMaxWorkers}
-              placeholder="4"
-              disabled={!settingsWritable}
-              onChange={(event) => props.onBatchMaxWorkers(event.target.value)}
-            />
           </label>
           <label>
             <span>VLM 동시 요청 수</span>

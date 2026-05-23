@@ -62,8 +62,6 @@ DEFAULT_ENV_VALUES = {
     "VLM_MAX_COMPLETION_TOKENS": "",
     "VLM_TOP_P": "",
     "VLM_SERVICE_TIER": "",
-    "BATCH_MAX_WORKERS": "4",
-    "WORKFLOW_MAX_WORKERS": "1",
     "VLM_MAX_CONCURRENT_REQUESTS": "8",
     "KIE_FIELD_GROUP_SIZE": "2",
     "LIBREOFFICE_PATH": DEFAULT_LIBREOFFICE_PATH,
@@ -120,8 +118,6 @@ class Settings(BaseSettings):
     vlm_max_completion_tokens: str | None = None
     vlm_top_p: str | None = None
     vlm_service_tier: str | None = None
-    batch_max_workers: int = 4
-    workflow_max_workers: int = 1
     vlm_max_concurrent_requests: int = 8
     kie_field_group_size: int = 2
 
@@ -234,9 +230,11 @@ def resolved_cors_allow_origin_regex(raw: str | None) -> str | None:
     return stripped or DEFAULT_CORS_ALLOW_ORIGIN_REGEX
 
 
-def upsert_root_env(updates: Mapping[str, str], include_defaults: bool = False) -> Path:
+def upsert_root_env(updates: Mapping[str, str], include_defaults: bool = False, remove_keys: set[str] | None = None) -> Path:
     env_path = ROOT_ENV_PATH
     existing_lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    if remove_keys:
+        existing_lines = [line for line in existing_lines if _env_key(line) not in remove_keys]
     if include_defaults:
         existing_keys = {_env_key(line) for line in existing_lines}
         defaults = {key: value for key, value in DEFAULT_ENV_VALUES.items() if key not in existing_keys}

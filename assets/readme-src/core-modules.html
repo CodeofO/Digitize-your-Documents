@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1600, initial-scale=1" />
+    <title>Document Automation Workspace Core Modules</title>
+    <link rel="stylesheet" href="./readme-artboards.css" />
+  </head>
+  <body>
+    <main class="artboard">
+      <header style="display: flex; align-items: end; justify-content: space-between;">
+        <div>
+          <p class="eyebrow">Core Modules</p>
+          <h1 style="font-size: 56px; max-width: 920px;">단일 모듈 실행과 워크플로우 연결</h1>
+        </div>
+        <p style="max-width: 440px; text-align: right;">
+          각 모듈은 저장된 설정을 선택하고, 실행 결과를 표와 evidence 중심으로 검수합니다.
+        </p>
+      </header>
+
+      <section class="surface" style="display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 18px; margin-top: 26px; padding: 22px;">
+        <article class="soft" style="padding: 20px;">
+          <div style="display: flex; align-items: flex-start; gap: 16px;">
+            <i class="module-icon">W</i>
+            <div>
+              <h2 style="font-size: 31px;">Workflow Builder</h2>
+              <p style="font-size: 19px; margin-top: 6px;">분류, 분기, 추출, 필수 항목 확인, export 노드를 연결합니다.</p>
+            </div>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 18px;">
+            <div class="mini-card"><b>Input</b><span>single/batch</span></div>
+            <div class="mini-card"><b>Branch</b><span>class path</span></div>
+            <div class="mini-card"><b>Merge</b><span>결과 통합</span></div>
+            <div class="mini-card"><b>Export</b><span>CSV/JSON</span></div>
+          </div>
+        </article>
+
+        <article class="soft" style="padding: 20px;">
+          <h2 style="font-size: 31px;">실행 결과 검수</h2>
+          <p style="font-size: 19px; margin-top: 6px;">문서 preview, module 결과, 상태를 같은 화면에서 확인합니다.</p>
+          <div class="table" style="margin-top: 18px;">
+            <div class="table-row header"><span>결과</span><span>상태</span><span>내보내기</span></div>
+            <div class="table-row"><span>KIE</span><span>완료</span><span>CSV</span></div>
+            <div class="table-row"><span>Required</span><span>검토</span><span>JSON</span></div>
+          </div>
+        </article>
+      </section>
+
+      <section style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 18px;">
+        <article class="surface" style="padding: 20px; min-height: 270px;">
+          <div style="display: flex; gap: 14px; align-items: flex-start;">
+            <i class="module-icon">R</i>
+            <div><h3 style="font-size: 24px;">Raw Data Extractor</h3><p style="font-size: 16px; margin-top: 6px;">Office/PDF를 preview와 HTML 원문으로 변환합니다.</p></div>
+          </div>
+          <div class="soft" style="margin-top: 18px; padding: 16px;">
+            <div class="paper-line" style="width: 78%;"></div>
+            <div class="paper-line" style="margin-top: 14px; width: 92%;"></div>
+            <div class="paper-line" style="margin-top: 14px; width: 60%;"></div>
+          </div>
+        </article>
+
+        <article class="surface" style="padding: 20px; min-height: 270px;">
+          <div style="display: flex; gap: 14px; align-items: flex-start;">
+            <i class="module-icon">C</i>
+            <div><h3 style="font-size: 24px;">Document Classifier</h3><p style="font-size: 16px; margin-top: 6px;">사용자가 정의한 class 후보 기준으로 분류합니다.</p></div>
+          </div>
+          <div style="display: grid; gap: 8px; margin-top: 18px;">
+            <div class="mini-card"><b>신청서</b><span>confidence 96%</span></div>
+            <div class="mini-card"><b>동의서</b><span>branch path</span></div>
+          </div>
+        </article>
+
+        <article class="surface" style="padding: 20px; min-height: 270px;">
+          <div style="display: flex; gap: 14px; align-items: flex-start;">
+            <i class="module-icon">K</i>
+            <div><h3 style="font-size: 24px;">Key Information Extractor</h3><p style="font-size: 16px; margin-top: 6px;">schema와 region 기준으로 필요한 값만 추출합니다.</p></div>
+          </div>
+          <div class="table" style="margin-top: 18px;">
+            <div class="table-row header"><span>필드</span><span>값</span><span>신뢰도</span></div>
+            <div class="table-row"><span>성명</span><span>김토스</span><span>98%</span></div>
+          </div>
+        </article>
+
+        <article class="surface" style="padding: 20px; min-height: 270px;">
+          <div style="display: flex; gap: 14px; align-items: flex-start;">
+            <i class="module-icon">Q</i>
+            <div><h3 style="font-size: 24px;">Required Field Checker</h3><p style="font-size: 16px; margin-top: 6px;">필수 항목의 존재 여부를 상태로 정리합니다.</p></div>
+          </div>
+          <div class="table" style="margin-top: 18px;">
+            <div class="table-row header"><span>항목</span><span>상태</span><span>근거</span></div>
+            <div class="table-row"><span>서명</span><span>missing</span><span>-</span></div>
+          </div>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

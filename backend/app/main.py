@@ -231,7 +231,7 @@ def system_status() -> SystemStatusRead:
         upload_max_batch_files=settings.upload_max_batch_files,
         upload_chunk_files=settings.upload_chunk_files,
         preprocess_max_workers=settings.preprocess_max_workers,
-        workflow_max_workers=settings.workflow_max_workers,
+        vlm_max_concurrent_requests=settings.vlm_max_concurrent_requests,
         document_page_max_long_edge=settings.document_page_max_long_edge,
         document_page_jpeg_quality=settings.document_page_jpeg_quality,
     )
@@ -249,7 +249,6 @@ def get_vlm_settings() -> VlmSettingsRead:
         max_completion_tokens=settings.vlm_max_completion_tokens,
         top_p=settings.vlm_top_p,
         service_tier=settings.vlm_service_tier,
-        batch_max_workers=settings.batch_max_workers,
         vlm_max_concurrent_requests=settings.vlm_max_concurrent_requests,
         kie_field_group_size=settings.kie_field_group_size,
         has_api_key=bool(settings.resolved_vlm_api_key),
@@ -277,7 +276,6 @@ def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
         "VLM_MAX_COMPLETION_TOKENS": (payload.max_completion_tokens or "").strip(),
         "VLM_TOP_P": (payload.top_p or "").strip(),
         "VLM_SERVICE_TIER": (payload.service_tier or "").strip(),
-        "BATCH_MAX_WORKERS": str(payload.batch_max_workers or get_settings().batch_max_workers),
         "VLM_MAX_CONCURRENT_REQUESTS": str(payload.vlm_max_concurrent_requests or get_settings().vlm_max_concurrent_requests),
         "KIE_FIELD_GROUP_SIZE": str(payload.kie_field_group_size or get_settings().kie_field_group_size),
     }
@@ -285,7 +283,8 @@ def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
     if api_key:
         updates["VLM_API_KEY"] = api_key
 
-    upsert_root_env(updates, include_defaults=True)
+    upsert_root_env(updates, include_defaults=True, remove_keys={"BATCH_MAX_WORKERS", "WORKFLOW_MAX_WORKERS"})
+    get_settings.cache_clear()
     return get_vlm_settings()
 
 
@@ -1405,9 +1404,13 @@ async def create_workflow_run(
     db.refresh(run)
     _validate_owner_can_start(run, run.items)
     now = datetime.utcnow()
+    run.execution_generation = (run.execution_generation or 0) + 1
     run.status = "running"
     run.upload_duration_ms = _workflow_upload_duration_ms(run)
     run.inference_started_at = now
+    for item in run.items:
+        if item.status == "queued":
+            item.execution_generation = run.execution_generation
     log_audit_event(
         db,
         entity_type="workflow_run",
@@ -1419,8 +1422,9 @@ async def create_workflow_run(
     db.commit()
     db.refresh(run)
     response = WorkflowRunRead(**workflow_run_to_read(run))
+    execution_generation = run.execution_generation
     db.close()
-    background_tasks.add_task(run_workflow_run, run.id)
+    background_tasks.add_task(run_workflow_run, run.id, execution_generation)
     return response
 
 
@@ -1465,6 +1469,10 @@ async def append_workflow_run_items(
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
+    if run.status == "paused" and len(run.items) < run.total_count:
+        run.status = "uploading"
+        run.error_message = None
+        db.flush()
     if run.status not in {"uploading", "queued"}:
         raise HTTPException(status_code=409, detail="Workflow run already started")
     await _append_workflow_upload_items(run, form, files, db)
@@ -1485,9 +1493,16 @@ def start_workflow_run(
         return WorkflowRunRead(**workflow_run_to_read(run))
     _validate_owner_can_start(run, run.items)
     now = datetime.utcnow()
+    run.execution_generation = (run.execution_generation or 0) + 1
     run.status = "running"
     run.upload_duration_ms = _workflow_upload_duration_ms(run)
     run.inference_started_at = now
+    for item in run.items:
+        if item.status in {"queued", "paused"}:
+            item.status = "queued"
+            item.error_message = None
+            item.completed_at = None
+            item.execution_generation = run.execution_generation
     log_audit_event(
         db,
         entity_type="workflow_run",
@@ -1499,7 +1514,7 @@ def start_workflow_run(
     db.commit()
     db.refresh(run)
     response = WorkflowRunRead(**workflow_run_to_read(run))
-    background_tasks.add_task(run_workflow_run, run.id)
+    background_tasks.add_task(run_workflow_run, run.id, run.execution_generation)
     return response
 
 
@@ -1547,7 +1562,11 @@ def resume_workflow_run(
     run.status = "running" if resumed_count else workflow_run_to_read(run)["status"]
     run.completed_at = None if resumed_count else run.completed_at
     if resumed_count:
+        run.execution_generation = (run.execution_generation or 0) + 1
         run.inference_started_at = datetime.utcnow()
+        for item in run.items:
+            if item.status == "queued":
+                item.execution_generation = run.execution_generation
     log_audit_event(
         db,
         entity_type="workflow_run",
@@ -1560,7 +1579,7 @@ def resume_workflow_run(
     db.refresh(run)
     response = WorkflowRunRead(**workflow_run_to_read(run))
     if resumed_count:
-        background_tasks.add_task(run_workflow_run, run.id)
+        background_tasks.add_task(run_workflow_run, run.id, run.execution_generation)
     return response
 
 
@@ -1576,8 +1595,9 @@ def pause_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRu
 
     paused_count = 0
     now = datetime.utcnow()
+    run.execution_generation = (run.execution_generation or 0) + 1
     for item in run.items:
-        if item.status == "queued":
+        if item.status in {"queued", "preprocessing", "running"}:
             item.status = "paused"
             item.error_message = "Paused by user"
             item.completed_at = now
@@ -1591,7 +1611,7 @@ def pause_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRu
         entity_type="workflow_run",
         entity_id=run.id,
         action="paused",
-        message=f"Paused workflow run; {paused_count} queued item(s) held",
+        message=f"Paused workflow run; {paused_count} active item(s) held",
         metadata={"workflow_id": run.workflow_id, "paused_count": paused_count},
     )
     db.commit()
@@ -1608,13 +1628,18 @@ def restart_workflow_run(
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
-    if run.status in {"completed", "needs_review", "canceled"} and not any(item.status in {"failed", "paused", "canceled"} for item in run.items):
-        raise HTTPException(status_code=409, detail="Workflow run has no failed or paused items to restart")
-    if any(item.status == "running" for item in run.items):
-        raise HTTPException(status_code=409, detail="Workflow run still has running item(s). Pause first and wait until running count is 0.")
+    if run.status == "canceled":
+        raise HTTPException(status_code=409, detail="Canceled workflow run cannot be restarted")
     if not run.items:
         raise HTTPException(status_code=422, detail="No uploaded workflow items are available to restart")
+    sealed_missing_count = _seal_missing_workflow_upload_items(run, db)
+    if sealed_missing_count:
+        db.flush()
+        db.expire(run, ["items"])
     _validate_owner_upload_complete(run, run.items)
+    now = datetime.utcnow()
+    _accumulate_workflow_run_inference_duration(run, now)
+    run.execution_generation = (run.execution_generation or 0) + 1
     queued_count = _prepare_workflow_run_restart(run)
     if not queued_count:
         raise HTTPException(status_code=422, detail="No restartable workflow items are available")
@@ -1622,19 +1647,20 @@ def restart_workflow_run(
     run.completed_at = None
     run.error_message = None
     run.upload_duration_ms = _workflow_upload_duration_ms(run)
-    run.inference_started_at = datetime.utcnow()
+    run.inference_duration_ms = None
+    run.inference_started_at = now
     log_audit_event(
         db,
         entity_type="workflow_run",
         entity_id=run.id,
         action="restarted",
         message=f"Restarted workflow run with {queued_count} queued item(s)",
-        metadata={"workflow_id": run.workflow_id, "queued_count": queued_count},
+        metadata={"workflow_id": run.workflow_id, "queued_count": queued_count, "sealed_missing_count": sealed_missing_count},
     )
     db.commit()
     db.refresh(run)
     response = WorkflowRunRead(**workflow_run_to_read(run))
-    background_tasks.add_task(run_workflow_run, run.id)
+    background_tasks.add_task(run_workflow_run, run.id, run.execution_generation)
     return response
 
 
@@ -2686,9 +2712,13 @@ def _create_uploaded_document(file: UploadFile, db: Session) -> tuple[Document, 
 
 
 def _create_failed_upload_document(file: UploadFile, message: str, db: Session) -> Document:
+    return _create_failed_upload_document_record(file.filename or "upload", file.content_type or "application/octet-stream", message, db)
+
+
+def _create_failed_upload_document_record(filename: str, mime_type: str, message: str, db: Session) -> Document:
     document = Document(
-        filename=file.filename or "upload",
-        mime_type=file.content_type or "application/octet-stream",
+        filename=filename,
+        mime_type=mime_type,
         size_bytes=0,
         page_count=0,
         storage_path="",
@@ -3032,6 +3062,7 @@ def _batch_item_read(item: BatchItem) -> BatchItemRead:
         document_id=item.document_id,
         job_id=item.job_id,
         filename=item.filename,
+        upload_index=item.upload_index,
         status=item.job.status if item.job else "unknown",
         result_id=item.job.result_id if item.job else None,
         error_message=item.job.error_message if item.job else None,
@@ -3070,6 +3101,7 @@ def _classification_batch_item_read(item: ClassificationBatchItem) -> Classifica
         document_id=item.document_id,
         job_id=item.job_id,
         filename=item.filename,
+        upload_index=item.upload_index,
         status=item.job.status if item.job else "unknown",
         result_id=item.job.result_id if item.job else None,
         error_message=item.job.error_message if item.job else None,
@@ -3108,6 +3140,7 @@ def _required_field_batch_item_read(item: RequiredFieldCheckBatchItem) -> Requir
         document_id=item.document_id,
         job_id=item.job_id,
         filename=item.filename,
+        upload_index=item.upload_index,
         status=item.job.status if item.job else "unknown",
         result_id=item.job.result_id if item.job else None,
         error_message=item.job.error_message if item.job else None,
@@ -3219,7 +3252,7 @@ def _prepare_workflow_run_resume(run: WorkflowRun) -> int:
         if item.status == "queued":
             queued_count += 1
             continue
-        if item.status not in {"running", "preprocessing"}:
+        if item.status not in {"paused", "running", "preprocessing"}:
             continue
         if item.document and item.document.status == "ready" and item.document.pages:
             item.status = "queued"
@@ -3236,23 +3269,20 @@ def _prepare_workflow_run_resume(run: WorkflowRun) -> int:
 def _prepare_workflow_run_restart(run: WorkflowRun) -> int:
     queued_count = 0
     now = datetime.utcnow()
-    restartable_statuses = {"failed", "paused", "canceled", "preprocessing", "running"}
     for item in run.items:
-        if item.status == "queued":
-            queued_count += 1
-            continue
-        if item.status not in restartable_statuses:
-            continue
         if item.document and item.document.status == "ready" and item.document.pages:
             item.status = "queued"
             item.error_message = None
             item.completed_at = None
+            item.inference_duration_ms = None
+            item.execution_generation = run.execution_generation
             item.result_json = _initial_workflow_item_payload(item.document)
             queued_count += 1
         else:
             item.status = "failed"
             item.error_message = item.document.error_message if item.document else "Document preprocessing was interrupted"
             item.completed_at = now
+            item.execution_generation = run.execution_generation
     return queued_count
 
 
@@ -3349,7 +3379,10 @@ def _sorted_batch_items(items) -> list[BatchItem]:
 
 
 def _batch_item_sort_key(item: BatchItem) -> tuple[str, str]:
-    return (item.filename.casefold(), item.id)
+    upload_index = getattr(item, "upload_index", None)
+    if upload_index is not None:
+        return (f"{upload_index:012d}", item.id)
+    return (f"z:{item.filename.casefold()}", item.id)
 
 
 def _sorted_module_items(items) -> list[Any]:
@@ -3357,7 +3390,10 @@ def _sorted_module_items(items) -> list[Any]:
 
 
 def _module_item_sort_key(item: Any) -> tuple[str, str]:
-    return (item.filename.casefold(), item.id)
+    upload_index = getattr(item, "upload_index", None)
+    if upload_index is not None:
+        return (f"{upload_index:012d}", item.id)
+    return (f"z:{item.filename.casefold()}", item.id)
 
 
 def _upload_file_sort_key(file: UploadFile) -> tuple[str, str]:
@@ -3436,7 +3472,8 @@ def _ordered_upload_entries(form: FormData, files: list[UploadFile]) -> list[tup
     for value in form.getlist("upload_indexes"):
         if isinstance(value, str) and value.strip():
             try:
-                raw_upload_indexes.append(int(value))
+                parsed = int(value)
+                raw_upload_indexes.append(parsed if parsed >= 0 else None)
             except ValueError:
                 raw_upload_indexes.append(None)
         else:
@@ -3459,6 +3496,45 @@ def _existing_client_file_ids(db: Session, item_model: Any, owner_field: str, ow
         .all()
     )
     return {row[0] for row in rows if row[0]}
+
+
+def _existing_upload_indexes(db: Session, item_model: Any, owner_field: str, owner_id: str, upload_indexes: list[int | None]) -> set[int]:
+    if not hasattr(item_model, "upload_index"):
+        return set()
+    indexes = [upload_index for upload_index in upload_indexes if upload_index is not None]
+    if not indexes:
+        return set()
+    rows = (
+        db.query(item_model.upload_index)
+        .filter(getattr(item_model, owner_field) == owner_id, item_model.upload_index.in_(indexes))
+        .all()
+    )
+    return {row[0] for row in rows if row[0] is not None}
+
+
+def _filter_new_upload_entries(
+    db: Session,
+    item_model: Any,
+    owner_field: str,
+    owner_id: str,
+    entries: list[tuple[UploadFile, str | None, int | None]],
+) -> list[tuple[UploadFile, str | None, int | None]]:
+    existing_ids = _existing_client_file_ids(db, item_model, owner_field, owner_id, [client_id for _, client_id, _ in entries])
+    existing_indexes = _existing_upload_indexes(db, item_model, owner_field, owner_id, [upload_index for _, _, upload_index in entries])
+    accepted_ids = set(existing_ids)
+    accepted_indexes = set(existing_indexes)
+    new_entries: list[tuple[UploadFile, str | None, int | None]] = []
+    for file, client_file_id, upload_index in entries:
+        if client_file_id and client_file_id in accepted_ids:
+            continue
+        if upload_index is not None and upload_index in accepted_indexes:
+            continue
+        new_entries.append((file, client_file_id, upload_index))
+        if client_file_id:
+            accepted_ids.add(client_file_id)
+        if upload_index is not None:
+            accepted_indexes.add(upload_index)
+    return new_entries
 
 
 def _ensure_upload_append_capacity(
@@ -3487,9 +3563,8 @@ def _initial_workflow_item_payload(document: Document) -> str:
 
 
 async def _append_workflow_upload_items(run: WorkflowRun, form: FormData, files: list[UploadFile], db: Session) -> None:
-    entries = _ordered_upload_entries(form, files)
-    existing_ids = _existing_client_file_ids(db, WorkflowRunItem, "run_id", run.id, [client_id for _, client_id, _ in entries])
-    incoming_count = sum(1 for _, client_id, _ in entries if not client_id or client_id not in existing_ids)
+    entries = _filter_new_upload_entries(db, WorkflowRunItem, "run_id", run.id, _ordered_upload_entries(form, files))
+    incoming_count = len(entries)
     _ensure_upload_append_capacity(db, WorkflowRunItem, "run_id", run.id, run.total_count, incoming_count)
 
     for file, client_file_id, upload_index in entries:
@@ -3497,8 +3572,6 @@ async def _append_workflow_upload_items(run: WorkflowRun, form: FormData, files:
         try:
             db.refresh(run)
             if not _owner_accepts_uploads(run):
-                continue
-            if client_file_id and client_file_id in existing_ids:
                 continue
             document, original_path = _create_uploaded_document(file, db)
             item = WorkflowRunItem(
@@ -3597,24 +3670,78 @@ def _record_failed_workflow_upload_item(
     db.commit()
 
 
+def _seal_missing_workflow_upload_items(run: WorkflowRun, db: Session) -> int:
+    existing_count = db.query(WorkflowRunItem).filter(WorkflowRunItem.run_id == run.id).count()
+    missing_count = max(0, run.total_count - existing_count)
+    if missing_count == 0:
+        return 0
+    existing_indexes = {
+        row[0]
+        for row in db.query(WorkflowRunItem.upload_index)
+        .filter(WorkflowRunItem.run_id == run.id, WorkflowRunItem.upload_index.isnot(None))
+        .all()
+    }
+    candidate_indexes = [index for index in range(run.total_count) if index not in existing_indexes]
+    if len(candidate_indexes) < missing_count:
+        candidate_indexes.extend([None] * (missing_count - len(candidate_indexes)))
+    now = datetime.utcnow()
+    message = "Upload was not received before execution was restarted"
+    for ordinal, upload_index in enumerate(candidate_indexes[:missing_count], start=1):
+        suffix = upload_index + 1 if upload_index is not None else existing_count + ordinal
+        filename = f"missing_upload_{suffix:05d}"
+        document = _create_failed_upload_document_record(filename, "application/octet-stream", message, db)
+        db.add(
+            WorkflowRunItem(
+                run_id=run.id,
+                document_id=document.id,
+                filename=document.filename,
+                upload_index=upload_index,
+                status="failed",
+                error_message=message,
+                client_file_id=f"missing:{run.id}:{upload_index}" if upload_index is not None else None,
+                result_json=json.dumps(
+                    {"document_id": document.id, "filename": document.filename, "node_results": {}, "error_message": message},
+                    ensure_ascii=False,
+                ),
+                completed_at=now,
+            )
+        )
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="upload_sealed",
+        message=f"Marked {missing_count} missing upload slot(s) as failed",
+        metadata={"workflow_id": run.workflow_id, "missing_count": missing_count},
+    )
+    db.flush()
+    return missing_count
+
+
 async def _append_extraction_batch_items(batch: Batch, form: FormData, files: list[UploadFile], db: Session) -> None:
-    entries = _ordered_upload_entries(form, files)
-    existing_ids = _existing_client_file_ids(db, BatchItem, "batch_id", batch.id, [client_id for _, client_id, _ in entries])
-    incoming_count = sum(1 for _, client_id, _ in entries if not client_id or client_id not in existing_ids)
+    entries = _filter_new_upload_entries(db, BatchItem, "batch_id", batch.id, _ordered_upload_entries(form, files))
+    incoming_count = len(entries)
     _ensure_upload_append_capacity(db, BatchItem, "batch_id", batch.id, batch.total_count, incoming_count)
 
-    for file, client_file_id, _ in entries:
+    for file, client_file_id, upload_index in entries:
         try:
             db.refresh(batch)
             if not _owner_accepts_uploads(batch):
-                continue
-            if client_file_id and client_file_id in existing_ids:
                 continue
             document, original_path = _create_uploaded_document(file, db)
             job = ExtractionJob(document_id=document.id, schema_id=batch.schema_id, schema_version=batch.schema_version, status="preprocessing")
             db.add(job)
             db.flush()
-            db.add(BatchItem(batch_id=batch.id, document_id=document.id, job_id=job.id, filename=document.filename, client_file_id=client_file_id))
+            db.add(
+                BatchItem(
+                    batch_id=batch.id,
+                    document_id=document.id,
+                    job_id=job.id,
+                    filename=document.filename,
+                    upload_index=upload_index,
+                    client_file_id=client_file_id,
+                )
+            )
             log_audit_event(
                 db,
                 entity_type="document",
@@ -3648,12 +3775,19 @@ async def _append_extraction_batch_items(batch: Batch, form: FormData, files: li
             db.commit()
         except Exception as exc:
             db.rollback()
-            _record_failed_extraction_batch_item(batch, file, client_file_id, _upload_failure_message(exc), db)
+            _record_failed_extraction_batch_item(batch, file, client_file_id, upload_index, _upload_failure_message(exc), db)
         finally:
             await file.close()
 
 
-def _record_failed_extraction_batch_item(batch: Batch, file: UploadFile, client_file_id: str | None, message: str, db: Session) -> None:
+def _record_failed_extraction_batch_item(
+    batch: Batch,
+    file: UploadFile,
+    client_file_id: str | None,
+    upload_index: int | None,
+    message: str,
+    db: Session,
+) -> None:
     document = _create_failed_upload_document(file, message, db)
     job = ExtractionJob(
         document_id=document.id,
@@ -3665,23 +3799,29 @@ def _record_failed_extraction_batch_item(batch: Batch, file: UploadFile, client_
     )
     db.add(job)
     db.flush()
-    db.add(BatchItem(batch_id=batch.id, document_id=document.id, job_id=job.id, filename=document.filename, client_file_id=client_file_id))
+    db.add(
+        BatchItem(
+            batch_id=batch.id,
+            document_id=document.id,
+            job_id=job.id,
+            filename=document.filename,
+            upload_index=upload_index,
+            client_file_id=client_file_id,
+        )
+    )
     log_audit_event(db, entity_type="extraction_job", entity_id=job.id, action="failed", message=message, metadata={"batch_id": batch.id})
     db.commit()
 
 
 async def _append_classification_batch_items(batch: ClassificationBatch, form: FormData, files: list[UploadFile], db: Session) -> None:
-    entries = _ordered_upload_entries(form, files)
-    existing_ids = _existing_client_file_ids(db, ClassificationBatchItem, "batch_id", batch.id, [client_id for _, client_id, _ in entries])
-    incoming_count = sum(1 for _, client_id, _ in entries if not client_id or client_id not in existing_ids)
+    entries = _filter_new_upload_entries(db, ClassificationBatchItem, "batch_id", batch.id, _ordered_upload_entries(form, files))
+    incoming_count = len(entries)
     _ensure_upload_append_capacity(db, ClassificationBatchItem, "batch_id", batch.id, batch.total_count, incoming_count)
 
-    for file, client_file_id, _ in entries:
+    for file, client_file_id, upload_index in entries:
         try:
             db.refresh(batch)
             if not _owner_accepts_uploads(batch):
-                continue
-            if client_file_id and client_file_id in existing_ids:
                 continue
             document, original_path = _create_uploaded_document(file, db)
             job = ClassificationJob(document_id=document.id, classifier_id=batch.classifier_id, status="preprocessing")
@@ -3693,6 +3833,7 @@ async def _append_classification_batch_items(batch: ClassificationBatch, form: F
                     document_id=document.id,
                     job_id=job.id,
                     filename=document.filename,
+                    upload_index=upload_index,
                     client_file_id=client_file_id,
                 )
             )
@@ -3721,7 +3862,7 @@ async def _append_classification_batch_items(batch: ClassificationBatch, form: F
             db.commit()
         except Exception as exc:
             db.rollback()
-            _record_failed_classification_batch_item(batch, file, client_file_id, _upload_failure_message(exc), db)
+            _record_failed_classification_batch_item(batch, file, client_file_id, upload_index, _upload_failure_message(exc), db)
         finally:
             await file.close()
 
@@ -3730,6 +3871,7 @@ def _record_failed_classification_batch_item(
     batch: ClassificationBatch,
     file: UploadFile,
     client_file_id: str | None,
+    upload_index: int | None,
     message: str,
     db: Session,
 ) -> None:
@@ -3749,6 +3891,7 @@ def _record_failed_classification_batch_item(
             document_id=document.id,
             job_id=job.id,
             filename=document.filename,
+            upload_index=upload_index,
             client_file_id=client_file_id,
         )
     )
@@ -3757,17 +3900,14 @@ def _record_failed_classification_batch_item(
 
 
 async def _append_required_field_batch_items(batch: RequiredFieldCheckBatch, form: FormData, files: list[UploadFile], db: Session) -> None:
-    entries = _ordered_upload_entries(form, files)
-    existing_ids = _existing_client_file_ids(db, RequiredFieldCheckBatchItem, "batch_id", batch.id, [client_id for _, client_id, _ in entries])
-    incoming_count = sum(1 for _, client_id, _ in entries if not client_id or client_id not in existing_ids)
+    entries = _filter_new_upload_entries(db, RequiredFieldCheckBatchItem, "batch_id", batch.id, _ordered_upload_entries(form, files))
+    incoming_count = len(entries)
     _ensure_upload_append_capacity(db, RequiredFieldCheckBatchItem, "batch_id", batch.id, batch.total_count, incoming_count)
 
-    for file, client_file_id, _ in entries:
+    for file, client_file_id, upload_index in entries:
         try:
             db.refresh(batch)
             if not _owner_accepts_uploads(batch):
-                continue
-            if client_file_id and client_file_id in existing_ids:
                 continue
             document, original_path = _create_uploaded_document(file, db)
             job = RequiredFieldCheckJob(document_id=document.id, checklist_id=batch.checklist_id, status="preprocessing")
@@ -3779,6 +3919,7 @@ async def _append_required_field_batch_items(batch: RequiredFieldCheckBatch, for
                     document_id=document.id,
                     job_id=job.id,
                     filename=document.filename,
+                    upload_index=upload_index,
                     client_file_id=client_file_id,
                 )
             )
@@ -3807,7 +3948,7 @@ async def _append_required_field_batch_items(batch: RequiredFieldCheckBatch, for
             db.commit()
         except Exception as exc:
             db.rollback()
-            _record_failed_required_field_batch_item(batch, file, client_file_id, _upload_failure_message(exc), db)
+            _record_failed_required_field_batch_item(batch, file, client_file_id, upload_index, _upload_failure_message(exc), db)
         finally:
             await file.close()
 
@@ -3816,6 +3957,7 @@ def _record_failed_required_field_batch_item(
     batch: RequiredFieldCheckBatch,
     file: UploadFile,
     client_file_id: str | None,
+    upload_index: int | None,
     message: str,
     db: Session,
 ) -> None:
@@ -3835,6 +3977,7 @@ def _record_failed_required_field_batch_item(
             document_id=document.id,
             job_id=job.id,
             filename=document.filename,
+            upload_index=upload_index,
             client_file_id=client_file_id,
         )
     )

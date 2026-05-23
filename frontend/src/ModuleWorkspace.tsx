@@ -477,8 +477,10 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
       setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 업로드 중`);
       const form = new FormData();
       chunk.forEach((file, index) => {
+        const uploadIndex = chunkStart + index;
         form.append("files", file);
-        form.append("client_file_ids", clientFileId(file, chunkStart + index));
+        form.append("client_file_ids", clientFileId(file, uploadIndex));
+        form.append("upload_indexes", String(uploadIndex));
       });
       const itemPath = isClassifier
         ? `/api/classification-batches/${initializedBatch.id}/items`

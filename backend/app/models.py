@@ -226,6 +226,7 @@ class ClassificationBatchItem(Base):
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
     job_id: Mapped[str] = mapped_column(ForeignKey("classification_jobs.id"), nullable=False)
     filename: Mapped[str] = mapped_column(String, nullable=False)
+    upload_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     client_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
@@ -320,6 +321,7 @@ class RequiredFieldCheckBatchItem(Base):
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
     job_id: Mapped[str] = mapped_column(ForeignKey("required_field_check_jobs.id"), nullable=False)
     filename: Mapped[str] = mapped_column(String, nullable=False)
+    upload_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     client_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
@@ -355,6 +357,7 @@ class BatchItem(Base):
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
     job_id: Mapped[str] = mapped_column(ForeignKey("extraction_jobs.id"), nullable=False)
     filename: Mapped[str] = mapped_column(String, nullable=False)
+    upload_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     client_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
@@ -411,6 +414,7 @@ class WorkflowRun(Base):
     upload_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     inference_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     inference_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    execution_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -435,6 +439,7 @@ class WorkflowRunItem(Base):
     client_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
     upload_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     inference_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    execution_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     result_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -1,3 +1,4 @@
+import math
 import zipfile
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +17,7 @@ from app.raw_extractor import convert_office_to_pdf
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".docx", ".pptx"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 OFFICE_EXTENSIONS = {".docx", ".pptx"}
+PREVIEW_PIXEL_LIMIT_SAFETY_FACTOR = 0.98
 
 
 class DocumentProcessingError(ValueError):
@@ -176,16 +178,11 @@ def _validate_file_content(path: Path, suffix: str) -> None:
 def _validate_image_content(path: Path) -> None:
     try:
         with Image.open(path) as source:
-            image = ImageOps.exif_transpose(source)
-            width, height = image.size
+            ImageOps.exif_transpose(source).size
     except UnidentifiedImageError as exc:
         raise DocumentProcessingError("Uploaded file does not match a supported image format", status_code=415) from exc
     except OSError as exc:
         raise DocumentProcessingError("Failed to inspect uploaded image", status_code=415) from exc
-
-    max_pixels = get_settings().upload_max_image_pixels
-    if max_pixels > 0 and width * height > max_pixels:
-        raise DocumentProcessingError(f"Image pixel count exceeds the configured limit of {max_pixels}", status_code=422)
 
 
 def _rasterize_image(source_path: Path, page_dir: Path) -> list[dict[str, int | str]]:
@@ -211,15 +208,50 @@ def _rasterize_image(source_path: Path, page_dir: Path) -> list[dict[str, int | 
 
 
 def _resize_preview_image(image: Image.Image) -> Image.Image:
-    max_long_edge = get_settings().document_page_max_long_edge
-    if max_long_edge <= 0:
+    settings = get_settings()
+    max_long_edge = settings.document_page_max_long_edge
+    max_pixels = settings.upload_max_image_pixels
+    scale = 1.0
+    if max_long_edge > 0:
+        long_edge = max(image.size)
+        if long_edge > max_long_edge:
+            scale = min(scale, max_long_edge / long_edge)
+    if max_pixels > 0:
+        pixels = image.width * image.height
+        safe_max_pixels = max(1, math.floor(max_pixels * PREVIEW_PIXEL_LIMIT_SAFETY_FACTOR))
+        if pixels > safe_max_pixels:
+            scale = min(scale, math.sqrt(safe_max_pixels / pixels))
+    if scale >= 1:
         return image
-    long_edge = max(image.size)
-    if long_edge <= max_long_edge:
+    target = _scaled_image_size(image.width, image.height, scale)
+    resized = image.resize(target, Image.Resampling.LANCZOS)
+    return _ensure_image_pixel_limit(resized, max_pixels)
+
+
+def _scaled_image_size(width: int, height: int, scale: float) -> tuple[int, int]:
+    return (max(1, math.floor(width * scale)), max(1, math.floor(height * scale)))
+
+
+def _ensure_image_pixel_limit(image: Image.Image, max_pixels: int) -> Image.Image:
+    if max_pixels <= 0 or image.width * image.height <= max_pixels:
         return image
-    scale = max_long_edge / long_edge
-    target = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
-    return image.resize(target, Image.Resampling.LANCZOS)
+    resized = image
+    safe_max_pixels = max(1, math.floor(max_pixels * PREVIEW_PIXEL_LIMIT_SAFETY_FACTOR))
+    while resized.width * resized.height > max_pixels:
+        scale = math.sqrt(safe_max_pixels / (resized.width * resized.height))
+        target = _scaled_image_size(resized.width, resized.height, scale)
+        if target == resized.size:
+            target = _nudge_image_size_under_limit(resized.width, resized.height)
+        resized = resized.resize(target, Image.Resampling.LANCZOS)
+    return resized
+
+
+def _nudge_image_size_under_limit(width: int, height: int) -> tuple[int, int]:
+    if width >= height and width > 1:
+        return (width - 1, height)
+    if height > 1:
+        return (width, height - 1)
+    return (width, height)
 
 
 def _save_preview_image(image: Image.Image, path: Path) -> None:

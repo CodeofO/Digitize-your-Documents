@@ -136,11 +136,14 @@ def validate_workflow_definition(definition: dict[str, Any], db: Session) -> Wor
     )
 
 
-def run_workflow_run(run_id: str) -> None:
+def run_workflow_run(run_id: str, execution_generation: int | None = None) -> None:
     db = SessionLocal()
     try:
         run = db.get(WorkflowRun, run_id)
         if not run:
+            return
+        generation = run.execution_generation if execution_generation is None else execution_generation
+        if run.execution_generation != generation:
             return
         workflow = db.get(WorkflowDefinition, run.workflow_id)
         if not workflow or workflow.archived:
@@ -153,17 +156,21 @@ def run_workflow_run(run_id: str) -> None:
             return
         run.status = "running"
         db.commit()
-        item_ids = [item.id for item in sorted(run.items, key=_workflow_item_sort_key) if item.status == "queued"]
+        item_ids = [
+            item.id
+            for item in sorted(run.items, key=_workflow_item_sort_key)
+            if item.status == "queued" and item.execution_generation == generation
+        ]
     finally:
         db.close()
 
-    max_workers = max(1, min(get_settings().workflow_max_workers, len(item_ids)))
+    max_workers = max(1, min(get_settings().vlm_max_concurrent_requests, len(item_ids)))
     submitted_item_ids: set[str] = set()
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for item_id in item_ids:
-                future = executor.submit(_run_workflow_item, item_id, graph)
+                future = executor.submit(_run_workflow_item, item_id, graph, generation)
                 futures[future] = item_id
                 submitted_item_ids.add(item_id)
             for future in as_completed(futures):
@@ -171,13 +178,13 @@ def run_workflow_run(run_id: str) -> None:
                 try:
                     future.result()
                 except Exception as exc:
-                    _mark_workflow_item_failed(item_id, f"Workflow worker failed: {exc}")
+                    _mark_workflow_item_failed(item_id, f"Workflow worker failed: {exc}", execution_generation=generation)
     except Exception as exc:
         for item_id in set(item_ids) - submitted_item_ids:
-            _mark_workflow_item_failed(item_id, f"Workflow worker did not start item: {exc}")
+            _mark_workflow_item_failed(item_id, f"Workflow worker did not start item: {exc}", execution_generation=generation)
         raise
 
-    _finalize_workflow_run(run_id)
+    _finalize_workflow_run(run_id, generation)
 
 
 def workflow_run_export_payload(run: WorkflowRun) -> dict[str, Any]:
@@ -203,7 +210,7 @@ def workflow_run_export_csv(run: WorkflowRun) -> str:
     return output.getvalue()
 
 
-def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
+def _run_workflow_item(item_id: str, graph: WorkflowGraph, execution_generation: int) -> None:
     db = SessionLocal()
     try:
         item = db.get(WorkflowRunItem, item_id)
@@ -211,6 +218,8 @@ def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
             return
         run = db.get(WorkflowRun, item.run_id)
         if run and run.status == "paused":
+            return
+        if not run or run.execution_generation != execution_generation or item.execution_generation != execution_generation:
             return
         if item.status != "queued":
             return
@@ -233,6 +242,11 @@ def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
         db.commit()
 
         result = _execute_graph_for_item(db, item, graph)
+        db.refresh(item)
+        run = db.get(WorkflowRun, item.run_id)
+        if not run or run.execution_generation != execution_generation or item.execution_generation != execution_generation:
+            db.rollback()
+            return
         item.status = result["status"]
         item.error_message = result.get("error_message")
         item.inference_duration_ms = _elapsed_ms(inference_started_at)
@@ -252,18 +266,28 @@ def _run_workflow_item(item_id: str, graph: WorkflowGraph) -> None:
     except Exception as exc:
         db.rollback()
         duration = _elapsed_ms(inference_started_at) if "inference_started_at" in locals() else None
-        _mark_workflow_item_failed(item_id, str(exc), db=db, inference_duration_ms=duration)
+        _mark_workflow_item_failed(item_id, str(exc), db=db, inference_duration_ms=duration, execution_generation=execution_generation)
     finally:
         db.close()
 
 
-def _mark_workflow_item_failed(item_id: str, message: str, db: Session | None = None, inference_duration_ms: int | None = None) -> None:
+def _mark_workflow_item_failed(
+    item_id: str,
+    message: str,
+    db: Session | None = None,
+    inference_duration_ms: int | None = None,
+    execution_generation: int | None = None,
+) -> None:
     owns_session = db is None
     session = db or SessionLocal()
     try:
         failed = session.get(WorkflowRunItem, item_id)
         if not failed:
             return
+        if execution_generation is not None:
+            run = session.get(WorkflowRun, failed.run_id)
+            if not run or run.execution_generation != execution_generation or failed.execution_generation != execution_generation:
+                return
         existing = _json_or_empty(failed.result_json)
         failed.status = "failed"
         failed.error_message = message
@@ -639,11 +663,13 @@ def _execute_required_node(db: Session, document_id: str, node: dict[str, Any]) 
     }
 
 
-def _finalize_workflow_run(run_id: str) -> None:
+def _finalize_workflow_run(run_id: str, execution_generation: int | None = None) -> None:
     db = SessionLocal()
     try:
         run = db.get(WorkflowRun, run_id)
         if not run:
+            return
+        if execution_generation is not None and run.execution_generation != execution_generation:
             return
         now = datetime.utcnow()
         statuses = [item.status for item in run.items]
@@ -1020,12 +1046,12 @@ def _workflow_run_counters(run: WorkflowRun, items: list[WorkflowRunItem]) -> di
     canceled_count = sum(1 for status in statuses if status == "canceled")
     paused_count = sum(1 for status in statuses if status == "paused")
     status = _workflow_run_status(run, items)
-    if len(statuses) < run.total_count:
+    if status == "paused" or paused_count:
+        progress_phase = "paused"
+    elif len(statuses) < run.total_count:
         progress_phase = "uploading"
     elif preprocessing_count:
         progress_phase = "preprocessing"
-    elif status == "paused" or paused_count:
-        progress_phase = "paused"
     elif running_count or (run.status == "running" and queued_count):
         progress_phase = "running"
     else:

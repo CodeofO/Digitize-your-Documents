@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1600, initial-scale=1" />
+    <title>Document Automation Workspace Overview</title>
+    <link rel="stylesheet" href="./readme-artboards.css" />
+  </head>
+  <body>
+    <main class="artboard" style="padding-top: 48px; padding-bottom: 40px;">
+      <section style="display: grid; grid-template-columns: minmax(0, 1fr) 500px; gap: 46px; align-items: start;">
+        <div>
+          <p class="eyebrow">Document Automation Workspace</p>
+          <h1 style="font-size: 58px;">수작업 문서 검수를 자동화합니다</h1>
+          <p style="font-size: 21px; margin-top: 20px; max-width: 850px;">
+            분류, 필수 항목 확인, 핵심 정보 추출, 결과 정리를 하나의 작업 흐름으로 연결해
+            담당자는 예외와 검수가 필요한 문서에 집중합니다.
+          </p>
+          <div style="display: flex; gap: 12px; margin-top: 28px; flex-wrap: wrap;">
+            <span class="pill">업무 자동화</span>
+            <span class="pill muted-pill">검수 시간 절감</span>
+            <span class="pill muted-pill">누락·오입력 감소</span>
+            <span class="pill muted-pill">CSV / JSON Export</span>
+          </div>
+          <div class="primary-button" style="margin-top: 34px;">자동화 흐름 만들기</div>
+        </div>
+
+        <aside class="surface" style="padding: 24px;">
+          <p class="eyebrow" style="font-size: 15px;">Business Value</p>
+          <h2 style="font-size: 29px;">반복 업무는 시스템이 처리하고 검수자는 판단만 합니다</h2>
+          <div style="display: grid; gap: 12px; margin-top: 20px;">
+            <div class="list-row" style="padding: 14px 18px;"><b>수작업 분류 감소</b><span>문서 class를 판단하고 필요한 처리 경로로 보냅니다.</span></div>
+            <div class="list-row" style="padding: 14px 18px;"><b>필수 항목 누락 확인</b><span>서명, 날짜, 체크박스 같은 반복 검수 항목을 구조화합니다.</span></div>
+            <div class="list-row" style="padding: 14px 18px;"><b>결과 정리 자동화</b><span>확인한 값을 CSV/JSON 산출물로 바로 내보냅니다.</span></div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="surface" style="margin-top: 28px; padding: 24px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
+          <h2>업무 자동화 흐름</h2>
+          <span class="pill muted-pill">upload to review</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px;">
+          <div class="mini-card"><span class="number">1</span><b style="margin-top: 14px;">Upload</b><span>문서 파일 또는 폴더 등록</span></div>
+          <div class="mini-card"><span class="number">2</span><b style="margin-top: 14px;">Classify</b><span>문서 종류 판단</span></div>
+          <div class="mini-card"><span class="number">3</span><b style="margin-top: 14px;">Branch</b><span>class별 경로</span></div>
+          <div class="mini-card"><span class="number">4</span><b style="margin-top: 14px;">Extract</b><span>필요한 값만 구조화</span></div>
+          <div class="mini-card"><span class="number">5</span><b style="margin-top: 14px;">Review</b><span>이미지와 결과를 함께 검수</span></div>
+          <div class="mini-card"><span class="number">6</span><b style="margin-top: 14px;">Export</b><span>CSV, JSON 저장</span></div>
+        </div>
+      </section>
+
+      <section class="value-grid" style="margin-top: 28px;">
+        <article class="value-card" style="padding: 14px 18px;"><b>처리 시간 절감</b><span>반복 분류와 추출을 자동화해 사람이 확인할 문서를 줄입니다.</span></article>
+        <article class="value-card" style="padding: 14px 18px;"><b>품질 편차 감소</b><span>같은 schema, classifier, checklist 기준으로 일관되게 처리합니다.</span></article>
+        <article class="value-card" style="padding: 14px 18px;"><b>검수 근거 보존</b><span>문서 이미지, confidence, evidence, 처리 시간을 함께 남깁니다.</span></article>
+      </section>
+    </main>
+  </body>
+</html>

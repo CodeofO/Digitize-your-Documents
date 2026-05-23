@@ -1,6 +1,6 @@
 <div align="center">
   <h1>Document Automation Workspace</h1>
-  <p><b>대용량 문서 업로드, 전처리, VLM 추론, 검수, CSV/JSON export를 하나의 워크스페이스에서 처리하는 문서 자동화 앱입니다.</b></p>
+  <p><b>수작업으로 반복하던 문서 분류, 필수 항목 확인, 핵심 정보 추출, 결과 정리를 하나의 자동화 흐름으로 연결하는 문서 업무 자동화 앱입니다.</b></p>
   <p>
     <code>Workflow Builder</code>
     <code>Document Classifier</code>
@@ -45,15 +45,15 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 ![Workflow Builder result view](assets/readme/workflow-builder-results.png)
 
 - React Flow 캔버스에서 문서 처리 모듈을 연결합니다.
-- 파일 업로드와 폴더 업로드를 모두 지원하고, 파일명과 상대 경로 기준으로 안정적으로 정렬합니다.
+- `업로드` 버튼 하나로 파일과 폴더 업로드를 모두 지원하고, 파일명과 상대 경로 기준으로 안정적으로 정렬합니다.
 - 업로드는 chunk 단위로 등록하고, 업로드가 끝난 뒤 workflow 실행을 시작합니다.
-- 새로고침이나 네트워크 끊김 후에는 같은 파일 또는 폴더를 다시 선택해 남은 항목만 이어서 업로드할 수 있습니다.
-- 실행 중에는 `계속 처리`, `일시중단`, `재시작`, `중단·정리`로 상태를 제어합니다.
+- 새로고침이나 네트워크 끊김 후에는 `이어가기`로 같은 원본을 다시 선택해 남은 항목만 업로드할 수 있습니다.
+- 실행 중에는 `계속 처리`, `일시중단`, `이어가기`, `재시작`, `중단·정리`로 상태를 제어합니다.
 - 진행 상태는 `업로드됨`, `전처리`, `실행 중`, `대기`, `완료/검토/실패` counter로 분리해 표시합니다.
 - 결과 화면은 문서 목록 스크롤 위치를 유지하고, 상세 결과에서 문서 이미지와 module output을 함께 검수합니다.
 - 결과 CSV/JSON에는 문서별 `upload_duration_ms`, `inference_duration_ms`가 포함됩니다.
 
-## Large Upload Pipeline
+## Common Ingestion Pipeline
 
 모든 batch 계열 모듈은 같은 ingestion 흐름을 사용합니다.
 
@@ -73,9 +73,9 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | --- | --- |
 | `중단·정리` | 실행 기록은 남기고 업로드 파일, preview, 중간 결과 산출물을 정리합니다. |
 | `계속 처리` | 업로드가 끝났지만 아직 실행되지 않은 run/batch를 시작합니다. |
-| `파일 이어가기` / `폴더 이어가기` | 새로고침 등으로 끊긴 업로드에서 같은 원본을 재선택해 누락 파일만 등록합니다. |
+| `이어가기` | 새로고침 등으로 끊긴 업로드에서 같은 원본을 재선택해 누락 파일만 등록합니다. |
 | `일시중단` | 업로드된 문서는 보존하고, 새 item 실행을 멈춥니다. 진행 중인 VLM 호출은 현재 item까지만 마무리합니다. |
-| `재시작` | API key 오류 같은 실행 실패 후 업로드를 다시 하지 않고 실패/중단 항목만 다시 queue에 넣습니다. |
+| `재시작` | 업로드된 원본은 유지하고 기존 추론 결과와 문서별 추론 시간을 초기화한 뒤 처음부터 다시 추론합니다. |
 
 ## Input / Output
 
@@ -98,8 +98,8 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | Area | Endpoint |
 | --- | --- |
 | System status | `GET /api/system/status` |
-| Workflow upload | `POST /api/workflow-runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
-| Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume-upload`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart` |
+| Workflow upload | `POST /api/workflows/{workflow_id}/runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
+| Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart` |
 | Batch upload | `POST /api/batches/init`, `POST /api/batches/{batch_id}/items`, `POST /api/batches/{batch_id}/start` |
 | Classification batch | `POST /api/classification-batches/init`, `POST /api/classification-batches/{batch_id}/items`, `POST /api/classification-batches/{batch_id}/start` |
 | Required check batch | `POST /api/required-field-check-batches/init`, `POST /api/required-field-check-batches/{batch_id}/items`, `POST /api/required-field-check-batches/{batch_id}/start` |
@@ -150,8 +150,7 @@ VLM_MODEL_NAME=mock-vlm
 | `PREPROCESS_MAX_WORKERS` | `2` | 문서 전처리 동시성 |
 | `DOCUMENT_PAGE_MAX_LONG_EDGE` | `3000` | preview/VLM용 JPEG 긴 변 제한 |
 | `DOCUMENT_PAGE_JPEG_QUALITY` | `88` | preview/VLM용 JPEG 품질 |
-| `WORKFLOW_MAX_WORKERS` | `1` | workflow VLM 실행 동시성 |
-| `BATCH_MAX_WORKERS` | `4` | batch 계열 실행 동시성 |
+| `VLM_MAX_CONCURRENT_REQUESTS` | `8` | workflow, batch, KIE field-group VLM 동시 실행 수 |
 | `UPLOAD_MAX_BATCH_FILES` | `10000` | 한 번에 업로드할 수 있는 batch 파일 수 |
 | `UPLOAD_RETENTION_HOURS` | `24` | 업로드 문서 보존 시간 |
 
@@ -194,7 +193,7 @@ FRONTEND_DIST_DIR="$(pwd)/dist" \
 
 ## README Media
 
-README 이미지는 [docs/readme-media.html](docs/readme-media.html)에서 실제 UI 변경사항에 맞춰 다시 그린 뒤 `assets/readme/*.png`로 렌더링했습니다.
+README 이미지는 `assets/readme-src/*.html`에서 관리합니다. 워크플로우 빌더 이미지는 로컬 웹 UI를 직접 캡처한 화면을 사용하고, 나머지는 같은 스타일의 HTML artboard를 `assets/readme/*.png`로 렌더링합니다.
 
 ## Test
 

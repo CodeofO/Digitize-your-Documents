@@ -60,6 +60,11 @@ assets/*
 !assets/readme/
 assets/readme/*
 !assets/readme/*.png
+!assets/readme-src/
+assets/readme-src/*
+!assets/readme-src/*.html
+!assets/readme-src/*.css
+!assets/readme-src/*.png
 
 # Runnable scripts.
 !scripts/

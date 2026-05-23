@@ -111,7 +111,7 @@ def _run_parallel_batch(job_ids: list[str], runner, failer, finalizer) -> None:
     if not job_ids:
         finalizer()
         return
-    max_workers = max(1, min(get_settings().batch_max_workers, len(job_ids)))
+    max_workers = max(1, min(get_settings().vlm_max_concurrent_requests, len(job_ids)))
     submitted_job_ids: set[str] = set()
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

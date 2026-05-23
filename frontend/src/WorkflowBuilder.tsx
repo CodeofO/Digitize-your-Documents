@@ -22,9 +22,9 @@ import {
   Download,
   FileInput,
   FileJson,
-  FolderOpen,
   GitBranch,
   GitMerge,
+  GripVertical,
   History,
   Library,
   Loader2,
@@ -38,7 +38,7 @@ import {
   UploadCloud,
   X
 } from "lucide-react";
-import { ChangeEvent, CSSProperties, UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, CSSProperties, PointerEvent, UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 
@@ -46,8 +46,16 @@ const WORKFLOW_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const WORKFLOW_RUN_ROW_HEIGHT = 64;
 const WORKFLOW_RUN_OVERSCAN = 8;
 const WORKFLOW_UPLOAD_CONCURRENCY = 2;
+const WORKFLOW_RESULT_LEFT_WIDTH_KEY = "digitize_workflow_result_left_width_v1";
+const WORKFLOW_RESULT_RIGHT_WIDTH_KEY = "digitize_workflow_result_right_width_v1";
+const WORKFLOW_RESULT_MIN_LEFT_WIDTH = 220;
+const WORKFLOW_RESULT_MIN_MIDDLE_WIDTH = 420;
+const WORKFLOW_RESULT_MIN_RIGHT_WIDTH = 360;
+const WORKFLOW_RESULT_SPLITTER_WIDTH = 12;
 
 type WorkflowNodeKind = "input" | "classifier" | "branch" | "kie" | "required-checker" | "merge" | "export";
+type WorkflowResultFilter = "all" | "success" | "failed" | "waiting" | "running" | "review";
+type WorkflowUploadSource = "files" | "folder";
 
 type WorkflowNodeData = {
   kind: WorkflowNodeKind;
@@ -487,6 +495,24 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     setIsSaving(false);
   }
 
+  async function pauseStartingRun() {
+    workflowStartCancelRequestedRef.current = true;
+    setRunStartMessage("일시중단 중");
+    workflowStartAbortRef.current?.abort();
+    const runId = workflowStartRunIdRef.current || activeRunId;
+    if (!runId) {
+      setIsStartingRun(false);
+      setRunStartMessage(null);
+      setIsSaving(false);
+      setMessage("워크플로우 시작을 일시중단했습니다.");
+      return;
+    }
+    await pauseRun(runId);
+    setIsStartingRun(false);
+    setRunStartMessage(null);
+    setIsSaving(false);
+  }
+
   async function refreshRun(runId: string) {
     try {
       const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/summary`);
@@ -564,7 +590,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
       const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/resume`, { method: "POST" });
       setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)].slice(0, 12));
       setActiveRunId(run.id);
-      setMessage("업로드가 끝난 워크플로우 처리를 계속합니다.");
+      setMessage("일시중단된 워크플로우 처리를 이어갑니다.");
       void refreshRun(run.id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우를 계속 처리하지 못했습니다.");
@@ -587,10 +613,12 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
   async function restartRun(runId: string) {
     setError(null);
     try {
+      const currentRun = runs.find((item) => item.id === runId) ?? activeRun;
+      if (!confirmWorkflowRestart(currentRun)) return;
       const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/restart`, { method: "POST" });
       upsertRun(run);
       setActiveRunId(run.id);
-      setMessage("업로드된 문서는 유지하고 실패/중단된 항목만 다시 실행합니다.");
+      setMessage("업로드된 문서는 유지하고 전체 추론 결과를 초기화한 뒤 다시 실행합니다.");
       void refreshRun(run.id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우를 재시작하지 못했습니다.");
@@ -827,6 +855,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
               <WorkflowRunPreparingDock
                 fileCount={runStartFileCount || files.length}
                 message={runStartMessage ?? "작업 준비 중"}
+                onPause={() => void pauseStartingRun()}
                 onDiscard={() => void stopStartingRun()}
               />
             ) : activeRun ? (
@@ -837,8 +866,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                 onResume={() => void resumeRun(activeRun.id)}
                 onPause={() => void pauseRun(activeRun.id)}
                 onRestart={() => void restartRun(activeRun.id)}
-                onResumeUpload={() => requestResumeUpload(activeRun.id)}
-                onResumeFolderUpload={() => requestResumeFolderUpload(activeRun.id)}
+                onResumeUpload={(source) => source === "folder" ? requestResumeFolderUpload(activeRun.id) : requestResumeUpload(activeRun.id)}
                 onDiscard={() => void discardRun(activeRun.id)}
               />
             ) : null}
@@ -846,23 +874,11 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
           </div>
 
           <div className="workflow-run-bar">
-            <label className={`workflow-upload ${isStartingRun || isRunningRun ? "disabled" : ""}`}>
-              <UploadCloud size={17} />
-              <span>{files.length ? `${files.length}개 파일 선택됨` : "문서 업로드"}</span>
-              <input type="file" multiple accept={WORKFLOW_FILE_ACCEPT} onChange={onFileInput} disabled={isStartingRun || isRunningRun} />
-            </label>
-            <label className={`workflow-upload ${isStartingRun || isRunningRun ? "disabled" : ""}`}>
-              <FolderOpen size={17} />
-              <span>폴더 업로드</span>
-              <input
-                type="file"
-                multiple
-                accept={WORKFLOW_FILE_ACCEPT}
-                onChange={onFileInput}
-                disabled={isStartingRun || isRunningRun}
-                {...{ webkitdirectory: "", directory: "" }}
-              />
-            </label>
+            <WorkflowUploadButton
+              disabled={isStartingRun || isRunningRun}
+              selectedCount={files.length}
+              onChange={onFileInput}
+            />
             <input
               ref={workflowResumeFileInputRef}
               type="file"
@@ -1001,6 +1017,7 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
 
   async function restartRun() {
     try {
+      if (!confirmWorkflowRestart(run)) return;
       const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/restart`, { method: "POST" });
       setRun(nextRun);
       setSelectedItemId((current) => current ?? nextRun.items[0]?.id ?? null);
@@ -1119,6 +1136,109 @@ function WorkflowCanvasNode({ id, data, selected }: NodeProps<WorkflowNode>) {
   );
 }
 
+function WorkflowUploadButton(props: {
+  disabled: boolean;
+  selectedCount: number;
+  onChange: (event: ChangeEvent<HTMLInputElement>) => void;
+}) {
+  const menu = useWorkflowUploadMenu();
+  const triggerLabel = props.selectedCount ? `${props.selectedCount.toLocaleString()}개 파일 선택됨` : "업로드";
+  const onChange = (event: ChangeEvent<HTMLInputElement>) => {
+    menu.close();
+    props.onChange(event);
+  };
+
+  return (
+    <div className="workflow-upload-picker" ref={menu.ref}>
+      <button
+        type="button"
+        className="workflow-upload"
+        disabled={props.disabled}
+        aria-haspopup="menu"
+        aria-expanded={menu.open}
+        onClick={menu.toggle}
+      >
+        <UploadCloud size={17} />
+        <span>{triggerLabel}</span>
+      </button>
+      {menu.open && !props.disabled && (
+        <div className="workflow-upload-menu" role="menu">
+          <label className="workflow-upload-menu-item" role="menuitem">
+            파일 선택
+            <input type="file" multiple accept={WORKFLOW_FILE_ACCEPT} onChange={onChange} />
+          </label>
+          <label className="workflow-upload-menu-item" role="menuitem">
+            폴더 선택
+            <input
+              type="file"
+              multiple
+              accept={WORKFLOW_FILE_ACCEPT}
+              onChange={onChange}
+              {...{ webkitdirectory: "", directory: "" }}
+            />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WorkflowResumeUploadButton(props: {
+  onSelect: (source: WorkflowUploadSource) => void;
+}) {
+  const menu = useWorkflowUploadMenu();
+  const select = (source: WorkflowUploadSource) => {
+    menu.close();
+    props.onSelect(source);
+  };
+
+  return (
+    <div className="workflow-upload-picker" ref={menu.ref}>
+      <button
+        type="button"
+        className="secondary"
+        aria-haspopup="menu"
+        aria-expanded={menu.open}
+        onClick={menu.toggle}
+      >
+        <UploadCloud size={15} /> 이어가기
+      </button>
+      {menu.open && (
+        <div className="workflow-upload-menu workflow-upload-menu-right" role="menu">
+          <button type="button" className="workflow-upload-menu-item" role="menuitem" onClick={() => select("files")}>
+            파일 선택
+          </button>
+          <button type="button" className="workflow-upload-menu-item" role="menuitem" onClick={() => select("folder")}>
+            폴더 선택
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function useWorkflowUploadMenu() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      if (event.target instanceof globalThis.Node && ref.current?.contains(event.target)) return;
+      setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  return {
+    open,
+    ref,
+    close: () => setOpen(false),
+    toggle: () => setOpen((current) => !current)
+  };
+}
+
 function WorkflowRunProgressDock(props: {
   run: WorkflowRun;
   onOpen: () => void;
@@ -1126,8 +1246,7 @@ function WorkflowRunProgressDock(props: {
   onResume: () => void;
   onPause: () => void;
   onRestart: () => void;
-  onResumeUpload: () => void;
-  onResumeFolderUpload: () => void;
+  onResumeUpload: (source: WorkflowUploadSource) => void;
   onDiscard: () => void;
 }) {
   const finishedCount = workflowRunFinishedCount(props.run);
@@ -1157,18 +1276,11 @@ function WorkflowRunProgressDock(props: {
             <Maximize2 size={15} /> 결과 상세보기
           </button>
           {workflowRunCanResumeUpload(props.run) && (
-            <>
-              <button type="button" className="secondary" onClick={props.onResumeUpload}>
-                <UploadCloud size={15} /> 파일 이어가기
-              </button>
-              <button type="button" className="secondary" onClick={props.onResumeFolderUpload}>
-                <FolderOpen size={15} /> 폴더 이어가기
-              </button>
-            </>
+            <WorkflowResumeUploadButton onSelect={props.onResumeUpload} />
           )}
           {workflowRunCanResume(props.run) && (
             <button type="button" className="secondary" onClick={props.onResume}>
-              <Play size={15} /> 계속 처리
+              <Play size={15} /> 이어하기
             </button>
           )}
           {workflowRunCanPause(props.run) && (
@@ -1197,6 +1309,7 @@ function WorkflowRunProgressDock(props: {
 function WorkflowRunPreparingDock(props: {
   fileCount: number;
   message: string;
+  onPause: () => void;
   onDiscard: () => void;
 }) {
   return (
@@ -1212,6 +1325,9 @@ function WorkflowRunPreparingDock(props: {
           <span><strong>{props.fileCount.toLocaleString()}</strong> 준비 중</span>
         </div>
         <div className="workflow-progress-dock-actions">
+          <button type="button" className="secondary" onClick={props.onPause}>
+            <Pause size={15} /> 일시중단
+          </button>
           <button type="button" className="secondary danger-outline" onClick={props.onDiscard}>
             <X size={15} /> 중단·정리
           </button>
@@ -1301,6 +1417,39 @@ function WorkflowRunResults(props: {
   onClose: () => void;
 }) {
   const finishedCount = workflowRunFinishedCount(props.run);
+  const [itemFilter, setItemFilter] = useState<WorkflowResultFilter>("all");
+  const [leftWidth, setLeftWidth] = useState(() => readWorkflowResultPaneWidth(WORKFLOW_RESULT_LEFT_WIDTH_KEY, 280));
+  const [rightWidth, setRightWidth] = useState(() => readWorkflowResultPaneWidth(WORKFLOW_RESULT_RIGHT_WIDTH_KEY, 520));
+  const filteredItems = useMemo(
+    () => props.run.items.filter((item) => workflowResultFilterMatches(item, itemFilter)),
+    [itemFilter, props.run.items]
+  );
+  const visibleSelectedItem =
+    props.selectedItem && filteredItems.some((item) => item.id === props.selectedItem?.id)
+      ? props.selectedItem
+      : filteredItems[0] ?? null;
+  const filterCounts = useMemo(() => workflowResultFilterCounts(props.run.items), [props.run.items]);
+  const workbenchStyle = useMemo<CSSProperties>(
+    () => ({
+      gridTemplateColumns: `${leftWidth}px ${WORKFLOW_RESULT_SPLITTER_WIDTH}px minmax(${WORKFLOW_RESULT_MIN_MIDDLE_WIDTH}px, 1fr) ${WORKFLOW_RESULT_SPLITTER_WIDTH}px ${rightWidth}px`
+    }),
+    [leftWidth, rightWidth]
+  );
+
+  useEffect(() => {
+    if (!filteredItems.length) return;
+    if (!props.selectedItem || !filteredItems.some((item) => item.id === props.selectedItem?.id)) {
+      props.onSelectItem(filteredItems[0].id);
+    }
+  }, [filteredItems, props.selectedItem?.id, props.onSelectItem]);
+
+  const onLeftResize = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    startWorkflowResultResize(event, "left", leftWidth, rightWidth, setLeftWidth, setRightWidth);
+  }, [leftWidth, rightWidth]);
+  const onRightResize = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    startWorkflowResultResize(event, "right", leftWidth, rightWidth, setLeftWidth, setRightWidth);
+  }, [leftWidth, rightWidth]);
+
   return (
     <section className="workflow-results">
       <div className="workflow-results-header">
@@ -1328,7 +1477,7 @@ function WorkflowRunResults(props: {
           </button>
           {props.onResume && workflowRunCanResume(props.run) && (
             <button type="button" className="secondary" onClick={props.onResume}>
-              <Play size={15} /> 계속 처리
+              <Play size={15} /> 이어하기
             </button>
           )}
           {props.onPause && workflowRunCanPause(props.run) && (
@@ -1350,10 +1499,24 @@ function WorkflowRunResults(props: {
         </div>
       </div>
       <progress className="workflow-run-progress" value={props.run.progress} max={1} />
-      <div className="workflow-run-workbench">
-        <WorkflowRunRail run={props.run} selectedItem={props.selectedItem} onSelectItem={props.onSelectItem} />
-        <WorkflowDocumentPreview document={props.document} loading={props.documentLoading} activePage={props.activePage} onPage={props.onPage} item={props.selectedItem} />
-        <WorkflowItemInspector item={props.selectedItem} />
+      <div className="workflow-run-workbench workflow-run-workbench-resizable resize-scope" style={workbenchStyle}>
+        <WorkflowRunRail
+          run={props.run}
+          items={filteredItems}
+          selectedItem={visibleSelectedItem}
+          filter={itemFilter}
+          filterCounts={filterCounts}
+          onFilter={setItemFilter}
+          onSelectItem={props.onSelectItem}
+        />
+        <button className="splitter workflow-result-splitter" type="button" title="목록 영역 너비 조절" aria-label="목록 영역 너비 조절" onPointerDown={onLeftResize}>
+          <GripVertical size={18} />
+        </button>
+        <WorkflowDocumentPreview document={props.document} loading={props.documentLoading} activePage={props.activePage} onPage={props.onPage} item={visibleSelectedItem} />
+        <button className="splitter workflow-result-splitter" type="button" title="결과 영역 너비 조절" aria-label="결과 영역 너비 조절" onPointerDown={onRightResize}>
+          <GripVertical size={18} />
+        </button>
+        <WorkflowItemInspector item={visibleSelectedItem} />
       </div>
     </section>
   );
@@ -1363,28 +1526,52 @@ function workflowRunFinishedCount(run: WorkflowRun) {
   return run.completed_count + run.failed_count + run.needs_review_count;
 }
 
+const workflowResultFilterOptions: { value: WorkflowResultFilter; label: string }[] = [
+  { value: "all", label: "전체" },
+  { value: "success", label: "성공" },
+  { value: "failed", label: "실패" },
+  { value: "waiting", label: "대기" },
+  { value: "running", label: "실행" },
+  { value: "review", label: "검토" }
+];
+
+function workflowResultFilterCounts(items: WorkflowRunItem[]): Record<WorkflowResultFilter, number> {
+  return {
+    all: items.length,
+    success: items.filter((item) => workflowResultFilterMatches(item, "success")).length,
+    failed: items.filter((item) => workflowResultFilterMatches(item, "failed")).length,
+    waiting: items.filter((item) => workflowResultFilterMatches(item, "waiting")).length,
+    running: items.filter((item) => workflowResultFilterMatches(item, "running")).length,
+    review: items.filter((item) => workflowResultFilterMatches(item, "review")).length
+  };
+}
+
+function workflowResultFilterMatches(item: WorkflowRunItem, filter: WorkflowResultFilter) {
+  if (filter === "all") return true;
+  if (filter === "success") return item.status === "completed";
+  if (filter === "failed") return item.status === "failed";
+  if (filter === "waiting") return ["uploading", "preprocessing", "queued", "paused"].includes(item.status);
+  if (filter === "running") return item.status === "running";
+  return item.status === "needs_review";
+}
+
 function workflowRunCanResume(run: WorkflowRun) {
   const uploadedCount = run.uploaded_count ?? run.items.length;
-  const queuedCount = run.queued_count ?? run.items.filter((item) => item.status === "queued").length;
-  const activeStaleCount =
-    (run.preprocessing_count ?? run.items.filter((item) => item.status === "preprocessing").length) +
-    (run.running_count ?? run.items.filter((item) => item.status === "running").length);
-  return !TERMINAL_RUN_STATUSES.includes(run.status) && uploadedCount === run.total_count && (queuedCount > 0 || activeStaleCount > 0);
+  const pausedCount = run.items.filter((item) => item.status === "paused").length;
+  return run.status === "paused" && uploadedCount === run.total_count && (pausedCount > 0 || run.items.length > 0);
 }
 
 function workflowRunCanPause(run: WorkflowRun) {
   const uploadedCount = run.uploaded_count ?? run.items.length;
+  const preprocessingCount = run.preprocessing_count ?? run.items.filter((item) => item.status === "preprocessing").length;
   const queuedCount = run.queued_count ?? run.items.filter((item) => item.status === "queued").length;
   const runningCount = run.running_count ?? run.items.filter((item) => item.status === "running").length;
-  return !TERMINAL_RUN_STATUSES.includes(run.status) && run.status !== "paused" && uploadedCount === run.total_count && queuedCount + runningCount > 0;
+  return !TERMINAL_RUN_STATUSES.includes(run.status) && run.status !== "paused" && (uploadedCount < run.total_count || preprocessingCount + queuedCount + runningCount > 0);
 }
 
 function workflowRunCanRestart(run: WorkflowRun) {
   const uploadedCount = run.uploaded_count ?? run.items.length;
-  const runningCount = run.running_count ?? run.items.filter((item) => item.status === "running").length;
-  const failedCount = run.failed_count ?? run.items.filter((item) => item.status === "failed").length;
-  const pausedCount = run.items.filter((item) => item.status === "paused").length;
-  return uploadedCount === run.total_count && runningCount === 0 && (run.status === "paused" || failedCount > 0 || pausedCount > 0);
+  return run.status !== "canceled" && run.items.length > 0 && (uploadedCount === run.total_count || run.status === "paused");
 }
 
 function workflowRunCanResumeUpload(run: WorkflowRun) {
@@ -1397,9 +1584,9 @@ function workflowRunCanDiscard(run: WorkflowRun) {
 }
 
 function workflowRunHeadline(run: WorkflowRun) {
+  if (run.status === "paused" || run.progress_phase === "paused") return "일시중단";
   if (workflowRunCanResumeUpload(run) || run.progress_phase === "uploading") return "문서 업로드 중";
   if (run.progress_phase === "preprocessing") return "문서 전처리 중";
-  if (run.status === "paused" || run.progress_phase === "paused") return "일시중단";
   if (!TERMINAL_RUN_STATUSES.includes(run.status) && run.progress < 1) return "작업 진행 중";
   return "작업 완료";
 }
@@ -1437,6 +1624,76 @@ function formatDurationMs(value: number | null | undefined) {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = Math.round(seconds % 60);
   return `${minutes}분 ${remainingSeconds}초`;
+}
+
+function readWorkflowResultPaneWidth(key: string, fallback: number) {
+  if (typeof window === "undefined") return fallback;
+  const parsed = Number(window.localStorage.getItem(key));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function saveWorkflowResultPaneWidth(key: string, value: number) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(key, String(Math.round(value)));
+}
+
+function clampWorkflowPaneWidth(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function startWorkflowResultResize(
+  event: PointerEvent<HTMLButtonElement>,
+  side: "left" | "right",
+  leftWidth: number,
+  rightWidth: number,
+  setLeftWidth: (value: number) => void,
+  setRightWidth: (value: number) => void
+) {
+  event.preventDefault();
+  const container = event.currentTarget.closest<HTMLElement>(".workflow-run-workbench-resizable");
+  if (!container) return;
+  const pointerId = event.pointerId;
+  event.currentTarget.setPointerCapture(pointerId);
+
+  const update = (clientX: number) => {
+    const rect = container.getBoundingClientRect();
+    const maxLeft = Math.max(
+      WORKFLOW_RESULT_MIN_LEFT_WIDTH,
+      rect.width - rightWidth - WORKFLOW_RESULT_MIN_MIDDLE_WIDTH - WORKFLOW_RESULT_SPLITTER_WIDTH * 2
+    );
+    const maxRight = Math.max(
+      WORKFLOW_RESULT_MIN_RIGHT_WIDTH,
+      rect.width - leftWidth - WORKFLOW_RESULT_MIN_MIDDLE_WIDTH - WORKFLOW_RESULT_SPLITTER_WIDTH * 2
+    );
+    if (side === "left") {
+      const next = clampWorkflowPaneWidth(clientX - rect.left, WORKFLOW_RESULT_MIN_LEFT_WIDTH, maxLeft);
+      setLeftWidth(next);
+      saveWorkflowResultPaneWidth(WORKFLOW_RESULT_LEFT_WIDTH_KEY, next);
+    } else {
+      const next = clampWorkflowPaneWidth(rect.right - clientX, WORKFLOW_RESULT_MIN_RIGHT_WIDTH, maxRight);
+      setRightWidth(next);
+      saveWorkflowResultPaneWidth(WORKFLOW_RESULT_RIGHT_WIDTH_KEY, next);
+    }
+  };
+
+  update(event.clientX);
+  const onMove = (moveEvent: globalThis.PointerEvent) => update(moveEvent.clientX);
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+function confirmWorkflowRestart(run: WorkflowRun | null | undefined) {
+  if (!run) return true;
+  const inferredCount = run.items.filter((item) =>
+    ["completed", "failed", "needs_review", "running", "paused"].includes(item.status) || item.inference_duration_ms !== null && item.inference_duration_ms !== undefined
+  ).length;
+  return window.confirm(
+    `현재 ${inferredCount.toLocaleString()} / ${run.total_count.toLocaleString()}개 문서에 추론 결과나 진행 기록이 있습니다.\n\n재시작하면 업로드된 원본은 유지하지만, 기존 추론 결과와 문서별 추론 시간은 모두 초기화하고 처음부터 다시 추론합니다.\n\n계속할까요?`
+  );
 }
 
 function useWorkflowRunVirtualRows(count: number, activeIndex: number, activeKey: string | null | undefined) {
@@ -1500,36 +1757,61 @@ function useWorkflowRunVirtualRows(count: number, activeIndex: number, activeKey
   return { containerRef, onScroll, start, end, spacerStyle, windowStyle };
 }
 
-function WorkflowRunRail(props: { run: WorkflowRun; selectedItem: WorkflowRunItem | null; onSelectItem: (itemId: string) => void }) {
-  const activeIndex = Math.max(0, props.run.items.findIndex((item) => item.id === props.selectedItem?.id));
-  const virtual = useWorkflowRunVirtualRows(props.run.items.length, activeIndex, props.selectedItem?.id);
-  const visibleItems = props.run.items.slice(virtual.start, virtual.end);
+function WorkflowRunRail(props: {
+  run: WorkflowRun;
+  items: WorkflowRunItem[];
+  selectedItem: WorkflowRunItem | null;
+  filter: WorkflowResultFilter;
+  filterCounts: Record<WorkflowResultFilter, number>;
+  onFilter: (filter: WorkflowResultFilter) => void;
+  onSelectItem: (itemId: string) => void;
+}) {
+  const activeIndex = Math.max(0, props.items.findIndex((item) => item.id === props.selectedItem?.id));
+  const virtual = useWorkflowRunVirtualRows(props.items.length, activeIndex, props.selectedItem?.id);
+  const visibleItems = props.items.slice(virtual.start, virtual.end);
 
   return (
     <aside className="workflow-run-rail">
       <div className="workflow-run-rail-head">
-        <span>{props.run.items.length}개 문서</span>
+        <span>{props.items.length.toLocaleString()} / {props.run.total_count.toLocaleString()}개 문서</span>
         <small>{workflowStatusLabel(props.run.status)}</small>
       </div>
+      <div className="workflow-run-filter" role="tablist" aria-label="문서 상태 필터">
+        {workflowResultFilterOptions.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            className={props.filter === option.value ? "active" : ""}
+            onClick={() => props.onFilter(option.value)}
+          >
+            <span>{option.label}</span>
+            <strong>{props.filterCounts[option.value].toLocaleString()}</strong>
+          </button>
+        ))}
+      </div>
       <div className="workflow-run-list workflow-virtual-list" ref={virtual.containerRef} onScroll={virtual.onScroll}>
-        <div className="virtual-list-spacer" style={virtual.spacerStyle}>
-          <div className="virtual-list-window" style={virtual.windowStyle}>
-            {visibleItems.map((item) => {
-              const result = item.result ?? {};
-              const classification = result.classification?.class_name || result.classification?.status || "-";
-              const activeNode = item.status === "queued" ? "대기 중" : result.current_node_label || workflowStatusLabel(item.status);
-              return (
-                <button key={item.id} type="button" className={item.id === props.selectedItem?.id ? "active" : ""} onClick={() => props.onSelectItem(item.id)}>
-                  <span>
-                    <i className={`workflow-status-dot ${item.status}`} />
-                    <strong>{item.filename}</strong>
-                  </span>
-                  <small>{classification} · {activeNode}</small>
-                </button>
-              );
-            })}
+        {props.items.length ? (
+          <div className="virtual-list-spacer" style={virtual.spacerStyle}>
+            <div className="virtual-list-window" style={virtual.windowStyle}>
+              {visibleItems.map((item) => {
+                const result = item.result ?? {};
+                const classification = result.classification?.class_name || result.classification?.status || "-";
+                const activeNode = item.status === "queued" ? "대기 중" : result.current_node_label || workflowStatusLabel(item.status);
+                return (
+                  <button key={item.id} type="button" className={item.id === props.selectedItem?.id ? "active" : ""} onClick={() => props.onSelectItem(item.id)}>
+                    <span>
+                      <i className={`workflow-status-dot ${item.status}`} />
+                      <strong>{item.filename}</strong>
+                    </span>
+                    <small>{classification} · {activeNode}</small>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="workflow-run-list-empty">선택한 상태의 문서가 없습니다.</div>
+        )}
       </div>
     </aside>
   );
