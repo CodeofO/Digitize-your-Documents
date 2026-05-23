@@ -1,6 +1,6 @@
 <div align="center">
   <h1>Document Automation Workspace</h1>
-  <p><b>문서 접수, 분류, 필수 항목 검수, 핵심 정보 추출, 결과 export를 하나의 워크플로우로 자동화하는 로컬 문서 처리 앱입니다.</b></p>
+  <p><b>문서 접수, 분류, 필수 항목 검수, 핵심 정보 추출, 결과 export를 하나의 워크플로우로 자동화하는 문서 자동화 워크스페이스입니다.</b></p>
   <p>
     <code>Workflow Builder</code>
     <code>Document Classifier</code>
@@ -36,17 +36,13 @@ PDF, 이미지, DOCX, PPTX, XLSX 같은 업무 문서를 업로드하면 문서 
 
 ![Workflow Builder](assets/readme/workflow-builder.png)
 
+![Workflow Builder result view](assets/readme/workflow-builder-results.png)
+
 - React Flow 캔버스에서 `Input`, `Document Classifier`, `Branch`, `KIE`, `Required Field Checker`, `Merge`, `Export` 노드를 연결합니다.
 - 업로드 파일이 1개면 단일 실행, 2개 이상이면 batch 실행으로 자동 판단합니다.
 - 저장된 classifier class에 따라 branch path를 나누고, class별로 다른 KIE schema나 required checklist를 실행할 수 있습니다.
 - 후속 노드가 없는 class는 분류 결과까지만 export할 수 있습니다.
-- 실행 중에는 문서 리스트, 선택 문서 이미지 preview, 현재 실행 node, module별 결과 table을 한 화면에서 봅니다.
-
-### Workflow 실행 결과 검수
-
-![Workflow result review](assets/readme/workflow-results.png)
-
-Workflow 실행 후에는 캔버스를 유지한 상태에서 진행률을 확인하고, 결과 상세 보기를 누르면 캔버스 위에 overlay 결과창이 뜹니다. 문서 리스트, 선택 문서 preview, 현재 실행 node, KIE 결과 table, 필수 항목 table을 한 화면에서 확인합니다.
+- 실행 중에는 캔버스 위 진행률과 결과 상세 보기로 처리 상태를 확인합니다.
 
 ### Document Classifier
 
@@ -75,7 +71,7 @@ Workflow 실행 후에는 캔버스를 유지한 상태에서 진행률을 확�
 ## 화면 흐름
 
 1. Home에서 단일 모듈 또는 Workflow Builder를 선택합니다.
-2. Setting에서 VLM API key, model name, LibreOffice path를 저장합니다.
+2. Setting에서 실행 환경을 확인합니다.
 3. KIE schema, classifier, required checklist를 라이브러리에 저장합니다.
 4. 단일 모듈로 바로 실행하거나, Workflow Builder에서 모듈을 연결합니다.
 5. 문서를 업로드합니다. 파일 수에 따라 single/batch가 자동 결정됩니다.
@@ -94,21 +90,6 @@ Home과 Workflow Builder UI는 [Toss Design System Mobile](https://tossmini-docs
 ### 디자인 출처와 사용 범위
 
 이 프로젝트는 Toss Design System의 공개 문서를 시각적 기준으로 참고한 자체 구현입니다. 공식 TDS UI Kit, 컴포넌트 패키지, 로고, 브랜드 자산, Figma 파일을 포함하거나 재배포하지 않습니다. 앱인토스 [피그마/TDS Mobile UI Kit 라이선스](https://developers-apps-in-toss.toss.im/design/prepare/figma-ui-license.html)는 UI Kit의 사용 범위를 제한하므로, 본 저장소의 표기는 “TDS 문서를 벤치마크한 UI 톤”으로 유지합니다.
-
-## VLM 실행 구조
-
-![VLM runtime overview](assets/readme/vlm-runtime.png)
-
-VLM secret은 frontend로 전달하지 않습니다. Frontend는 backend API만 호출하고, backend가 `.env` 또는 Setting 저장값을 읽어 provider별 client를 선택합니다.
-
-| 설정 | 호출 방식 |
-| --- | --- |
-| `VLM_PROVIDER=mock` | 실제 과금 없는 local mock |
-| `VLM_BASE_URL` 있음 | OpenAI-compatible endpoint |
-| `VLM_API_KEY`가 `AIza`로 시작하고 `VLM_BASE_URL` 없음 | Google GenAI native Gemini |
-| 그 외 API key | OpenAI-compatible endpoint |
-
-VLM 오류는 `VLM_*` stable code로 정리되어 UI와 job 기록에 남습니다. Provider 오류에 API key가 섞이면 저장 전에 `[redacted]`로 마스킹합니다.
 
 ## 지원 입력과 결과
 
@@ -276,7 +257,7 @@ npm run build
 
 Workflow batch 병렬 처리 설명은 `reports/workflow_parallel_before_after.html`에 정리되어 있습니다.
 
-README 이미지는 `assets/readme-src/*.html` 아트보드를 Chrome headless로 캡처해 생성합니다. 이미지가 흐려지거나 잘리지 않도록 고정 viewport와 큰 글자 크기를 유지합니다.
+README 이미지는 `scripts/render_readme_assets.sh`로 `assets/readme-src/*.html` 아트보드를 Chrome headless 캡처해 생성합니다. 이미지가 흐려지거나 잘리지 않도록 고정 viewport와 큰 글자 크기를 유지합니다.
 
 ## 저장소 구조
 

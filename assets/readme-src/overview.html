@@ -3,66 +3,57 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=1600, initial-scale=1" />
-    <title>Digitize Your Documents Overview</title>
+    <title>Document Automation Workspace Overview</title>
     <link rel="stylesheet" href="./readme-artboards.css" />
   </head>
   <body>
-    <main class="artboard tall">
-      <section style="display: grid; grid-template-columns: 1fr 520px; gap: 56px; align-items: start;">
+    <main class="artboard">
+      <section style="display: grid; grid-template-columns: minmax(0, 1fr) 500px; gap: 46px; align-items: start;">
         <div>
-          <p class="eyebrow">Digitize Your Documents</p>
-          <h1>문서 접수부터 export까지 하나의 흐름으로</h1>
-          <p style="margin-top: 24px; max-width: 880px;">
-            분류, 필수 항목 확인, 핵심 정보 추출, 검수와 CSV/JSON export까지
-            반복 문서 업무를 모듈형 워크플로우로 자동화합니다.
+          <p class="eyebrow">Document Automation Workspace</p>
+          <h1>문서 자동화 작업을 한 화면에서</h1>
+          <p style="margin-top: 24px; max-width: 850px;">
+            혼합 문서를 업로드하면 저장된 classifier, schema, checklist를 기준으로
+            처리하고 결과를 이미지와 함께 검수합니다.
           </p>
-          <div style="display: flex; gap: 12px; margin-top: 30px; flex-wrap: wrap;">
+          <div style="display: flex; gap: 12px; margin-top: 28px; flex-wrap: wrap;">
             <span class="pill">Workflow Builder</span>
-            <span class="pill muted-pill">4 Core Modules</span>
-            <span class="pill muted-pill">Batch Review</span>
+            <span class="pill muted-pill">Document Review</span>
+            <span class="pill muted-pill">CSV / JSON Export</span>
           </div>
-          <div style="margin-top: 36px;" class="blue-button">워크플로우 빌더 열기</div>
+          <div class="primary-button" style="margin-top: 34px;">워크플로우 빌더 열기</div>
         </div>
 
         <aside class="surface" style="padding: 28px;">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <strong style="font-size: 24px;">운영 상태</strong>
-            <span class="pill" style="font-size: 16px; min-height: 36px;">Ready</span>
-          </div>
-          <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 24px;">
-            <div class="mini-card"><strong>50+</strong><span>이미지/PDF/Office batch</span></div>
-            <div class="mini-card"><strong>8</strong><span>parallel workers</span></div>
-            <div class="mini-card"><strong>CSV</strong><span>filename order export</span></div>
-            <div class="mini-card"><strong>JSON</strong><span>evidence included</span></div>
+          <p class="eyebrow" style="font-size: 15px;">Workspace Focus</p>
+          <h2 style="font-size: 32px;">반복 검수를 줄이는 실행 화면</h2>
+          <div style="display: grid; gap: 14px; margin-top: 24px;">
+            <div class="list-row" style="padding: 18px 20px;"><b>파일 수 자동 판단</b><span>단일 실행과 batch 실행을 같은 업로드 흐름에서 처리</span></div>
+            <div class="list-row" style="padding: 18px 20px;"><b>저장된 설정 재사용</b><span>schema, classifier, checklist를 라이브러리로 관리</span></div>
+            <div class="list-row" style="padding: 18px 20px;"><b>이미지 기반 검수</b><span>결과 table과 문서 preview를 함께 확인</span></div>
           </div>
         </aside>
       </section>
 
       <section class="surface" style="margin-top: 42px; padding: 28px;">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px;">
-          <h2 style="font-size: 34px;">자동화 흐름</h2>
-          <span class="pill muted-pill">single/batch 자동 판단</span>
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px;">
+          <h2>자동화 흐름</h2>
+          <span class="pill muted-pill">upload to export</span>
         </div>
         <div style="display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px;">
-          <div class="step"><i class="step-index">1</i><div><strong>Upload</strong><span>PDF/Image/Office</span></div></div>
-          <div class="step"><i class="step-index">2</i><div><strong>Classify</strong><span>문서 종류 판단</span></div></div>
-          <div class="step"><i class="step-index">3</i><div><strong>Branch</strong><span>class별 경로</span></div></div>
-          <div class="step"><i class="step-index">4</i><div><strong>Extract</strong><span>schema 기반 추출</span></div></div>
-          <div class="step"><i class="step-index">5</i><div><strong>Review</strong><span>이미지와 결과 검수</span></div></div>
-          <div class="step"><i class="step-index">6</i><div><strong>Export</strong><span>CSV/JSON</span></div></div>
+          <div class="mini-card"><span class="number">1</span><b style="margin-top: 14px;">Upload</b><span>PDF/Image/Office</span></div>
+          <div class="mini-card"><span class="number">2</span><b style="margin-top: 14px;">Classify</b><span>문서 종류 판단</span></div>
+          <div class="mini-card"><span class="number">3</span><b style="margin-top: 14px;">Branch</b><span>class별 경로</span></div>
+          <div class="mini-card"><span class="number">4</span><b style="margin-top: 14px;">Extract</b><span>schema 기반 추출</span></div>
+          <div class="mini-card"><span class="number">5</span><b style="margin-top: 14px;">Review</b><span>이미지와 결과 검수</span></div>
+          <div class="mini-card"><span class="number">6</span><b style="margin-top: 14px;">Export</b><span>CSV/JSON</span></div>
         </div>
       </section>
-      <section class="surface" style="align-items: center; display: flex; justify-content: space-between; margin-top: 28px; padding: 26px 28px;">
-        <div>
-          <h3>대표 사용 흐름</h3>
-          <p style="font-size: 20px; margin-top: 6px;">혼합 접수 서류를 업로드하고, class별 path로 나누어 필요한 값과 누락 항목을 검수합니다.</p>
-        </div>
-        <div style="display: flex; gap: 10px;">
-          <span class="pill">분류</span>
-          <span class="pill">추출</span>
-          <span class="pill">필수항목</span>
-          <span class="pill">Export</span>
-        </div>
+
+      <section class="value-grid" style="margin-top: 28px;">
+        <article class="value-card"><b>반복 분류 감소</b><span>class 후보 기준으로 문서를 먼저 나눕니다.</span></article>
+        <article class="value-card"><b>누락 검수 빠르게</b><span>서명, 날짜, 체크박스 같은 필수 항목을 먼저 확인합니다.</span></article>
+        <article class="value-card"><b>검수 결과 export</b><span>검토한 결과를 CSV/JSON으로 내보냅니다.</span></article>
       </section>
     </main>
   </body>

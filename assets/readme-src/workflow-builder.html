@@ -3,73 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=1600, initial-scale=1" />
-    <title>Digitize Your Documents Workflow Builder</title>
+    <title>Document Automation Workspace Workflow Builder</title>
     <link rel="stylesheet" href="./readme-artboards.css" />
   </head>
   <body>
-    <main class="artboard tall">
-      <header style="display: flex; justify-content: space-between; align-items: end;">
+    <main class="artboard">
+      <header style="display: flex; align-items: center; justify-content: space-between;">
         <div>
           <p class="eyebrow">Workflow Builder</p>
-          <h1 style="font-size: 58px;">모듈을 연결해 문서 처리 파이프라인을 만듭니다</h1>
+          <h1 style="font-size: 56px;">워크플로우 빌더</h1>
         </div>
         <div style="display: flex; gap: 10px;">
-          <span class="pill">자동 저장</span>
-          <span class="pill muted-pill">React Flow Canvas</span>
+          <span class="pill">진행률 표시</span>
+          <span class="pill muted-pill">결과 상세 보기</span>
         </div>
       </header>
 
-      <section class="surface" style="display: grid; grid-template-columns: 240px 1fr 280px; gap: 18px; margin-top: 34px; padding: 20px; height: 760px;">
-        <aside class="soft" style="padding: 18px;">
-          <p class="eyebrow" style="font-size: 15px;">Builder</p>
-          <h3>모듈</h3>
-          <div style="display: grid; gap: 12px; margin-top: 18px;">
-            <div class="step" style="padding: 14px;"><i class="icon-box" style="height: 38px; width: 38px; font-size: 17px;">I</i><div><strong style="font-size: 18px;">문서 입력</strong><span style="font-size: 14px;">single/batch 자동 판단</span></div></div>
-            <div class="step" style="padding: 14px;"><i class="icon-box" style="height: 38px; width: 38px; font-size: 17px;">C</i><div><strong style="font-size: 18px;">문서 분류</strong><span style="font-size: 14px;">class 후보 실행</span></div></div>
-            <div class="step" style="padding: 14px;"><i class="icon-box" style="height: 38px; width: 38px; font-size: 17px;">B</i><div><strong style="font-size: 18px;">분기</strong><span style="font-size: 14px;">class별 path</span></div></div>
-            <div class="step" style="padding: 14px;"><i class="icon-box" style="height: 38px; width: 38px; font-size: 17px;">K</i><div><strong style="font-size: 18px;">핵심 정보 추출</strong><span style="font-size: 14px;">schema 선택</span></div></div>
-            <div class="step" style="padding: 14px;"><i class="icon-box" style="height: 38px; width: 38px; font-size: 17px;">Q</i><div><strong style="font-size: 18px;">필수 항목 확인</strong><span style="font-size: 14px;">checklist 선택</span></div></div>
-            <div class="step" style="padding: 14px;"><i class="icon-box" style="height: 38px; width: 38px; font-size: 17px;">E</i><div><strong style="font-size: 18px;">Export</strong><span style="font-size: 14px;">CSV/JSON</span></div></div>
-          </div>
-        </aside>
-
-        <div class="canvas">
-          <div class="node" style="left: 44px; top: 290px;"><strong>문서 입력</strong><span>파일 수로 mode 판단</span></div>
-          <div class="node" style="left: 226px; top: 290px;"><strong>문서 분류</strong><span>저장된 classifier 실행</span></div>
-          <div class="node" style="left: 426px; top: 244px; width: 190px;"><strong>분기</strong><span>class별 path</span></div>
-          <div class="node" style="left: 666px; top: 120px; width: 210px;"><strong>핵심 정보 추출</strong><span>schema: contract</span></div>
-          <div class="node" style="left: 666px; top: 332px; width: 210px;"><strong>필수 항목 확인</strong><span>checklist: consent</span></div>
-          <div class="node" style="left: 530px; top: 520px; width: 170px;"><strong>결과 병합</strong><span>branch 결과 합침</span></div>
-          <div class="node" style="left: 730px; top: 520px; width: 130px;"><strong>Export</strong><span>CSV/JSON</span></div>
-
-          <div class="edge" style="left: 222px; top: 336px; width: 38px;"></div>
-          <div class="edge" style="left: 400px; top: 336px; width: 50px;"></div>
-          <div class="edge" style="left: 605px; top: 300px; width: 84px; transform: rotate(-38deg);"></div>
-          <div class="edge" style="left: 605px; top: 350px; width: 74px; transform: rotate(24deg);"></div>
-          <div class="edge" style="left: 780px; top: 202px; width: 152px; transform: rotate(94deg);"></div>
-          <div class="edge" style="left: 774px; top: 414px; width: 130px; transform: rotate(121deg);"></div>
-          <div class="edge" style="left: 692px; top: 566px; width: 44px;"></div>
-          <span class="branch-label" style="left: 610px; top: 230px;">class: 신청서</span>
-          <span class="branch-label" style="left: 610px; top: 386px;">class: 동의서</span>
-          <span class="branch-label" style="left: 430px; top: 470px;">unknown: 분류만 export</span>
-
-          <div class="soft" style="bottom: 24px; left: 24px; padding: 18px 22px; position: absolute; right: 24px;">
-            <span class="pill muted-pill">경고는 보여주되 저장과 실행은 허용</span>
-            <span class="pill muted-pill" style="margin-left: 8px;">후속 노드 없는 class는 classification-only export</span>
-          </div>
-        </div>
-
-        <aside class="soft" style="padding: 22px;">
-          <p class="eyebrow" style="font-size: 15px;">Node Settings</p>
-          <h3>분기 설정</h3>
-          <p style="font-size: 18px; margin-top: 10px;">classifier class별 후속 노드를 연결합니다.</p>
-          <div style="display: grid; gap: 14px; margin-top: 24px;">
-            <div class="mini-card"><strong>신청서</strong><span>핵심 정보 추출 node</span></div>
-            <div class="mini-card"><strong>동의서</strong><span>필수 항목 확인 node</span></div>
-            <div class="mini-card"><strong>needs_review</strong><span>연결 없음, 분류만 export</span></div>
-          </div>
-          <div class="blue-button" style="justify-content: center; margin-top: 26px; width: 100%;">저장</div>
-        </aside>
+      <section class="surface" style="height: 760px; margin-top: 32px; overflow: hidden; padding: 14px;">
+        <img
+          alt="Workflow Builder actual screen"
+          src="./workflow-builder-capture.png"
+          style="border: 1px solid var(--gray-200); border-radius: 18px; display: block; height: 730px; object-fit: cover; object-position: top center; width: 100%;"
+        />
       </section>
     </main>
   </body>
