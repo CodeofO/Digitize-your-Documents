@@ -38,7 +38,7 @@ DEFAULT_ENV_VALUES = {
     "OBJECT_STORAGE_FORCE_PATH_STYLE": "false",
     "OBJECT_STORAGE_PREFIX": "",
     "UPLOAD_MAX_FILE_BYTES": "52428800",
-    "UPLOAD_MAX_BATCH_FILES": "5000",
+    "UPLOAD_MAX_BATCH_FILES": "10000",
     "UPLOAD_MAX_PDF_PAGES": "30",
     "UPLOAD_MAX_IMAGE_PIXELS": "50000000",
     "PROCESSING_TMP_DIR": "",
@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     object_storage_force_path_style: bool = False
     object_storage_prefix: str | None = None
     upload_max_file_bytes: int = 50 * 1024 * 1024
-    upload_max_batch_files: int = 5000
+    upload_max_batch_files: int = 10000
     upload_max_pdf_pages: int = 30
     upload_max_image_pixels: int = 50_000_000
     processing_tmp_dir: str | None = None

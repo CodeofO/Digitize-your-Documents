@@ -27,8 +27,6 @@ import {
   Library,
   Loader2,
   Maximize2,
-  PanelRightClose,
-  PanelRightOpen,
   Play,
   Plus,
   Save,
@@ -42,7 +40,6 @@ import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 
 const WORKFLOW_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
-const MAX_WORKFLOW_RUN_FILES = 5000;
 const WORKFLOW_RUN_ROW_HEIGHT = 64;
 const WORKFLOW_RUN_OVERSCAN = 8;
 
@@ -54,10 +51,20 @@ type WorkflowNodeData = {
   config?: Record<string, string>;
   branchKeys?: string[];
   connectedBranchKeys?: string[];
+  configSelect?: WorkflowNodeConfigSelect;
+  onConfigChange?: (nodeId: string, key: string, value: string) => void;
 };
 
 type WorkflowNode = Node<WorkflowNodeData>;
 type WorkflowEdge = Edge;
+
+type WorkflowNodeConfigSelect = {
+  key: string;
+  label: string;
+  placeholder: string;
+  value: string;
+  options: { value: string; label: string }[];
+};
 
 type SchemaSummary = {
   id: string;
@@ -139,6 +146,7 @@ type WorkflowItemResult = {
 };
 
 type WorkflowBuilderProps = {
+  uploadMaxBatchFiles: number;
   onCreateSchema: () => void;
   onCreateClassifier: () => void;
   onCreateChecklist: () => void;
@@ -151,7 +159,6 @@ type WorkflowDraft = {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   selectedNodeId: string | null;
-  settingsCollapsed?: boolean;
 };
 
 const WORKFLOW_DRAFT_KEY = "digitize_workflow_builder_draft_v1";
@@ -191,7 +198,7 @@ const nodeTypes = {
   workflow: WorkflowCanvasNode
 };
 
-export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateChecklist }: WorkflowBuilderProps) {
+export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateClassifier, onCreateChecklist }: WorkflowBuilderProps) {
   const [initialDraft] = useState<WorkflowDraft | null>(() => readWorkflowDraft());
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
   const [activeWorkflowId, setActiveWorkflowId] = useState(initialDraft?.activeWorkflowId ?? "");
@@ -201,7 +208,6 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [edges, setEdges] = useState<WorkflowEdge[]>(() => normalizeWorkflowEdges(initialDraft?.edges ?? defaultEdges));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(initialDraft?.selectedNodeId ?? defaultNodes[1]?.id ?? null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [settingsCollapsed, setSettingsCollapsed] = useState(Boolean(initialDraft?.settingsCollapsed));
   const [schemas, setSchemas] = useState<SchemaSummary[]>([]);
   const [classifiers, setClassifiers] = useState<ClassifierSummary[]>([]);
   const [checklists, setChecklists] = useState<ChecklistSummary[]>([]);
@@ -219,11 +225,12 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const [activeDocumentPage, setActiveDocumentPage] = useState(0);
   const [resultsOverlayOpen, setResultsOverlayOpen] = useState(false);
 
-  const activeWorkflow = workflows.find((workflow) => workflow.id === activeWorkflowId) ?? null;
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
-  const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
-  const canvasNodes = useMemo(() => buildCanvasNodes(nodes, edges), [nodes, edges]);
+  const canvasNodes = useMemo(
+    () => buildCanvasNodes(nodes, edges, schemas, classifiers, checklists, updateNodeConfig),
+    [nodes, edges, schemas, classifiers, checklists]
+  );
   const selectedRunItem =
     activeRun?.items.find((item) => item.id === selectedItemId) ?? activeRun?.items[0] ?? null;
   const validation = useMemo(() => validateWorkflow(nodes, edges), [nodes, edges]);
@@ -252,13 +259,12 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
         workflowDescription,
         nodes,
         edges,
-        selectedNodeId,
-        settingsCollapsed
+        selectedNodeId
       });
       setDraftSavedAt(new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [activeWorkflowId, workflowName, workflowDescription, nodes, edges, selectedNodeId, settingsCollapsed]);
+  }, [activeWorkflowId, workflowName, workflowDescription, nodes, edges, selectedNodeId]);
 
   useEffect(() => {
     let canceled = false;
@@ -485,9 +491,9 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   function onFileInput(event: ChangeEvent<HTMLInputElement>) {
     const nextFiles = Array.from(event.target.files ?? []);
     nextFiles.sort((a, b) => a.name.localeCompare(b.name));
-    if (nextFiles.length > MAX_WORKFLOW_RUN_FILES) {
+    if (nextFiles.length > uploadMaxBatchFiles) {
       setFiles([]);
-      setError(`한 번에 최대 ${MAX_WORKFLOW_RUN_FILES.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
+      setError(`한 번에 최대 ${uploadMaxBatchFiles.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
       event.currentTarget.value = "";
       return;
     }
@@ -498,7 +504,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
 
   return (
     <ReactFlowProvider>
-      <main className={`workflow-builder ${settingsCollapsed ? "settings-collapsed" : ""}`}>
+      <main className="workflow-builder">
         <aside className="workflow-palette" aria-label="워크플로우 모듈">
           <div className="workflow-panel-header">
             <p className="eyebrow">Builder</p>
@@ -643,42 +649,16 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
             )}
           </div>
 
-          {(error || message || validation.errors.length > 0 || validation.warnings.length > 0 || activeWorkflow?.validation_warnings.length) && (
+          {(error || message || validation.errors.length > 0 || validation.warnings.length > 0) && (
             <div className="workflow-validation">
               {error && <span className="danger"><AlertTriangle size={14} /> {error}</span>}
               {message && <span><CheckCircle2 size={14} /> {message}</span>}
               {validation.errors.map((item) => <span key={item} className="danger"><AlertTriangle size={14} /> {item}</span>)}
               {validation.warnings.map((item) => <span key={item}><AlertTriangle size={14} /> {item}</span>)}
-              {activeWorkflow?.validation_warnings.map((item) => <span key={item}><AlertTriangle size={14} /> {item}</span>)}
             </div>
           )}
 
         </section>
-
-        <button
-          type="button"
-          className="secondary icon-only workflow-settings-toggle"
-          aria-label={settingsCollapsed ? "노드 설정 패널 펼치기" : "노드 설정 패널 접기"}
-          title={settingsCollapsed ? "노드 설정 패널 펼치기" : "노드 설정 패널 접기"}
-          onClick={() => setSettingsCollapsed((current) => !current)}
-        >
-          {settingsCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
-        </button>
-
-        {!settingsCollapsed && (
-          <aside className="workflow-settings" aria-label="노드 설정">
-            <NodeSettings
-              node={selectedNode}
-              schemas={schemas}
-              classifiers={classifiers}
-              checklists={checklists}
-              onConfig={updateNodeConfig}
-              onCreateSchema={onCreateSchema}
-              onCreateClassifier={onCreateClassifier}
-              onCreateChecklist={onCreateChecklist}
-            />
-          </aside>
-        )}
 
         {activeRun && resultsOverlayOpen && (
           <div className="workflow-results-overlay" role="dialog" aria-modal="true" aria-label="워크플로우 실행 결과 상세">
@@ -708,18 +688,39 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   );
 }
 
-function WorkflowCanvasNode({ data, selected }: NodeProps<WorkflowNode>) {
+function WorkflowCanvasNode({ id, data, selected }: NodeProps<WorkflowNode>) {
   const kind = data.kind;
   const branchKeys = normalizeBranchKeys(data.branchKeys);
   const connectedBranchKeys = new Set(data.connectedBranchKeys ?? []);
   return (
-    <div className={`workflow-node workflow-node-${kind} ${selected ? "selected" : ""}`}>
+    <div className={`workflow-node workflow-node-${kind} ${data.configSelect ? "workflow-node-configurable" : ""} ${selected ? "selected" : ""}`}>
       {kind !== "input" && <Handle className="workflow-handle workflow-handle-target" type="target" position={Position.Left} />}
       <div className="workflow-node-title">
         <NodeIcon kind={kind} />
         <strong>{data.label}</strong>
       </div>
       <span>{nodeKindDescription(kind)}</span>
+      {data.configSelect && (
+        <label
+          className="workflow-node-config nodrag nowheel"
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <small>{data.configSelect.label}</small>
+          <select
+            value={data.configSelect.value}
+            onChange={(event) => data.onConfigChange?.(id, data.configSelect!.key, event.target.value)}
+          >
+            <option value="">{data.configSelect.placeholder}</option>
+            {data.configSelect.options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       {kind === "branch" ? (
         <>
           <div className="branch-handles">
@@ -748,94 +749,6 @@ function WorkflowCanvasNode({ data, selected }: NodeProps<WorkflowNode>) {
         <Handle className="workflow-handle workflow-handle-source" type="source" position={Position.Right} />
       ) : null}
     </div>
-  );
-}
-
-function NodeSettings(props: {
-  node: WorkflowNode | null;
-  schemas: SchemaSummary[];
-  classifiers: ClassifierSummary[];
-  checklists: ChecklistSummary[];
-  onConfig: (nodeId: string, key: string, value: string) => void;
-  onCreateSchema: () => void;
-  onCreateClassifier: () => void;
-  onCreateChecklist: () => void;
-}) {
-  if (!props.node) {
-    return (
-      <div className="workflow-panel-empty">
-        <p className="eyebrow">Settings</p>
-        <h2>노드를 선택하세요</h2>
-      </div>
-    );
-  }
-  const kind = props.node.data.kind;
-  return (
-    <div className="workflow-node-settings">
-      <p className="eyebrow">Node</p>
-      <h2>{props.node.data.label}</h2>
-      <p>{nodeKindDescription(kind)}</p>
-      {kind === "classifier" && (
-        <ConfigSelect
-          label="분류기"
-          value={props.node.data.config?.classifier_id ?? ""}
-          options={props.classifiers.map((item) => ({ value: item.id, label: `${item.name} · ${item.classes.length} classes` }))}
-          onChange={(value) => props.onConfig(props.node!.id, "classifier_id", value)}
-          onCreate={props.onCreateClassifier}
-        />
-      )}
-      {kind === "kie" && (
-        <ConfigSelect
-          label="Schema"
-          value={props.node.data.config?.schema_id ?? ""}
-          options={props.schemas.map((item) => ({ value: item.id, label: `${item.display_name || item.name} · ${item.fields.length} fields` }))}
-          onChange={(value) => props.onConfig(props.node!.id, "schema_id", value)}
-          onCreate={props.onCreateSchema}
-        />
-      )}
-      {kind === "required-checker" && (
-        <ConfigSelect
-          label="체크리스트"
-          value={props.node.data.config?.checklist_id ?? ""}
-          options={props.checklists.map((item) => ({ value: item.id, label: `${item.name} · ${item.items.length} items` }))}
-          onChange={(value) => props.onConfig(props.node!.id, "checklist_id", value)}
-          onCreate={props.onCreateChecklist}
-        />
-      )}
-      {kind === "branch" && (
-        <div className="branch-rule-panel">
-          <strong>Branch handles</strong>
-          {normalizeBranchKeys(props.node.data.branchKeys).map((key) => (
-            <span key={key}>{branchKeyLabel(key)}</span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ConfigSelect(props: {
-  label: string;
-  value: string;
-  options: { value: string; label: string }[];
-  onChange: (value: string) => void;
-  onCreate: () => void;
-}) {
-  return (
-    <label className="workflow-config-select">
-      <span>{props.label}</span>
-      <select value={props.value} onChange={(event) => props.onChange(event.target.value)}>
-        <option value="">저장된 라이브러리에서 선택</option>
-        {props.options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      <button type="button" className="secondary" onClick={props.onCreate}>
-        <Plus size={15} /> 새로 만들기
-      </button>
-    </label>
   );
 }
 
@@ -1196,7 +1109,12 @@ function normalizeBranchHandle(handle: string | undefined) {
 }
 
 function normalizeWorkflowNode(node: WorkflowNode): WorkflowNode {
-  const { connectedBranchKeys: _connectedBranchKeys, ...data } = node.data;
+  const {
+    connectedBranchKeys: _connectedBranchKeys,
+    configSelect: _configSelect,
+    onConfigChange: _onConfigChange,
+    ...data
+  } = node.data;
   const branchKeys = data.kind === "branch" ? normalizeBranchKeys(data.branchKeys) : data.branchKeys;
   return {
     ...node,
@@ -1209,9 +1127,16 @@ function normalizeWorkflowNode(node: WorkflowNode): WorkflowNode {
   };
 }
 
-function buildCanvasNodes(nodes: WorkflowNode[], edges: WorkflowEdge[]): WorkflowNode[] {
+function buildCanvasNodes(
+  nodes: WorkflowNode[],
+  edges: WorkflowEdge[],
+  schemas: SchemaSummary[],
+  classifiers: ClassifierSummary[],
+  checklists: ChecklistSummary[],
+  onConfigChange: (nodeId: string, key: string, value: string) => void
+): WorkflowNode[] {
   return nodes.map((node) => {
-    if (node.data.kind !== "branch") return node;
+    const configSelect = workflowNodeConfigSelect(node, schemas, classifiers, checklists);
     const connectedBranchKeys = edges
       .filter((edge) => edge.source === node.id && edge.sourceHandle)
       .map((edge) => String(edge.sourceHandle));
@@ -1219,10 +1144,48 @@ function buildCanvasNodes(nodes: WorkflowNode[], edges: WorkflowEdge[]): Workflo
       ...node,
       data: {
         ...node.data,
-        connectedBranchKeys
+        connectedBranchKeys: node.data.kind === "branch" ? connectedBranchKeys : undefined,
+        configSelect,
+        onConfigChange: configSelect ? onConfigChange : undefined
       }
     };
   });
+}
+
+function workflowNodeConfigSelect(
+  node: WorkflowNode,
+  schemas: SchemaSummary[],
+  classifiers: ClassifierSummary[],
+  checklists: ChecklistSummary[]
+): WorkflowNodeConfigSelect | undefined {
+  if (node.data.kind === "classifier") {
+    return {
+      key: "classifier_id",
+      label: "분류 설정",
+      placeholder: "분류 설정 선택",
+      value: node.data.config?.classifier_id ?? "",
+      options: classifiers.map((item) => ({ value: item.id, label: `${item.name} · ${item.classes.length} classes` }))
+    };
+  }
+  if (node.data.kind === "kie") {
+    return {
+      key: "schema_id",
+      label: "Schema",
+      placeholder: "Schema 선택",
+      value: node.data.config?.schema_id ?? "",
+      options: schemas.map((item) => ({ value: item.id, label: `${item.display_name || item.name} · ${item.fields.length} fields` }))
+    };
+  }
+  if (node.data.kind === "required-checker") {
+    return {
+      key: "checklist_id",
+      label: "Checklist",
+      placeholder: "Checklist 선택",
+      value: node.data.config?.checklist_id ?? "",
+      options: checklists.map((item) => ({ value: item.id, label: `${item.name} · ${item.items.length} items` }))
+    };
+  }
+  return undefined;
 }
 
 function edgeLabel(edge: WorkflowEdge, nodes: WorkflowNode[]) {
@@ -1277,8 +1240,7 @@ function readWorkflowDraft(): WorkflowDraft | null {
       workflowDescription: typeof parsed.workflowDescription === "string" ? parsed.workflowDescription : "",
       nodes: parsed.nodes.map(normalizeWorkflowNode),
       edges: normalizeWorkflowEdges(parsed.edges as WorkflowEdge[]),
-      selectedNodeId: typeof parsed.selectedNodeId === "string" ? parsed.selectedNodeId : parsed.nodes[0]?.id ?? null,
-      settingsCollapsed: Boolean(parsed.settingsCollapsed)
+      selectedNodeId: typeof parsed.selectedNodeId === "string" ? parsed.selectedNodeId : parsed.nodes[0]?.id ?? null
     };
   } catch {
     return null;

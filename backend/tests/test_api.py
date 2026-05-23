@@ -34,9 +34,10 @@ def test_health() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_system_status_mock_mode() -> None:
+def test_system_status_mock_mode(monkeypatch) -> None:
     try:
-        os.environ["VLM_PROVIDER"] = "mock"
+        monkeypatch.setenv("VLM_PROVIDER", "mock")
+        monkeypatch.setenv("UPLOAD_MAX_BATCH_FILES", "1234")
         get_settings.cache_clear()
         with get_client() as client:
             response = client.get("/api/system/status")
@@ -44,9 +45,9 @@ def test_system_status_mock_mode() -> None:
         payload = response.json()
         assert payload["vlm_provider"] == "mock"
         assert payload["is_mock"] is True
+        assert payload["upload_max_batch_files"] == 1234
         assert "vlm_api_key" not in payload
     finally:
-        os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
 
 
@@ -235,7 +236,7 @@ def test_batch_upload_rejects_too_many_files(monkeypatch) -> None:
 
 
 def test_large_batch_multipart_allows_configured_counts_above_parser_default(monkeypatch) -> None:
-    monkeypatch.setenv("UPLOAD_MAX_BATCH_FILES", "5000")
+    monkeypatch.setenv("UPLOAD_MAX_BATCH_FILES", "10000")
     get_settings.cache_clear()
     try:
         with get_client() as client:

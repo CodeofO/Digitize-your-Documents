@@ -44,7 +44,7 @@ const KIE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const KIE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
 const BATCH_FILE_ROW_HEIGHT = 84;
 const BATCH_FILE_OVERSCAN = 8;
-const MAX_BATCH_UPLOAD_FILES = 5000;
+const DEFAULT_MAX_BATCH_UPLOAD_FILES = 10000;
 const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
   {
     key_name: "문서번호",
@@ -236,6 +236,7 @@ type SystemStatus = {
   vlm_model_name: string | null;
   has_vlm_credentials: boolean;
   is_mock: boolean;
+  upload_max_batch_files: number;
 };
 
 type VlmSettings = {
@@ -801,6 +802,7 @@ export default function App() {
   );
   const shouldPollActiveBatch = Boolean(activeBatchId && (!activeBatch || batchCanCancel(activeBatch)));
   const batchPollingActive = shouldPollActiveBatch || hasActiveBatch;
+  const uploadMaxBatchFiles = systemStatus?.upload_max_batch_files ?? DEFAULT_MAX_BATCH_UPLOAD_FILES;
   const hasPreparedSchema =
     Boolean(document) || Boolean(schema) || batchFiles.length > 0 || schemaDirty || hasMeaningfulSchema(fields);
   const schemaLibraryVisible = schemaLibraryOpen && hasPreparedSchema;
@@ -1841,9 +1843,9 @@ export default function App() {
       selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
     );
     const ignoredCount = selected.length - supported.length;
-    if (supported.length > MAX_BATCH_UPLOAD_FILES) {
+    if (supported.length > uploadMaxBatchFiles) {
       setBatchFiles([]);
-      setBatchMessage(`한 번에 최대 ${MAX_BATCH_UPLOAD_FILES.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
+      setBatchMessage(`한 번에 최대 ${uploadMaxBatchFiles.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
       return;
     }
     setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
@@ -1856,10 +1858,10 @@ export default function App() {
       selected.filter((file) => KIE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
     );
     const ignoredCount = selected.length - supported.length;
-    if (supported.length > MAX_BATCH_UPLOAD_FILES) {
+    if (supported.length > uploadMaxBatchFiles) {
       setBatchFiles([]);
       setDraftBatchIndex(0);
-      setBatchMessage(`한 번에 최대 ${MAX_BATCH_UPLOAD_FILES.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
+      setBatchMessage(`한 번에 최대 ${uploadMaxBatchFiles.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
       return;
     }
     if (!supported.length) {
@@ -2133,9 +2135,15 @@ export default function App() {
           onResize={startResize}
         />
       ) : mode === "classifier" || mode === "required-checker" ? (
-        <ModuleWorkspace kind={mode} leftPanePercent={leftPanePercent} onResize={startResize} />
+        <ModuleWorkspace
+          kind={mode}
+          leftPanePercent={leftPanePercent}
+          uploadMaxBatchFiles={uploadMaxBatchFiles}
+          onResize={startResize}
+        />
       ) : mode === "workflow" ? (
         <WorkflowBuilder
+          uploadMaxBatchFiles={uploadMaxBatchFiles}
           onCreateSchema={() => navigateMode("key-info")}
           onCreateClassifier={() => navigateMode("classifier")}
           onCreateChecklist={() => navigateMode("required-checker")}

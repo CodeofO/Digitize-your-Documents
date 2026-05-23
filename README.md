@@ -117,6 +117,7 @@ VLM_MODEL_NAME=mock-vlm
 | `CORS_ALLOWED_ORIGINS` | frontend origin allowlist |
 | `DATABASE_URL` | SQLite 또는 Postgres URL |
 | `STORAGE_BACKEND=local` | local persistent volume 저장 |
+| `UPLOAD_MAX_BATCH_FILES=10000` | 한 번에 업로드할 수 있는 batch 파일 수 |
 | `UPLOAD_RETENTION_HOURS=24` | 업로드 문서 하루 단위 삭제 |
 | `SERVE_FRONTEND=true` | FastAPI가 `frontend/dist`를 직접 서빙 |
 

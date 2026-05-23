@@ -59,7 +59,7 @@ docker compose -f docker-compose.hosting.example.yml up -d backend
 | `STORAGE_BACKEND` | 지금은 `local` |
 | `DOCUMENT_STORAGE_DIR`, `RAW_STORAGE_DIR`, `PROCESSING_TMP_DIR` | persistent volume 하위 경로 |
 | `UPLOAD_RETENTION_HOURS` | 외부 베타 기본 `24` |
-| `UPLOAD_MAX_FILE_BYTES`, `UPLOAD_MAX_BATCH_FILES`, `UPLOAD_MAX_PDF_PAGES`, `UPLOAD_MAX_IMAGE_PIXELS` | 업로드 남용 방지 제한 |
+| `UPLOAD_MAX_FILE_BYTES`, `UPLOAD_MAX_BATCH_FILES=10000`, `UPLOAD_MAX_PDF_PAGES`, `UPLOAD_MAX_IMAGE_PIXELS` | 업로드 남용 방지 제한 |
 | `ALLOW_RUNTIME_SETTINGS` | production에서는 기본 `false` |
 | `VLM_*` | VLM provider/model/API key |
 | `BATCH_MAX_WORKERS` | 문서 단위 병렬 worker 수 |

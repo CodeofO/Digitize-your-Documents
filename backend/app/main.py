@@ -223,6 +223,7 @@ def system_status() -> SystemStatusRead:
         vlm_model_name=settings.resolved_vlm_model_name,
         has_vlm_credentials=bool(settings.resolved_vlm_api_key and settings.resolved_vlm_model_name),
         is_mock=provider == "mock",
+        upload_max_batch_files=settings.upload_max_batch_files,
     )
 
 

@@ -22,7 +22,6 @@ import { API_BASE } from "./apiConfig";
 
 const MODULE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const MODULE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
-const MAX_BATCH_UPLOAD_FILES = 5000;
 const MODULE_VIRTUAL_ROW_HEIGHT = 58;
 const MODULE_VIRTUAL_OVERSCAN = 8;
 
@@ -180,6 +179,7 @@ type ModuleBatch = {
 type ModuleWorkspaceProps = {
   kind: ModuleKind;
   leftPanePercent: number;
+  uploadMaxBatchFiles: number;
   onResize: (event: PointerEvent<HTMLButtonElement>) => void;
 };
 
@@ -251,7 +251,7 @@ function useVirtualRows(count: number, activeIndex: number) {
   return { containerRef, onScroll, start, end, spacerStyle, windowStyle };
 }
 
-export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorkspaceProps) {
+export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, onResize }: ModuleWorkspaceProps) {
   const isClassifier = kind === "classifier";
   const title = isClassifier ? "문서 분류" : "필수 항목 확인";
   const configLabel = isClassifier ? "분류 설정" : "체크리스트";
@@ -547,11 +547,11 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
     const supported = incoming
       .filter((file) => MODULE_FILE_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() ?? ""))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-    if (supported.length > MAX_BATCH_UPLOAD_FILES) {
+    if (supported.length > uploadMaxBatchFiles) {
       setSelectedFiles([]);
       setSelectedFileIndex(0);
       setMessage(null);
-      setError(`한 번에 최대 ${MAX_BATCH_UPLOAD_FILES.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
+      setError(`한 번에 최대 ${uploadMaxBatchFiles.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
       return;
     }
     setSelectedFiles(supported);

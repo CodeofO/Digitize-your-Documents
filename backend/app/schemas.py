@@ -628,6 +628,7 @@ class SystemStatusRead(BaseModel):
     vlm_model_name: str | None
     has_vlm_credentials: bool
     is_mock: bool
+    upload_max_batch_files: int
 
 
 class BatchItemRead(BaseModel):
