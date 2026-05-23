@@ -1,4 +1,5 @@
 import csv
+import errno
 import io
 import json
 import shutil
@@ -121,6 +122,7 @@ from app.schemas import (
     WorkflowDefinitionCreate,
     WorkflowDefinitionRead,
     WorkflowDefinitionUpdate,
+    WorkflowRunInitRequest,
     WorkflowRunRead,
 )
 from app.vlm import (
@@ -1383,7 +1385,10 @@ async def create_workflow_run(
     db.add(run)
     db.flush()
     for file in sorted(files, key=_upload_file_sort_key):
-        document = _create_document_from_upload(file, db)
+        try:
+            document = _create_document_from_upload(file, db)
+        finally:
+            await file.close()
         db.flush()
         db.add(
             WorkflowRunItem(
@@ -1414,6 +1419,110 @@ async def create_workflow_run(
     db.refresh(run)
     response = WorkflowRunRead(**workflow_run_to_read(run))
     db.close()
+    background_tasks.add_task(run_workflow_run, run.id)
+    return response
+
+
+@app.post("/api/workflows/{workflow_id}/runs/init", response_model=WorkflowRunRead)
+def init_workflow_run(
+    workflow_id: str,
+    payload: WorkflowRunInitRequest,
+    db: Session = Depends(get_db),
+) -> WorkflowRunRead:
+    workflow = db.get(WorkflowDefinition, workflow_id)
+    if not workflow or workflow.archived:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    _validate_declared_batch_file_count(payload.total_count)
+    try:
+        validate_workflow_definition(json.loads(workflow.definition_json), db)
+    except WorkflowDefinitionError as exc:
+        raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
+
+    run = WorkflowRun(workflow_id=workflow.id, status="queued", total_count=payload.total_count)
+    db.add(run)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="upload_initialized",
+        message=f"Initialized workflow run upload with {payload.total_count} file(s)",
+        metadata={"workflow_id": workflow.id, "file_count": payload.total_count},
+    )
+    db.commit()
+    db.refresh(run)
+    return WorkflowRunRead(**workflow_run_to_read(run))
+
+
+@app.post("/api/workflow-runs/{run_id}/items", response_model=WorkflowRunRead)
+async def append_workflow_run_items(
+    run_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> WorkflowRunRead:
+    _, files = await _read_batch_upload_form(request)
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if run.status != "queued":
+        raise HTTPException(status_code=409, detail="Workflow run already started")
+    current_count = len(run.items)
+    if current_count + len(files) > run.total_count:
+        raise HTTPException(status_code=413, detail="Workflow run upload exceeds declared file count")
+
+    for file in sorted(files, key=_upload_file_sort_key):
+        try:
+            document = _create_document_from_upload(file, db)
+        finally:
+            await file.close()
+        db.flush()
+        db.add(
+            WorkflowRunItem(
+                run_id=run.id,
+                document_id=document.id,
+                filename=document.filename,
+                status="queued",
+                result_json=json.dumps({"document_id": document.id, "filename": document.filename, "node_results": {}}, ensure_ascii=False),
+            )
+        )
+        log_audit_event(
+            db,
+            entity_type="workflow_run_item",
+            entity_id=run.id,
+            action="queued",
+            message=f"Queued workflow document {document.filename}",
+            metadata={"document_id": document.id},
+        )
+    db.commit()
+    db.refresh(run)
+    return WorkflowRunRead(**workflow_run_to_read(run))
+
+
+@app.post("/api/workflow-runs/{run_id}/start", response_model=WorkflowRunRead)
+def start_workflow_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> WorkflowRunRead:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if run.status != "queued":
+        return WorkflowRunRead(**workflow_run_to_read(run))
+    if len(run.items) != run.total_count:
+        raise HTTPException(status_code=422, detail=f"Workflow run has {len(run.items)} of {run.total_count} expected files")
+    run.status = "running"
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="started",
+        message=f"Started workflow run with {run.total_count} file(s)",
+        metadata={"workflow_id": run.workflow_id, "file_count": run.total_count},
+    )
+    db.commit()
+    db.refresh(run)
+    response = WorkflowRunRead(**workflow_run_to_read(run))
     background_tasks.add_task(run_workflow_run, run.id)
     return response
 
@@ -1476,7 +1585,10 @@ async def create_batch(
     db.flush()
     job_ids: list[str] = []
     for file in sorted(files, key=_upload_file_sort_key):
-        document = _create_document_from_upload(file, db)
+        try:
+            document = _create_document_from_upload(file, db)
+        finally:
+            await file.close()
         job = ExtractionJob(
             document_id=document.id,
             schema_id=schema.id,
@@ -1654,7 +1766,10 @@ async def create_classification_batch(
     db.flush()
     job_ids: list[str] = []
     for file in sorted(files, key=_upload_file_sort_key):
-        document = _create_document_from_upload(file, db)
+        try:
+            document = _create_document_from_upload(file, db)
+        finally:
+            await file.close()
         db.flush()
         job = ClassificationJob(document_id=document.id, classifier_id=classifier.id, status="queued")
         db.add(job)
@@ -1790,7 +1905,10 @@ async def create_required_field_check_batch(
     db.flush()
     job_ids: list[str] = []
     for file in sorted(files, key=_upload_file_sort_key):
-        document = _create_document_from_upload(file, db)
+        try:
+            document = _create_document_from_upload(file, db)
+        finally:
+            await file.close()
         db.flush()
         job = RequiredFieldCheckJob(document_id=document.id, checklist_id=checklist.id, status="queued")
         db.add(job)
@@ -2560,6 +2678,13 @@ async def _read_batch_upload_form(request: Request) -> tuple[FormData, list[Uplo
         if "Too many files" in detail or "Maximum number of files" in detail:
             raise HTTPException(status_code=413, detail=_batch_file_limit_message()) from exc
         raise HTTPException(status_code=400, detail=f"Invalid multipart upload: {detail}") from exc
+    except OSError as exc:
+        if exc.errno == errno.EMFILE:
+            raise HTTPException(
+                status_code=413,
+                detail="Too many files were uploaded in a single request. Upload large batches in smaller chunks.",
+            ) from exc
+        raise
 
     files = [item for item in form.getlist("files") if _is_upload_file(item)]
     if not files:
@@ -2588,6 +2713,12 @@ def _required_form_value(form: FormData, key: str) -> str:
 def _validate_upload_file_count(files: list[UploadFile]) -> None:
     limit = get_settings().upload_max_batch_files
     if limit > 0 and len(files) > limit:
+        raise HTTPException(status_code=413, detail=_batch_file_limit_message())
+
+
+def _validate_declared_batch_file_count(file_count: int) -> None:
+    limit = get_settings().upload_max_batch_files
+    if limit > 0 and file_count > limit:
         raise HTTPException(status_code=413, detail=_batch_file_limit_message())
 
 

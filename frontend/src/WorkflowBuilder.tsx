@@ -24,6 +24,7 @@ import {
   FileJson,
   GitBranch,
   GitMerge,
+  History,
   Library,
   Loader2,
   Maximize2,
@@ -40,6 +41,7 @@ import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 
 const WORKFLOW_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
+const WORKFLOW_UPLOAD_CHUNK_SIZE = 100;
 const WORKFLOW_RUN_ROW_HEIGHT = 64;
 const WORKFLOW_RUN_OVERSCAN = 8;
 
@@ -128,6 +130,8 @@ type WorkflowRun = {
   progress: number;
   error_message: string | null;
   items: WorkflowRunItem[];
+  created_at?: string;
+  completed_at?: string | null;
 };
 
 type WorkflowItemResult = {
@@ -214,16 +218,13 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
   const [files, setFiles] = useState<File[]>([]);
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [activeRunId, setActiveRunId] = useState("");
-  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingRun, setIsStartingRun] = useState(false);
+  const [runStartMessage, setRunStartMessage] = useState<string | null>(null);
+  const [runStartFileCount, setRunStartFileCount] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(initialDraft ? "복원됨" : null);
-  const [selectedDocument, setSelectedDocument] = useState<WorkflowDocument | null>(null);
-  const [documentLoading, setDocumentLoading] = useState(false);
-  const [activeDocumentPage, setActiveDocumentPage] = useState(0);
-  const [resultsOverlayOpen, setResultsOverlayOpen] = useState(false);
 
   const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
@@ -231,10 +232,18 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
     () => buildCanvasNodes(nodes, edges, schemas, classifiers, checklists, updateNodeConfig),
     [nodes, edges, schemas, classifiers, checklists]
   );
-  const selectedRunItem =
-    activeRun?.items.find((item) => item.id === selectedItemId) ?? activeRun?.items[0] ?? null;
   const validation = useMemo(() => validateWorkflow(nodes, edges), [nodes, edges]);
   const isRunningRun = Boolean(activeRun && !TERMINAL_RUN_STATUSES.includes(activeRun.status));
+  const shouldAnimateCanvasEdges = isRunningRun || isStartingRun;
+  const canvasEdges = useMemo(
+    () =>
+      edges.map((edge) => ({
+        ...edge,
+        animated: shouldAnimateCanvasEdges,
+        className: [edge.className, shouldAnimateCanvasEdges ? "workflow-edge-flowing" : ""].filter(Boolean).join(" ") || undefined
+      })),
+    [edges, shouldAnimateCanvasEdges]
+  );
   const runButtonTitle = validation.errors.length
     ? `실행할 수 없습니다: ${validation.errors[0]}`
     : activeWorkflowId
@@ -266,38 +275,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
     return () => window.clearTimeout(timer);
   }, [activeWorkflowId, workflowName, workflowDescription, nodes, edges, selectedNodeId]);
 
-  useEffect(() => {
-    let canceled = false;
-    setActiveDocumentPage(0);
-    setSelectedDocument(null);
-    if (!selectedRunItem?.document_id) return;
-    setDocumentLoading(true);
-    api<WorkflowDocument>(`/api/documents/${selectedRunItem.document_id}`)
-      .then((document) => {
-        if (!canceled) setSelectedDocument(document);
-      })
-      .catch((exc) => {
-        if (!canceled) setError(exc instanceof Error ? exc.message : "문서 preview를 불러오지 못했습니다.");
-      })
-      .finally(() => {
-        if (!canceled) setDocumentLoading(false);
-      });
-    return () => {
-      canceled = true;
-    };
-  }, [selectedRunItem?.document_id]);
-
-  useEffect(() => {
-    if (!resultsOverlayOpen) return;
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setResultsOverlayOpen(false);
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [resultsOverlayOpen]);
-
   const onNodesChange = useCallback((changes: NodeChange<WorkflowNode>[]) => {
     setNodes((current) => applyNodeChanges(changes, current));
   }, []);
@@ -313,11 +290,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
     const validationMessage = validateConnection(connection, nodes, edges);
     if (validationMessage) {
       setError(validationMessage);
-      return;
-    }
-    const confirmationMessage = sharedTargetConfirmation(connection, nodes, edges);
-    if (confirmationMessage && !window.confirm(confirmationMessage)) {
-      setMessage("연결을 취소했습니다.");
       return;
     }
     setError(null);
@@ -362,7 +334,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
       }
       if (!activeRunId && loadedRuns[0]) {
         setActiveRunId(loadedRuns[0].id);
-        setSelectedItemId(loadedRuns[0].items[0]?.id ?? null);
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 데이터를 불러오지 못했습니다.");
@@ -433,28 +404,42 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
       return;
     }
     setIsStartingRun(true);
+    setRunStartFileCount(runFiles.length);
+    setRunStartMessage("작업 준비 중");
     setIsSaving(true);
     setError(null);
     try {
       const saved = await persistWorkflow();
-      const form = new FormData();
-      runFiles.forEach((file) => form.append("files", file));
-      const run = await api<WorkflowRun>(`/api/workflows/${saved.id}/runs`, {
+      const initializedRun = await api<WorkflowRun>(`/api/workflows/${saved.id}/runs/init`, {
         method: "POST",
-        body: form
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ total_count: runFiles.length })
       });
+      setRuns((current) => [initializedRun, ...current.filter((item) => item.id !== initializedRun.id)].slice(0, 12));
+      setActiveRunId(initializedRun.id);
+
+      let uploadedCount = 0;
+      let latestRun = initializedRun;
+      for (const chunk of chunkFiles(runFiles, WORKFLOW_UPLOAD_CHUNK_SIZE)) {
+        setRunStartMessage(`${uploadedCount.toLocaleString()} / ${runFiles.length.toLocaleString()} 문서 업로드 중`);
+        const form = new FormData();
+        chunk.forEach((file) => form.append("files", file));
+        latestRun = await api<WorkflowRun>(`/api/workflow-runs/${initializedRun.id}/items`, { method: "POST", body: form });
+        uploadedCount += chunk.length;
+        setRuns((current) => [latestRun, ...current.filter((item) => item.id !== latestRun.id)].slice(0, 12));
+        setRunStartMessage(`${uploadedCount.toLocaleString()} / ${runFiles.length.toLocaleString()} 문서 업로드 중`);
+      }
+      setRunStartMessage("작업 등록 완료");
+      const run = await api<WorkflowRun>(`/api/workflow-runs/${initializedRun.id}/start`, { method: "POST" });
       setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)].slice(0, 12));
       setActiveRunId(run.id);
-      setSelectedItemId(run.items[0]?.id ?? null);
-      setSelectedDocument(null);
-      setActiveDocumentPage(0);
-      setResultsOverlayOpen(false);
       setMessage("워크플로우 실행을 시작했습니다. 실행 전에 워크플로우를 저장했습니다.");
       void refreshRun(run.id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 실행에 실패했습니다.");
     } finally {
       setIsStartingRun(false);
+      setRunStartMessage(null);
       setIsSaving(false);
     }
   }
@@ -464,7 +449,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
       const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}`);
       setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)].slice(0, 12));
       setActiveRunId(run.id);
-      setSelectedItemId((current) => current ?? run.items[0]?.id ?? null);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 실행 상태를 갱신하지 못했습니다.");
     }
@@ -575,21 +559,15 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
                 </button>
               </div>
             )}
-            {activeRun && (
-              <button type="button" className="secondary" onClick={() => setResultsOverlayOpen((current) => !current)}>
-                {resultsOverlayOpen ? <X size={16} /> : <Maximize2 size={16} />}
-                {resultsOverlayOpen ? "결과 닫기" : "결과 상세보기"}
-              </button>
-            )}
             <span className="workflow-autosave">
               자동 저장 {draftSavedAt ?? "대기"}
             </span>
           </div>
 
-          <div className={`workflow-canvas ${resultsOverlayOpen && activeRun ? "results-overlay-open" : ""}`}>
+          <div className="workflow-canvas">
             <ReactFlow
               nodes={canvasNodes}
-              edges={edges}
+              edges={canvasEdges}
               nodeTypes={nodeTypes}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
@@ -611,13 +589,18 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
               <MiniMap pannable zoomable />
             </ReactFlow>
 
-            {activeRun && (
+            {isStartingRun ? (
+              <WorkflowRunPreparingDock
+                fileCount={runStartFileCount || files.length}
+                message={runStartMessage ?? "작업 준비 중"}
+              />
+            ) : activeRun ? (
               <WorkflowRunProgressDock
                 run={activeRun}
-                onOpen={() => setResultsOverlayOpen(true)}
+                onOpen={() => openWorkflowResultScreen(activeRun.id)}
                 onRefresh={() => void refreshRun(activeRun.id)}
               />
-            )}
+            ) : null}
 
           </div>
 
@@ -649,6 +632,13 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
             )}
           </div>
 
+          <WorkflowRunHistory
+            runs={runs}
+            activeRunId={activeRunId}
+            onOpen={(runId) => openWorkflowResultScreen(runId)}
+            onRefresh={() => void refreshAll()}
+          />
+
           {(error || message || validation.errors.length > 0 || validation.warnings.length > 0) && (
             <div className="workflow-validation">
               {error && <span className="danger"><AlertTriangle size={14} /> {error}</span>}
@@ -659,32 +649,88 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, onCreateSchema, onCreateC
           )}
 
         </section>
-
-        {activeRun && resultsOverlayOpen && (
-          <div className="workflow-results-overlay" role="dialog" aria-modal="true" aria-label="워크플로우 실행 결과 상세">
-            <button
-              type="button"
-              className="workflow-results-backdrop"
-              aria-label="결과 상세 닫기"
-              onClick={() => setResultsOverlayOpen(false)}
-            />
-            <div className="workflow-results-modal">
-              <WorkflowRunResults
-                run={activeRun}
-                selectedItem={selectedRunItem}
-                document={selectedDocument}
-                documentLoading={documentLoading}
-                activePage={activeDocumentPage}
-                onSelectItem={(itemId) => setSelectedItemId(itemId)}
-                onPage={setActiveDocumentPage}
-                onRefresh={() => void refreshRun(activeRun.id)}
-                onClose={() => setResultsOverlayOpen(false)}
-              />
-            </div>
-          </div>
-        )}
       </main>
     </ReactFlowProvider>
+  );
+}
+
+export function WorkflowRunResultWindow({ runId }: { runId: string }) {
+  const [run, setRun] = useState<WorkflowRun | null>(null);
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [selectedDocument, setSelectedDocument] = useState<WorkflowDocument | null>(null);
+  const [documentLoading, setDocumentLoading] = useState(false);
+  const [activeDocumentPage, setActiveDocumentPage] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  const selectedItem = run?.items.find((item) => item.id === selectedItemId) ?? run?.items[0] ?? null;
+
+  useEffect(() => {
+    void refreshRun();
+  }, [runId]);
+
+  useEffect(() => {
+    if (!run || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+    const timer = window.setInterval(() => void refreshRun(), 1200);
+    return () => window.clearInterval(timer);
+  }, [run?.id, run?.status]);
+
+  useEffect(() => {
+    let canceled = false;
+    setActiveDocumentPage(0);
+    setSelectedDocument(null);
+    if (!selectedItem?.document_id) return;
+    setDocumentLoading(true);
+    api<WorkflowDocument>(`/api/documents/${selectedItem.document_id}`)
+      .then((document) => {
+        if (!canceled) setSelectedDocument(document);
+      })
+      .catch((exc) => {
+        if (!canceled) setError(exc instanceof Error ? exc.message : "문서 preview를 불러오지 못했습니다.");
+      })
+      .finally(() => {
+        if (!canceled) setDocumentLoading(false);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [selectedItem?.document_id]);
+
+  async function refreshRun() {
+    try {
+      const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}`);
+      setRun(nextRun);
+      setSelectedItemId((current) => current ?? nextRun.items[0]?.id ?? null);
+      setError(null);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "워크플로우 실행 결과를 불러오지 못했습니다.");
+    }
+  }
+
+  function closeWindow() {
+    window.location.hash = "workflow";
+  }
+
+  return (
+    <main className="workflow-result-window">
+      {error && <div className="alert">{error}</div>}
+      {run ? (
+        <WorkflowRunResults
+          run={run}
+          selectedItem={selectedItem}
+          document={selectedDocument}
+          documentLoading={documentLoading}
+          activePage={activeDocumentPage}
+          onSelectItem={(itemId) => setSelectedItemId(itemId)}
+          onPage={setActiveDocumentPage}
+          onRefresh={() => void refreshRun()}
+          onClose={closeWindow}
+        />
+      ) : (
+        <section className="workflow-results">
+          <div className="workflow-preview-empty">워크플로우 실행 결과를 불러오는 중입니다.</div>
+        </section>
+      )}
+    </main>
   );
 }
 
@@ -785,6 +831,91 @@ function WorkflowRunProgressDock(props: {
   );
 }
 
+function WorkflowRunPreparingDock(props: {
+  fileCount: number;
+  message: string;
+}) {
+  return (
+    <div className="workflow-progress-dock workflow-progress-dock-preparing" aria-label="워크플로우 실행 준비상황">
+      <div className="workflow-progress-dock-head">
+        <div>
+          <p className="eyebrow">Run</p>
+          <h3>{props.message}</h3>
+        </div>
+        <div className="workflow-run-kpis">
+          <span><strong>{props.fileCount.toLocaleString()}</strong> 선택됨</span>
+          <span><strong>0</strong> 완료</span>
+          <span><strong>{props.fileCount.toLocaleString()}</strong> 준비 중</span>
+        </div>
+      </div>
+      <progress className="workflow-run-progress workflow-run-progress-indeterminate" />
+    </div>
+  );
+}
+
+function WorkflowRunHistory(props: {
+  runs: WorkflowRun[];
+  activeRunId: string;
+  onOpen: (runId: string) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="workflow-run-history" aria-label="워크플로우 실행 기록">
+      <div className="workflow-run-history-head">
+        <div>
+          <p className="eyebrow">History</p>
+          <h3>실행 기록</h3>
+        </div>
+        <button type="button" className="secondary compact" onClick={props.onRefresh}>
+          <Library size={14} /> 새로고침
+        </button>
+      </div>
+      {props.runs.length ? (
+        <div className="workflow-run-history-list">
+          {props.runs.map((run) => {
+            const finishedCount = workflowRunFinishedCount(run);
+            const isActive = run.id === props.activeRunId;
+            const percent = Math.round(run.progress * 100);
+            return (
+              <article key={run.id} className={`workflow-run-history-item ${isActive ? "active" : ""}`}>
+                <div className="workflow-run-history-main">
+                  <span className="workflow-run-history-status">{workflowRunStatusLabel(run)}</span>
+                  <strong>{workflowRunHeadline(run)}</strong>
+                  <small>
+                    {formatWorkflowRunDate(run.created_at)} · {finishedCount.toLocaleString()} / {run.total_count.toLocaleString()} 처리
+                    {run.failed_count ? ` · ${run.failed_count.toLocaleString()} 실패` : ""}
+                    {run.needs_review_count ? ` · ${run.needs_review_count.toLocaleString()} 검토` : ""}
+                  </small>
+                  <div className="workflow-run-history-progress" aria-label={`${percent}%`}>
+                    <div><span style={{ width: `${percent}%` }} /></div>
+                    <em>{percent}%</em>
+                  </div>
+                </div>
+                <div className="workflow-run-history-actions">
+                  <button type="button" className="secondary" onClick={() => props.onOpen(run.id)}>
+                    <Maximize2 size={14} /> 결과 보기
+                  </button>
+                  <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${run.id}/export?format=csv`}>
+                    <Download size={14} /> CSV
+                  </a>
+                  <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${run.id}/export?format=json`}>
+                    <FileJson size={14} /> JSON
+                  </a>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="workflow-run-history-empty">
+          <History size={18} />
+          <span>아직 실행 기록이 없습니다.</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function WorkflowRunResults(props: {
   run: WorkflowRun;
   selectedItem: WorkflowRunItem | null;
@@ -810,6 +941,12 @@ function WorkflowRunResults(props: {
           <span><strong>{props.run.items.filter((item) => item.status === "queued").length}</strong> 대기</span>
         </div>
         <div className="workflow-results-actions">
+          <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${props.run.id}/export?format=csv`}>
+            <Download size={15} /> CSV
+          </a>
+          <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${props.run.id}/export?format=json`}>
+            <FileJson size={15} /> JSON
+          </a>
           <button type="button" className="secondary" onClick={props.onClose}>
             <X size={15} /> 닫기
           </button>
@@ -833,6 +970,28 @@ function workflowRunFinishedCount(run: WorkflowRun) {
 function workflowRunHeadline(run: WorkflowRun) {
   if (!TERMINAL_RUN_STATUSES.includes(run.status) && run.progress < 1) return "작업 진행 중";
   return "작업 완료";
+}
+
+function workflowRunStatusLabel(run: WorkflowRun) {
+  if (run.status === "running") return "실행 중";
+  if (run.status === "queued") return "대기";
+  if (run.status === "failed") return "실패";
+  if (run.status === "completed_with_errors") return "일부 실패";
+  if (run.status === "needs_review") return "검토 필요";
+  if (run.status === "canceled") return "취소";
+  return "완료";
+}
+
+function formatWorkflowRunDate(value: string | undefined | null) {
+  if (!value) return "실행 시간 없음";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "실행 시간 없음";
+  return date.toLocaleString("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function useWorkflowRunVirtualRows(count: number, activeIndex: number) {
@@ -1298,17 +1457,6 @@ function validateConnection(connection: Connection, nodes: WorkflowNode[], edges
   return null;
 }
 
-function sharedTargetConfirmation(connection: Connection, nodes: WorkflowNode[], edges: WorkflowEdge[]) {
-  if (!connection.source || !connection.target) return null;
-  const source = nodes.find((node) => node.id === connection.source);
-  const target = nodes.find((node) => node.id === connection.target);
-  if (!source || !target || source.data.kind !== "branch") return null;
-  const existingIncoming = edges.filter((edge) => edge.target === connection.target);
-  if (!existingIncoming.length) return null;
-  const incomingLabels = existingIncoming.map((edge) => edgeLabel(edge, nodes)).join(", ");
-  return `${target.data.label} 노드에는 이미 ${incomingLabels} 연결이 있습니다. 이 branch route도 같은 후속 노드로 연결할까요?`;
-}
-
 function validateWorkflow(nodes: WorkflowNode[], edges: WorkflowEdge[]) {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -1389,10 +1537,22 @@ function workflowDocumentPageSrc(page: WorkflowDocumentPage) {
   return `${API_BASE}${page.image_url}?v=${page.width}x${page.height}`;
 }
 
+function openWorkflowResultScreen(runId: string) {
+  window.location.hash = `workflow-result:${encodeURIComponent(runId)}`;
+}
+
 function formatWorkflowValue(value: unknown) {
   if (value === null || value === undefined || value === "") return "-";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+function chunkFiles<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 }
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {

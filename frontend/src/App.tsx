@@ -35,13 +35,14 @@ import type { CSSProperties, ReactNode, UIEvent } from "react";
 import { apiFetch, exchangeAccessFragment, refreshAuthSession } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 import { ModuleWorkspace } from "./ModuleWorkspace";
-import { WorkflowBuilder } from "./WorkflowBuilder";
+import { WorkflowBuilder, WorkflowRunResultWindow } from "./WorkflowBuilder";
 
 const WORKSPACE_STATE_KEY = "digitize_workspace_state_v1";
 const LEFT_PANE_PERCENT_KEY = "digitize_left_pane_percent_v1";
 const OUTPUT_FORMATS = ["string", "float", "date", "bool"] as const;
 const KIE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const KIE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
+const LARGE_UPLOAD_CHUNK_SIZE = 100;
 const BATCH_FILE_ROW_HEIGHT = 84;
 const BATCH_FILE_OVERSCAN = 8;
 const DEFAULT_MAX_BATCH_UPLOAD_FILES = 10000;
@@ -74,7 +75,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 ];
 
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
-type AppMode = "home" | "raw" | "key-info" | "classifier" | "required-checker" | "workflow";
+type AppMode = "home" | "raw" | "key-info" | "classifier" | "required-checker" | "workflow" | "workflow-result";
 type Step = "upload" | "schema" | "review";
 type ReviewFilter = "needs_review" | "all" | "warning" | "null" | "changed" | "low_confidence" | "unreviewed";
 type HistoryTab = "documents" | "schemas" | "jobs";
@@ -264,7 +265,38 @@ type HomeWorkflowRun = {
   failed_count: number;
   needs_review_count: number;
   progress: number;
+  items: { status: string }[];
   created_at: string;
+};
+
+type HomeModuleBatch = {
+  id: string;
+  status: string;
+  total_count: number;
+  completed_count: number;
+  failed_count: number;
+  canceled_count: number;
+  progress: number;
+  items: { status: string }[];
+  created_at: string;
+  completed_at: string | null;
+};
+
+type HomeMonitorTarget = "workflow" | "key-info" | "classifier" | "required-checker";
+
+type HomeMonitorItem = {
+  id: string;
+  target: HomeMonitorTarget;
+  moduleLabel: string;
+  title: string;
+  status: string;
+  progress: number;
+  totalCount: number;
+  doneCount: number;
+  runningCount: number;
+  queuedCount: number;
+  failedCount: number;
+  createdAt: string;
 };
 
 type MaintenanceClearResponse = {
@@ -381,17 +413,24 @@ const initialFields: SchemaField[] = [
 
 function modeFromLocation(): AppMode {
   const hash = window.location.hash.replace("#", "");
+  if (hash.startsWith("workflow-result:")) return "workflow-result";
   if (isAppMode(hash)) return hash;
   return "home";
 }
 
 function isAppMode(value: unknown): value is AppMode {
-  return value === "home" || value === "raw" || value === "key-info" || value === "classifier" || value === "required-checker" || value === "workflow";
+  return value === "home" || value === "raw" || value === "key-info" || value === "classifier" || value === "required-checker" || value === "workflow" || value === "workflow-result";
 }
 
 function replaceModeHash(nextMode: AppMode) {
   const hash = nextMode === "home" ? "" : `#${nextMode}`;
   window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+}
+
+function workflowResultRunIdFromLocation() {
+  const hash = window.location.hash.replace("#", "");
+  if (!hash.startsWith("workflow-result:")) return "";
+  return decodeURIComponent(hash.slice("workflow-result:".length));
 }
 
 function savePersistedWorkspaceState(state: PersistedWorkspaceState) {
@@ -613,6 +652,8 @@ export default function App() {
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [vlmSettings, setVlmSettings] = useState<VlmSettings | null>(null);
   const [homeWorkflowRuns, setHomeWorkflowRuns] = useState<HomeWorkflowRun[]>([]);
+  const [homeClassificationBatches, setHomeClassificationBatches] = useState<HomeModuleBatch[]>([]);
+  const [homeRequiredBatches, setHomeRequiredBatches] = useState<HomeModuleBatch[]>([]);
   const [vlmApiKey, setVlmApiKey] = useState("");
   const [vlmModelName, setVlmModelName] = useState("");
   const [libreOfficePath, setLibreOfficePath] = useState("/Applications/LibreOffice.app/Contents/MacOS/soffice");
@@ -663,6 +704,7 @@ export default function App() {
 
   useEffect(() => {
     if (!workspaceRestored) return;
+    if (mode === "workflow-result") return;
     savePersistedWorkspaceState({
       mode,
       step,
@@ -690,7 +732,11 @@ export default function App() {
   useEffect(() => {
     const onPopState = () => setMode(modeFromLocation());
     window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
+    window.addEventListener("hashchange", onPopState);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      window.removeEventListener("hashchange", onPopState);
+    };
   }, []);
 
   useEffect(() => {
@@ -808,6 +854,16 @@ export default function App() {
   const schemaLibraryVisible = schemaLibraryOpen && hasPreparedSchema;
   const keyInfoWorkspaceColumns = schemaLibraryVisible ? "minmax(0, 1fr) minmax(420px, 460px)" : "minmax(0, 1fr)";
   const keyInfoPaneColumns = `minmax(320px, ${leftPanePercent}%) 12px minmax(380px, 1fr)`;
+  const homeMonitorActive = useMemo(
+    () =>
+      hasRunningHomeItems([
+        ...homeWorkflowRuns,
+        ...batches,
+        ...homeClassificationBatches,
+        ...homeRequiredBatches
+      ]),
+    [homeWorkflowRuns, batches, homeClassificationBatches, homeRequiredBatches]
+  );
 
   useEffect(() => {
     if (!workspaceRestored || mode !== "key-info") return;
@@ -878,6 +934,17 @@ export default function App() {
     return () => window.clearInterval(intervalId);
   }, [batchPollingActive, shouldPollActiveBatch, activeBatchId, activeBatchItemId, job?.job_id, job?.result_id]);
 
+  useEffect(() => {
+    if (mode !== "home") return;
+    const refreshHome = () => {
+      void refreshHomeMonitor();
+      void refreshBatches();
+    };
+    refreshHome();
+    const intervalId = window.setInterval(refreshHome, homeMonitorActive ? 1800 : 6000);
+    return () => window.clearInterval(intervalId);
+  }, [mode, homeMonitorActive]);
+
   async function bootstrapWorkspace() {
     try {
       await exchangeAccessFragment();
@@ -892,7 +959,7 @@ export default function App() {
   }
 
   async function refreshAll(reloadCurrent = true) {
-    await Promise.all([refreshHistory(), refreshRawHistory(), refreshSystemStatus(), loadVlmSettings(), refreshHomeWorkflowRuns(), refreshBatches(), searchArchive()]);
+    await Promise.all([refreshHistory(), refreshRawHistory(), refreshSystemStatus(), loadVlmSettings(), refreshHomeMonitor(), refreshBatches(), searchArchive()]);
     if (reloadCurrent) {
       await refreshCurrentWorkspace();
     }
@@ -928,6 +995,7 @@ export default function App() {
   }
 
   async function restoreWorkspaceState() {
+    if (modeFromLocation() === "workflow-result") return;
     const saved = readPersistedWorkspaceState();
     if (!saved) return;
     const savedMode = isAppMode(saved.mode) ? saved.mode : modeFromLocation();
@@ -1019,12 +1087,15 @@ export default function App() {
     }
   }
 
-  async function refreshHomeWorkflowRuns() {
-    try {
-      setHomeWorkflowRuns(await api<HomeWorkflowRun[]>("/api/workflow-runs?limit=3"));
-    } catch {
-      setHomeWorkflowRuns([]);
-    }
+  async function refreshHomeMonitor() {
+    const [workflowRuns, classificationBatches, requiredBatches] = await Promise.all([
+      safeApiList<HomeWorkflowRun>("/api/workflow-runs?limit=6"),
+      safeApiList<HomeModuleBatch>("/api/classification-batches?limit=6"),
+      safeApiList<HomeModuleBatch>("/api/required-field-check-batches?limit=6")
+    ]);
+    setHomeWorkflowRuns(workflowRuns);
+    setHomeClassificationBatches(classificationBatches);
+    setHomeRequiredBatches(requiredBatches);
   }
 
   async function loadVlmSettings() {
@@ -1918,15 +1989,29 @@ export default function App() {
         }
         selectedSchema = saved;
       }
-      const form = new FormData();
-      form.append("schema_id", selectedSchema.id);
-      batchFiles.forEach((file) => form.append("files", file));
-      const batch = await api<Batch>("/api/batches", { method: "POST", body: form });
-      setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 12));
+      const createdBatches: Batch[] = [];
+      let uploadedCount = 0;
+      for (const chunk of chunkFiles(batchFiles, LARGE_UPLOAD_CHUNK_SIZE)) {
+        setBusy(`${uploadedCount.toLocaleString()} / ${batchFiles.length.toLocaleString()} 문서 업로드 중`);
+        const form = new FormData();
+        form.append("schema_id", selectedSchema.id);
+        chunk.forEach((file) => form.append("files", file));
+        const batch = await api<Batch>("/api/batches", { method: "POST", body: form });
+        uploadedCount += chunk.length;
+        createdBatches.push(batch);
+        setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 12));
+        setBusy(`${uploadedCount.toLocaleString()} / ${batchFiles.length.toLocaleString()} 문서 업로드 중`);
+      }
+      const batch = createdBatches[0];
+      if (!batch) throw new Error("배치 작업을 생성하지 못했습니다.");
       setActiveBatchId(batch.id);
       setActiveBatchItemId(batch.items[0]?.id ?? null);
       setBatchFiles([]);
-      setBatchMessage(`${batch.total_count}개 파일의 배치 추출을 시작했습니다. 좌측 파일 목록에서 항목을 선택해 결과를 확인하세요.`);
+      setBatchMessage(
+        createdBatches.length > 1
+          ? `${batchFiles.length.toLocaleString()}개 파일을 ${createdBatches.length.toLocaleString()}개 배치로 나누어 시작했습니다.`
+          : `${batch.total_count}개 파일의 배치 추출을 시작했습니다. 좌측 파일 목록에서 항목을 선택해 결과를 확인하세요.`
+      );
       if (batch.items[0]) {
         await openBatchItem(batch.id, batch.items[0].id, batch);
       } else {
@@ -2004,6 +2089,7 @@ export default function App() {
     if (currentMode === "classifier") return "문서 분류";
     if (currentMode === "required-checker") return "필수 항목 확인";
     if (currentMode === "workflow") return "워크플로우 빌더";
+    if (currentMode === "workflow-result") return "워크플로우 실행 결과";
     return "핵심 정보 추출";
   }
 
@@ -2115,9 +2201,16 @@ export default function App() {
           onClassifier={() => navigateMode("classifier")}
           onRequiredChecker={() => navigateMode("required-checker")}
           onWorkflow={() => navigateMode("workflow")}
+          onRefreshMonitor={() => {
+            void refreshHomeMonitor();
+            void refreshBatches();
+          }}
           systemStatus={systemStatus}
           vlmSettings={vlmSettings}
           workflowRuns={homeWorkflowRuns}
+          kieBatches={batches}
+          classificationBatches={homeClassificationBatches}
+          requiredBatches={homeRequiredBatches}
         />
       ) : mode === "raw" ? (
         <RawWorkspace
@@ -2148,6 +2241,8 @@ export default function App() {
           onCreateClassifier={() => navigateMode("classifier")}
           onCreateChecklist={() => navigateMode("required-checker")}
         />
+      ) : mode === "workflow-result" ? (
+        <WorkflowRunResultWindow runId={workflowResultRunIdFromLocation()} />
       ) : (
         <main
           className="workspace"
@@ -2533,14 +2628,26 @@ function HomeScreen(props: {
   onClassifier: () => void;
   onRequiredChecker: () => void;
   onWorkflow: () => void;
+  onRefreshMonitor: () => void;
   systemStatus: SystemStatus | null;
   vlmSettings: VlmSettings | null;
   workflowRuns: HomeWorkflowRun[];
+  kieBatches: Batch[];
+  classificationBatches: HomeModuleBatch[];
+  requiredBatches: HomeModuleBatch[];
 }) {
+  const monitorItems = buildHomeMonitorItems(
+    props.workflowRuns,
+    props.kieBatches,
+    props.classificationBatches,
+    props.requiredBatches
+  );
+  const activeMonitorCount = monitorItems.filter((item) => isActiveHomeStatus(item.status)).length;
+
   return (
     <main className="home-screen">
       <section className="home-hero home-hero-workflow">
-        <div>
+        <div className="home-hero-copy">
           <p className="eyebrow">작업 공간</p>
           <h2>문서 검수를 한 번에 자동화하세요</h2>
           <p>분류, 필수 항목 확인, 핵심 정보 추출, export를 하나의 워크플로우로 연결합니다.</p>
@@ -2550,24 +2657,29 @@ function HomeScreen(props: {
               워크플로우 빌더 열기
             </button>
           </div>
+          <div className="home-value-panel home-value-strip" aria-label="핵심 가치">
+            <div className="home-value-card">
+              <span>01</span>
+              <strong>반복 분류 감소</strong>
+              <p>문서 class 후보를 정해두고 접수 문서를 같은 기준으로 나눕니다.</p>
+            </div>
+            <div className="home-value-card">
+              <span>02</span>
+              <strong>누락 검수 빠르게</strong>
+              <p>서명, 날짜, 체크박스처럼 빠지면 안 되는 항목을 먼저 확인합니다.</p>
+            </div>
+            <div className="home-value-card">
+              <span>03</span>
+              <strong>검수 결과 export</strong>
+              <p>문서 이미지와 결과 table을 검수한 뒤 CSV/JSON으로 내보냅니다.</p>
+            </div>
+          </div>
         </div>
-        <div className="home-value-panel" aria-label="핵심 가치">
-          <div className="home-value-card">
-            <span>01</span>
-            <strong>반복 분류 감소</strong>
-            <p>문서 class 후보를 정해두고 접수 문서를 같은 기준으로 나눕니다.</p>
-          </div>
-          <div className="home-value-card">
-            <span>02</span>
-            <strong>누락 검수 빠르게</strong>
-            <p>서명, 날짜, 체크박스처럼 빠지면 안 되는 항목을 먼저 확인합니다.</p>
-          </div>
-          <div className="home-value-card">
-            <span>03</span>
-            <strong>검수 결과 export</strong>
-            <p>문서 이미지와 결과 table을 검수한 뒤 CSV/JSON으로 내보냅니다.</p>
-          </div>
-        </div>
+        <HomeMonitorPanel
+          activeCount={activeMonitorCount}
+          items={monitorItems}
+          onRefresh={props.onRefreshMonitor}
+        />
       </section>
       <div className="home-section-title">
         <p className="eyebrow">핵심 기능</p>
@@ -2625,6 +2737,135 @@ function HomeScreen(props: {
       </section>
     </main>
   );
+}
+
+function HomeMonitorPanel(props: {
+  activeCount: number;
+  items: HomeMonitorItem[];
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="home-monitor-panel" aria-label="진행 현황">
+      <div className="home-monitor-head">
+        <div>
+          <p className="eyebrow">진행 현황</p>
+          <h3>{props.activeCount ? `진행 중인 작업 ${props.activeCount}개` : "최근 작업"}</h3>
+        </div>
+        <button type="button" className="secondary compact" onClick={props.onRefresh}>
+          <RefreshCw size={14} /> 갱신
+        </button>
+      </div>
+      {props.items.length ? (
+        <div className="home-monitor-list">
+          {props.items.map((item) => (
+            <div
+              key={`${item.target}-${item.id}`}
+              className={`home-monitor-row ${isActiveHomeStatus(item.status) ? "active" : ""}`}
+            >
+              <div className="home-monitor-main">
+                <span className="home-monitor-module">{item.moduleLabel}</span>
+                <strong>{item.title}</strong>
+                <small>
+                  {item.doneCount.toLocaleString()} / {item.totalCount.toLocaleString()} 처리
+                  {item.runningCount ? ` · ${item.runningCount.toLocaleString()} 실행 중` : ""}
+                  {item.queuedCount ? ` · ${item.queuedCount.toLocaleString()} 대기` : ""}
+                  {item.failedCount ? ` · ${item.failedCount.toLocaleString()} 실패` : ""}
+                </small>
+                <div className="home-monitor-progress" aria-label={`${Math.round(item.progress * 100)}%`}>
+                  <div>
+                    <span style={{ width: `${Math.round(item.progress * 100)}%` }} />
+                  </div>
+                  <strong>{Math.round(item.progress * 100)}%</strong>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="home-monitor-empty">
+          <strong>실행 중인 작업이 없습니다.</strong>
+          <span>배치를 시작하면 이곳에서 진행률을 확인할 수 있습니다.</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function buildHomeMonitorItems(
+  workflowRuns: HomeWorkflowRun[],
+  kieBatches: Batch[],
+  classificationBatches: HomeModuleBatch[],
+  requiredBatches: HomeModuleBatch[]
+) {
+  const workflowItems: HomeMonitorItem[] = workflowRuns.map((run) => ({
+    id: run.id,
+    target: "workflow",
+    moduleLabel: "워크플로우",
+    title: "워크플로우 실행",
+    status: run.status,
+    progress: progressFromCounts(run.items, run.total_count, run.progress),
+    totalCount: run.total_count,
+    doneCount: terminalItemCount(run.items, run.total_count),
+    runningCount: run.items.filter((item) => item.status === "running").length,
+    queuedCount: run.items.filter((item) => item.status === "queued").length,
+    failedCount: run.failed_count,
+    createdAt: run.created_at
+  }));
+
+  const moduleItems = [
+    ...kieBatches.map((batch) => homeBatchToMonitorItem(batch, "key-info", "핵심 정보 추출")),
+    ...classificationBatches.map((batch) => homeBatchToMonitorItem(batch, "classifier", "문서 분류")),
+    ...requiredBatches.map((batch) => homeBatchToMonitorItem(batch, "required-checker", "필수 항목 확인"))
+  ];
+
+  const items = [...workflowItems, ...moduleItems].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const activeItems = items.filter((item) => isActiveHomeStatus(item.status));
+  const recentItems = items.filter((item) => !isActiveHomeStatus(item.status));
+  return [...activeItems, ...recentItems].slice(0, 5);
+}
+
+function homeBatchToMonitorItem(batch: HomeModuleBatch | Batch, target: HomeMonitorTarget, moduleLabel: string): HomeMonitorItem {
+  const runningCount = batch.items.filter((item) => item.status === "running").length;
+  const queuedCount = batch.items.filter((item) => item.status === "queued").length;
+  const doneCount = terminalItemCount(batch.items, batch.total_count);
+  return {
+    id: batch.id,
+    target,
+    moduleLabel,
+    title: `${moduleLabel} 배치`,
+    status: batch.status,
+    progress: progressFromCounts(batch.items, batch.total_count, batch.progress),
+    totalCount: batch.total_count,
+    doneCount,
+    runningCount,
+    queuedCount,
+    failedCount: batch.failed_count,
+    createdAt: batch.created_at
+  };
+}
+
+function hasRunningHomeItems(items: { status: string }[]) {
+  return items.some((item) => isActiveHomeStatus(item.status));
+}
+
+function isActiveHomeStatus(status: string) {
+  return ["queued", "running", "cancel_requested", "canceling"].includes(status);
+}
+
+function terminalItemCount(items: { status: string }[], totalCount: number) {
+  const count = items.filter((item) => ["completed", "completed_with_errors", "needs_review", "failed", "canceled"].includes(item.status)).length;
+  return Math.min(Math.max(0, count), Math.max(0, totalCount));
+}
+
+function progressFromCounts(items: { status: string }[], totalCount: number, fallbackProgress: number) {
+  const total = Math.max(0, totalCount);
+  if (total > 0 && items.length) return clampProgress(terminalItemCount(items, total) / total);
+  return clampProgress(fallbackProgress);
+}
+
+function clampProgress(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
 }
 
 function RawWorkspace(props: {
@@ -4752,6 +4993,22 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(message);
   }
   return response.json() as Promise<T>;
+}
+
+async function safeApiList<T>(path: string): Promise<T[]> {
+  try {
+    return await api<T[]>(path);
+  } catch {
+    return [];
+  }
+}
+
+function chunkFiles<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 }
 
 async function pollJob(jobId: string): Promise<ExtractionJob> {

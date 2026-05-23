@@ -743,6 +743,10 @@ class WorkflowRunRead(BaseModel):
     completed_at: datetime | None
 
 
+class WorkflowRunInitRequest(BaseModel):
+    total_count: int = Field(ge=1)
+
+
 class ArchiveSearchResult(BaseModel):
     document_id: str
     filename: str

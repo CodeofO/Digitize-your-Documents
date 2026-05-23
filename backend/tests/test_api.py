@@ -423,6 +423,31 @@ def test_vlm_errors_have_stable_codes_and_redact_secrets(monkeypatch) -> None:
         get_settings.cache_clear()
 
 
+def test_vlm_provider_request_retries_transient_broken_pipe(monkeypatch) -> None:
+    from app import vlm as vlm_module
+    from app.vlm import VlmRuntimeError, _invoke_vlm_with_limit
+
+    calls = 0
+
+    def fake_invoke(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise VlmRuntimeError("VLM_PROVIDER_REQUEST_FAILED", "Google GenAI VLM request failed: [Errno 32] Broken pipe")
+        return {"ok": True}
+
+    try:
+        monkeypatch.setenv("VLM_MAX_RETRIES", "2")
+        get_settings.cache_clear()
+        monkeypatch.setattr(vlm_module.time, "sleep", lambda _delay: None)
+        monkeypatch.setattr(vlm_module, "_invoke_structured_llm", fake_invoke)
+
+        assert _invoke_vlm_with_limit("system", "prompt", [], {}, "google_genai") == {"ok": True}
+        assert calls == 2
+    finally:
+        get_settings.cache_clear()
+
+
 def test_google_generation_config_uses_structured_output_and_thinking_level(monkeypatch) -> None:
     from app.vlm import _build_google_generation_config
 

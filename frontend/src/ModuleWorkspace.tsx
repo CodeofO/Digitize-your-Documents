@@ -185,6 +185,7 @@ type ModuleWorkspaceProps = {
 
 const evidenceTypes = ["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"] as const;
 const customEvidenceTypeValue = "__custom_evidence_type__";
+const LARGE_UPLOAD_CHUNK_SIZE = 100;
 const evidenceTypeLabels: Record<string, string> = {
   text_or_handwriting: "문자/손글씨",
   checkbox: "체크박스",
@@ -451,17 +452,31 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, on
   }
 
   async function runBatch(configId: string) {
-    const form = new FormData();
-    form.append(isClassifier ? "classifier_id" : "checklist_id", configId);
-    selectedFiles.forEach((file) => form.append("files", file));
     const path = isClassifier ? "/api/classification-batches" : "/api/required-field-check-batches";
-    const batch = await api<ModuleBatch>(path, { method: "POST", body: form });
-    setBatches((items) => [batch, ...items.filter((item) => item.id !== batch.id)].slice(0, 12));
+    const createdBatches: ModuleBatch[] = [];
+    let uploadedCount = 0;
+    for (const chunk of chunkFiles(selectedFiles, LARGE_UPLOAD_CHUNK_SIZE)) {
+      setBusy(`${uploadedCount.toLocaleString()} / ${selectedFiles.length.toLocaleString()} 문서 업로드 중`);
+      const form = new FormData();
+      form.append(isClassifier ? "classifier_id" : "checklist_id", configId);
+      chunk.forEach((file) => form.append("files", file));
+      const batch = await api<ModuleBatch>(path, { method: "POST", body: form });
+      uploadedCount += chunk.length;
+      createdBatches.push(batch);
+      setBatches((items) => [batch, ...items.filter((item) => item.id !== batch.id)].slice(0, 12));
+      setBusy(`${uploadedCount.toLocaleString()} / ${selectedFiles.length.toLocaleString()} 문서 업로드 중`);
+    }
+    const batch = createdBatches[0];
+    if (!batch) throw new Error("배치 작업을 생성하지 못했습니다.");
     setActiveBatchId(batch.id);
     setActiveBatchItemId(batch.items[0]?.id ?? null);
     setSelectedFiles([]);
     setSelectedFileIndex(0);
-    setMessage(`${batch.total_count}개 파일의 배치 작업을 시작했습니다.`);
+    setMessage(
+      createdBatches.length > 1
+        ? `${selectedFiles.length.toLocaleString()}개 파일을 ${createdBatches.length.toLocaleString()}개 배치로 나누어 시작했습니다.`
+        : `${batch.total_count}개 파일의 배치 작업을 시작했습니다.`
+    );
     if (batch.items[0]) await openBatchItem(batch.items[0]);
   }
 
@@ -1335,6 +1350,14 @@ async function uploadDocument(file: File): Promise<UploadedDocument> {
   const form = new FormData();
   form.append("file", file);
   return api<UploadedDocument>("/api/documents", { method: "POST", body: form });
+}
+
+function chunkFiles<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 }
 
 async function pollJob<T>(path: string): Promise<ModuleJob<T>> {

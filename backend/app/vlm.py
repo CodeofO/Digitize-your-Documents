@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import json
 import mimetypes
 import threading
+import time
 from typing import Any
 
 from app.config import get_settings
@@ -110,8 +111,44 @@ def _invoke_vlm_with_limit(
     output_schema: dict[str, Any],
     api_style: str,
 ) -> dict[str, Any]:
-    with _vlm_request_slot():
-        return _invoke_structured_llm(system_prompt, prompt, image_inputs, output_schema, api_style)
+    max_attempts = max(1, get_settings().vlm_max_retries + 1)
+    for attempt in range(max_attempts):
+        try:
+            with _vlm_request_slot():
+                return _invoke_structured_llm(system_prompt, prompt, image_inputs, output_schema, api_style)
+        except VlmRuntimeError as exc:
+            if attempt >= max_attempts - 1 or not _is_retryable_vlm_error(exc):
+                raise
+            time.sleep(_vlm_retry_delay_seconds(attempt))
+    raise VlmRuntimeError("VLM_PROVIDER_REQUEST_FAILED", "VLM request failed after retries.")
+
+
+def _is_retryable_vlm_error(exc: VlmRuntimeError) -> bool:
+    if exc.code != "VLM_PROVIDER_REQUEST_FAILED":
+        return False
+    text = f"{exc.message} {exc.hint or ''}".lower()
+    retryable_fragments = (
+        "broken pipe",
+        "connection",
+        "connection reset",
+        "connection aborted",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "unavailable",
+        "rate limit",
+        "resource exhausted",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+    )
+    return any(fragment in text for fragment in retryable_fragments)
+
+
+def _vlm_retry_delay_seconds(attempt: int) -> float:
+    return min(4.0, 0.5 * (2 ** attempt))
 
 
 def format_vlm_exception(exc: Exception) -> str:
