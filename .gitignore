@@ -1,79 +1,22 @@
 # Ignore everything by default.
 *
 
-# Local/runtime/generated files remain ignored by default.
-*.html
-*.env
-.env
-.venv/
-.uv-cache/
-__pycache__/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.hypothesis/
-*.pyc
-.DS_Store
-*.log
-*.tmp
-*.bak
-.coverage
-coverage/
-htmlcov/
-playwright-report/
-test-results/
-api_key_memo.txt
-sample/
-docs/
-DESIGN_STYLE.local.md
-
-# Python/runtime data.
-backend/*.db*
-backend/*.sqlite*
-backend/*.sqlite3*
-backend/storage/
-backend/backend/
-
-# Frontend build/dependency outputs.
-frontend/node_modules/
-frontend/dist/
-frontend/coverage/
-frontend/.vite/
-frontend/*.tsbuildinfo
-frontend/vite.config.d.ts
-frontend/vite.config.js
-
-# Keep only project essentials.
+# Repository entrypoints.
 !.gitignore
 !README.md
-!DEVELOPMENT_DEFINITION.md
-!ERROR_NOTE.md
-!sync_raw_to_pdf.py
 !docker-compose.hosting.example.yml
 
-# Keep curated docs.
-!docs/
-docs/*
-!docs/toss-design-benchmark.md
-!docs/deployment.md
-
-# Keep selected README assets.
-!assets/
-assets/*
-!assets/readme_overview.png
-!assets/vlm_runtime_overview.png
-
-# Keep scripts.
-!scripts/
-scripts/*
-!scripts/run_dev.sh
-
-# Keep backend package, app, and tests.
+# Runtime examples.
 !backend/
 backend/*
+!backend/.env.production.example
+!frontend/
+frontend/*
+!frontend/.env.production.example
+
+# Backend source.
 !backend/pyproject.toml
 !backend/Dockerfile
-!backend/.env.production.example
 !backend/alembic.ini
 !backend/alembic/
 backend/alembic/*
@@ -88,10 +31,7 @@ backend/app/*
 backend/tests/*
 !backend/tests/*.py
 
-# Keep frontend source and build config.
-!frontend/
-frontend/*
-!frontend/.env.production.example
+# Frontend source.
 !frontend/index.html
 !frontend/package.json
 !frontend/package-lock.json
@@ -106,6 +46,54 @@ frontend/public/sample/*
 !frontend/public/sample/bank_00070.jpg
 !frontend/src/
 frontend/src/*
-!frontend/src/*.tsx
 !frontend/src/*.ts
+!frontend/src/*.tsx
 !frontend/src/*.css
+
+# Operator documentation and final README media.
+!docs/
+docs/*
+!docs/deployment.md
+!assets/
+assets/*
+!assets/readme/
+assets/readme/*
+!assets/readme/*.png
+
+# Runnable scripts.
+!scripts/
+scripts/*
+!scripts/run_dev.sh
+!scripts/start_hosting_demo.sh
+!scripts/stop_hosting_demo.sh
+
+# Always ignored local outputs.
+.env
+*.env
+.venv/
+.uv-cache/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+*.pyc
+*.pyo
+*.log
+*.tmp
+*.bak
+.DS_Store
+.coverage
+coverage/
+htmlcov/
+playwright-report/
+test-results/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/*.tsbuildinfo
+backend/*.db*
+backend/*.sqlite*
+backend/*.sqlite3*
+backend/storage/

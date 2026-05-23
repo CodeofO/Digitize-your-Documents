@@ -247,11 +247,6 @@ textarea {
   border-color: #f0b29a;
 }
 
-.worker-pill {
-  background: var(--tds-gray-100);
-  color: var(--tds-gray-700);
-}
-
 .workflow-builder {
   display: grid;
   flex: 1;

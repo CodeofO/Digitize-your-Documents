@@ -2024,7 +2024,6 @@ export default function App() {
         </div>
         <div className="status-strip">
           <ProviderPill status={systemStatus} />
-          <WorkerPill workers={vlmSettings?.batch_max_workers} />
           {mode !== "home" && (
             <button type="button" className="secondary compact" onClick={() => navigateMode("home")}>
               홈
@@ -4672,10 +4671,6 @@ function ProviderPill({ status }: { status: SystemStatus | null }) {
       VLM · {detail}
     </span>
   );
-}
-
-function WorkerPill({ workers }: { workers?: number }) {
-  return <span className="provider-pill worker-pill">Workers · {workers ?? "-"}</span>;
 }
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
