@@ -156,7 +156,7 @@ const TERMINAL_RUN_STATUSES = ["completed", "completed_with_errors", "needs_revi
 const UNKNOWN_BRANCH_KEY = "unknown";
 
 const nodePalette: { kind: WorkflowNodeKind; label: string; description: string }[] = [
-  { kind: "input", label: "문서 입력", description: "단일/배치 문서를 자동 판단합니다." },
+  { kind: "input", label: "문서 입력", description: "처리할 문서를 워크플로우에 전달합니다." },
   { kind: "classifier", label: "문서 분류", description: "결과는 정의한 class 또는 unknown입니다." },
   { kind: "branch", label: "분기", description: "분류 class별 경로를 나눕니다." },
   { kind: "kie", label: "핵심 정보 추출", description: "저장된 schema로 값을 추출합니다." },
@@ -224,7 +224,6 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
   const selectedRunItem =
     activeRun?.items.find((item) => item.id === selectedItemId) ?? activeRun?.items[0] ?? null;
   const validation = useMemo(() => validateWorkflow(nodes, edges), [nodes, edges]);
-  const uploadMode = files.length > 1 ? "배치 실행" : files.length === 1 ? "단일 실행" : "파일 없음";
   const isRunningRun = Boolean(activeRun && !TERMINAL_RUN_STATUSES.includes(activeRun.status));
   const runButtonTitle = validation.errors.length
     ? `실행할 수 없습니다: ${validation.errors[0]}`
@@ -441,7 +440,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
       setSelectedDocument(null);
       setActiveDocumentPage(0);
       setResultsOverlayOpen(false);
-      setMessage(`${uploadMode}을 시작했습니다. 실행 전에 워크플로우를 저장했습니다.`);
+      setMessage("워크플로우 실행을 시작했습니다. 실행 전에 워크플로우를 저장했습니다.");
       void refreshRun(run.id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 실행에 실패했습니다.");
@@ -609,7 +608,7 @@ export function WorkflowBuilder({ onCreateSchema, onCreateClassifier, onCreateCh
           <div className="workflow-run-bar">
             <label className={`workflow-upload ${isStartingRun || isRunningRun ? "disabled" : ""}`}>
               <UploadCloud size={17} />
-              <span>{files.length ? `${files.length}개 파일 선택됨 · ${uploadMode}` : "문서 업로드"}</span>
+              <span>{files.length ? `${files.length}개 파일 선택됨` : "문서 업로드"}</span>
               <input type="file" multiple accept={WORKFLOW_FILE_ACCEPT} onChange={onFileInput} disabled={isStartingRun || isRunningRun} />
             </label>
             <button

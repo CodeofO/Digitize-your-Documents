@@ -219,7 +219,6 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
   const regions = isClassifier ? [] : checklistDraft.regions;
   const currentJob = isClassifier ? classificationJob : requiredJob;
   const terminalBatch = activeBatch ? ["completed", "completed_with_errors", "failed", "canceled"].includes(activeBatch.status) : true;
-  const selectedSummary = selectedFiles.length === 1 ? "단일 실행" : selectedFiles.length > 1 ? "배치 실행" : "파일 없음";
   const [selectedPreviewUrl, setSelectedPreviewUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -487,7 +486,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     setSelectedFiles(supported);
     setSelectedFileIndex(0);
-    setMessage(supported.length ? `${supported.length}개 파일 선택됨 · ${supported.length === 1 ? "단일 실행" : "배치 실행"}` : null);
+    setMessage(supported.length ? `${supported.length}개 파일을 선택했습니다.` : null);
   }
 
   function onDrop(event: DragEvent<HTMLElement>) {
@@ -522,7 +521,6 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
         <section className="document-pane module-document-pane">
           <ModuleUploadHeader
             title={document?.filename ?? selectedFile?.name ?? title}
-            selectedSummary={selectedSummary}
             selectedCount={selectedFiles.length}
             onRun={() => void run()}
             runDisabled={Boolean(busy) || (!selectedFiles.length && !document)}
@@ -554,7 +552,6 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
               selectedFile={selectedFile}
               selectedFileIndex={selectedFileIndex}
               selectedPreviewUrl={selectedPreviewUrl}
-              selectedSummary={selectedSummary}
               onSelectFiles={selectFiles}
               onSelectIndex={setSelectedFileIndex}
               onDrop={onDrop}
@@ -601,7 +598,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
               </button>
               <button type="button" className="primary" disabled={Boolean(busy) || (!selectedFiles.length && !document)} onClick={() => void run()}>
                 <Play size={16} />
-                {selectedFiles.length > 1 ? "배치 실행" : "실행"}
+                실행
               </button>
             </div>
           </section>
@@ -661,7 +658,6 @@ export function ModuleWorkspace({ kind, leftPanePercent, onResize }: ModuleWorks
 
 function ModuleUploadHeader(props: {
   title: string;
-  selectedSummary: string;
   selectedCount: number;
   runDisabled: boolean;
   onRun: () => void;
@@ -672,7 +668,7 @@ function ModuleUploadHeader(props: {
       <div>
         <p className="eyebrow">문서</p>
         <h2>{props.title}</h2>
-        <small>{props.selectedCount ? `${props.selectedCount}개 선택됨 · ${props.selectedSummary}` : "파일 1개는 단일 실행, 2개 이상은 배치 실행"}</small>
+        <small>{props.selectedCount ? `${props.selectedCount}개 파일 선택됨` : "파일 또는 폴더를 선택하세요"}</small>
       </div>
       <div className="toolbar">
         <button type="button" className="primary" disabled={props.runDisabled} onClick={props.onRun}>
@@ -693,7 +689,6 @@ function ModuleUploadDropzone(props: {
   selectedFile: File | null;
   selectedFileIndex: number;
   selectedPreviewUrl: string | null;
-  selectedSummary: string;
   onSelectFiles: (files: FileList | File[] | null) => void;
   onSelectIndex: (index: number) => void;
   onDrop: (event: DragEvent<HTMLElement>) => void;
@@ -709,7 +704,7 @@ function ModuleUploadDropzone(props: {
           <aside className="module-selected-list">
             <div className="module-selected-summary">
               <strong>{props.selectedFiles.length}개 파일</strong>
-              <span>{props.selectedSummary}</span>
+              <span>실행 대기</span>
             </div>
             {props.selectedFiles.map((file, index) => (
               <button key={`${file.name}_${index}`} className={index === props.selectedFileIndex ? "active" : ""} onClick={() => props.onSelectIndex(index)}>
@@ -726,7 +721,7 @@ function ModuleUploadDropzone(props: {
           <div className="sample-upload-cta">
             <UploadCloud size={34} />
             <strong>파일 또는 폴더를 업로드하세요</strong>
-            <span>PDF, 이미지, DOCX, PPTX · 자동으로 단일/배치를 판단합니다.</span>
+            <span>PDF, 이미지, DOCX, PPTX를 업로드할 수 있습니다.</span>
           </div>
           <div className="module-upload-actions">
             <label className="batch-upload">
@@ -752,7 +747,6 @@ function SampleUploadPreview() {
       <img src="/sample/bank_00070.jpg" alt="샘플 신청서 문서" />
       <div>
         <span>샘플 문서</span>
-        <strong>bank_00070.jpg</strong>
       </div>
     </div>
   );

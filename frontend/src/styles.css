@@ -1460,6 +1460,19 @@ textarea {
   min-height: 0;
 }
 
+.kie-module-upload-zone {
+  margin: 14px;
+}
+
+.kie-module-upload-zone .module-upload-actions,
+.kie-upload-schema-inline {
+  width: min(520px, 100%);
+}
+
+.kie-draft-layout {
+  grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
+}
+
 .kie-upload-grid,
 .unified-upload-layout {
   display: grid;
@@ -3798,10 +3811,10 @@ pre {
 }
 
 .result-head {
-  background: #eef3ef;
-  color: #4d5c55;
+  background: var(--tds-gray-100);
+  color: var(--tds-gray-600);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 800;
 }
 
 .result-row {

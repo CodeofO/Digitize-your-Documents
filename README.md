@@ -48,7 +48,7 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 ![Workflow Builder result view](assets/readme/workflow-builder-results.png)
 
 - React Flow 캔버스에서 문서 처리 모듈을 연결합니다.
-- 파일 1개는 단일 실행, 2개 이상은 batch 실행으로 처리합니다.
+- 업로드한 문서를 workflow run으로 처리합니다.
 - 분류 결과에 따라 class별 schema/checklist 경로를 나눌 수 있습니다.
 - 실행 상태는 캔버스 위 progress로 표시하고, 결과는 overlay에서 문서 이미지와 함께 검수합니다.
 - 결과는 CSV 또는 JSON으로 export합니다.

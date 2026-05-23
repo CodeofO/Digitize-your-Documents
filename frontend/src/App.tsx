@@ -736,7 +736,7 @@ export default function App() {
   const rawPdfUrl = useMemo(() => (rawExtraction?.pdf_url ? `${API_BASE}${rawExtraction.pdf_url}` : null), [rawExtraction]);
   const rawHtmlUrl = useMemo(() => (rawExtraction?.html_url ? `${API_BASE}${rawExtraction.html_url}` : null), [rawExtraction]);
   const selectedDraftFile = batchFiles[draftBatchIndex] ?? batchFiles[0] ?? null;
-  const selectedDraftUrl = useObjectUrl(selectedDraftFile && isImageFile(selectedDraftFile) ? selectedDraftFile : null);
+  const selectedDraftUrl = useObjectUrl(selectedDraftFile ?? null);
   const draftRegionTarget = useMemo<RegionEditorTarget | null>(() => {
     if (!selectedDraftFile || !selectedDraftUrl || !isImageFile(selectedDraftFile)) return null;
     return {
@@ -1848,16 +1848,25 @@ export default function App() {
       setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
       return;
     }
-    if (supported.length === 1) {
-      setBatchFiles([]);
-      setDraftBatchIndex(0);
-      setBatchMessage(null);
-      void uploadFile(supported[0]);
-      return;
-    }
     setBatchFiles(supported);
     setDraftBatchIndex(0);
     setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
+  }
+
+  async function runKieUploadSelection() {
+    if (!batchFiles.length) {
+      setBatchMessage("실행할 파일이나 폴더를 선택하세요.");
+      return;
+    }
+    if (batchFiles.length === 1) {
+      const [file] = batchFiles;
+      setBatchFiles([]);
+      setDraftBatchIndex(0);
+      setBatchMessage(null);
+      await uploadFile(file);
+      return;
+    }
+    await runBatchUpload();
   }
 
   async function runBatchUpload() {
@@ -2140,7 +2149,7 @@ export default function App() {
                   setDraftBatchIndex(0);
                   setBatchMessage(null);
                 }}
-                onRunBatch={() => void runBatchUpload()}
+                onRunBatch={() => void runKieUploadSelection()}
               />
             ) : (
               <div className={activeBatch ? "document-workbench batch-active" : "document-workbench"}>
@@ -2750,6 +2759,7 @@ function KieUploadPanel(props: {
 }) {
   const selectedFile = props.selectedFiles[props.selectedFileIndex] ?? props.selectedFiles[0] ?? null;
   const selectedUrl = props.selectedFileUrl;
+  const canRun = props.selectedFiles.length === 1 || (props.selectedFiles.length > 1 && props.activeSchemaReady);
 
   async function onUnifiedDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
@@ -2761,115 +2771,40 @@ function KieUploadPanel(props: {
     event.currentTarget.value = "";
   }
 
-  function renderBatchControls() {
+  function renderSchemaCard() {
     return (
-      <>
-        <div className={props.activeSchemaReady ? "active-schema-card ready" : "active-schema-card warning"}>
-          <div>
-            <span>활성 schema</span>
-            <strong>{props.activeSchemaName}</strong>
-          </div>
-          <p>
-            {props.activeSchemaFieldCount}개 필드 · {props.activeSchemaRegionCount}개 영역 · {props.activeSchemaStatus}
-          </p>
-          {props.activeSchemaMessage && <small>{props.activeSchemaMessage}</small>}
+      <div className={props.activeSchemaReady ? "active-schema-card ready" : "active-schema-card warning"}>
+        <div>
+          <span>활성 schema</span>
+          <strong>{props.activeSchemaName}</strong>
         </div>
-
-        <div className="file-picker-grid">
-          <label className="batch-upload">
-            <FileUp size={16} />
-            <span>파일 선택</span>
-            <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
-          </label>
-          <label className="batch-upload">
-            <UploadCloud size={16} />
-            <span>폴더 선택</span>
-            <input
-              type="file"
-              accept={KIE_FILE_ACCEPT}
-              multiple
-              onChange={onUnifiedFileChange}
-              {...{ webkitdirectory: "", directory: "" }}
-            />
-          </label>
-        </div>
-
-        {props.message && <div className="success-card">{props.message}</div>}
-
-        <button className="primary run-batch-button" disabled={!props.activeSchemaReady || !props.selectedFiles.length} onClick={props.onRunBatch}>
-          <Play size={16} />
-          배치 실행
-        </button>
-      </>
+        <p>
+          {props.activeSchemaFieldCount}개 필드 · {props.activeSchemaRegionCount}개 영역 · {props.activeSchemaStatus}
+        </p>
+        {props.activeSchemaMessage && <small>{props.activeSchemaMessage}</small>}
+      </div>
     );
   }
 
-  if (props.selectedFiles.length > 0) {
+  function renderFilePickers() {
     return (
-      <div className="kie-upload-panel" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
-        <div className="pane-header">
-          <div>
-            <p className="eyebrow">배치 초안</p>
-            <h2>{props.selectedFiles.length}개 파일 선택됨</h2>
-          </div>
-          <button type="button" className="secondary compact" onClick={props.onClearFiles}>
-            <X size={16} />
-            비우기
-          </button>
-        </div>
-
-        <section className="batch-main-upload draft-controls draft-controls-horizontal">
-          <div className="batch-intro">
-            <strong>배치 업로드</strong>
-            <p>우측에서 활성화된 schema를 기준으로 선택한 파일을 한 번에 추출합니다.</p>
-          </div>
-          <div className="draft-region-actions">
-            <button
-              type="button"
-              className={props.showRegions ? "secondary compact active-tool" : "secondary compact"}
-              disabled={!props.regions.length}
-              onClick={() => props.onShowRegions(!props.showRegions)}
-              title={props.regions.length ? "선택한 이미지 위에 schema 영역을 표시합니다." : "저장된 영역이 없습니다."}
-            >
-              <PanelLeft size={14} />
-              {props.showRegions ? "영역 숨기기" : "영역 보기"}
-            </button>
-          </div>
-          {renderBatchControls()}
-        </section>
-
-        <div className="draft-batch-workbench">
-          <aside className="draft-file-rail" aria-label="선택한 배치 파일">
-            <div className="batch-rail-header">
-              <div>
-                <p className="eyebrow">선택됨</p>
-                <strong>{props.selectedFileIndex + 1} / {props.selectedFiles.length}</strong>
-              </div>
-            </div>
-            <VirtualDraftFileList
-              files={props.selectedFiles}
-              selectedIndex={props.selectedFileIndex}
-              onSelectFile={props.onSelectFile}
-            />
-          </aside>
-
-          <section className="draft-preview-pane">
-            <div className="draft-preview-stage">
-              {selectedFile && selectedUrl && isImageFile(selectedFile) ? (
-                <div className="draft-preview-image-wrap">
-                  <img src={selectedUrl} alt={fileDisplayName(selectedFile)} />
-                  {props.showRegions && <RegionOverlay regions={props.regions} page={1} />}
-                </div>
-              ) : selectedFile ? (
-                <div className="empty-state">
-                  <FileUp size={24} />
-                  <strong>{fileDisplayName(selectedFile)}</strong>
-                  <span>이 파일은 실행 후 PDF/page preview로 확인됩니다.</span>
-                </div>
-              ) : null}
-            </div>
-          </section>
-        </div>
+      <div className="module-upload-actions">
+        <label className="batch-upload">
+          <FileUp size={16} />
+          <span>파일 선택</span>
+          <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
+        </label>
+        <label className="batch-upload">
+          <UploadCloud size={16} />
+          <span>폴더 선택</span>
+          <input
+            type="file"
+            accept={KIE_FILE_ACCEPT}
+            multiple
+            onChange={onUnifiedFileChange}
+            {...{ webkitdirectory: "", directory: "" }}
+          />
+        </label>
       </div>
     );
   }
@@ -2879,41 +2814,117 @@ function KieUploadPanel(props: {
       <div className="pane-header">
         <div>
           <p className="eyebrow">핵심 정보 업로드</p>
-          <h2>파일 또는 폴더 업로드</h2>
+          <h2>{selectedFile ? fileDisplayName(selectedFile) : "파일 또는 폴더 업로드"}</h2>
+          <small>{props.selectedFiles.length ? `${props.selectedFiles.length}개 파일 선택됨` : "파일 또는 폴더를 선택하세요"}</small>
+        </div>
+        {props.selectedFiles.length > 0 && (
+          <div className="toolbar">
+            <button
+              type="button"
+              className={props.showRegions ? "secondary compact active-tool" : "secondary compact"}
+              disabled={!props.regions.length || !selectedFile || !isImageFile(selectedFile)}
+              onClick={() => props.onShowRegions(!props.showRegions)}
+              title={props.regions.length ? "선택한 이미지 위에 schema 영역을 표시합니다." : "저장된 영역이 없습니다."}
+            >
+              <PanelLeft size={14} />
+              {props.showRegions ? "영역 숨기기" : "영역 보기"}
+            </button>
+            <button
+              type="button"
+              className="primary"
+              disabled={!canRun}
+              title={canRun ? "선택한 파일을 실행합니다." : props.activeSchemaMessage ?? "여러 파일 실행은 활성 schema가 필요합니다."}
+              onClick={props.onRunBatch}
+            >
+              <Play size={16} />
+              실행
+            </button>
+            <button type="button" onClick={props.onClearFiles}>
+              <X size={16} />
+              비우기
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="module-upload-zone kie-module-upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
+        {props.selectedFiles.length ? (
+          <div className="module-draft-layout kie-draft-layout">
+            <aside className="module-selected-list">
+              <div className="module-selected-summary">
+                <strong>{props.selectedFiles.length}개 파일</strong>
+                <span>실행 대기</span>
+              </div>
+              {props.selectedFiles.map((file, index) => (
+                <button
+                  key={`${fileDisplayName(file)}_${file.size}_${index}`}
+                  type="button"
+                  className={index === props.selectedFileIndex ? "active" : ""}
+                  onClick={() => props.onSelectFile(index)}
+                >
+                  <span>{fileDisplayName(file)}</span>
+                  <small>{formatFileSize(file.size)}</small>
+                </button>
+              ))}
+              {renderFilePickers()}
+              {renderSchemaCard()}
+              {props.message && <div className="success-card">{props.message}</div>}
+            </aside>
+            <KieDraftPreview file={selectedFile} previewUrl={selectedUrl} regions={props.regions} showRegions={props.showRegions} />
+          </div>
+        ) : (
+          <>
+            <SampleUploadPreview />
+            <div className="sample-upload-cta">
+              <UploadCloud size={34} />
+              <strong>파일 또는 폴더를 업로드하세요</strong>
+              <span>PDF, 이미지, DOCX, PPTX를 업로드할 수 있습니다.</span>
+            </div>
+            {renderFilePickers()}
+            <div className="kie-upload-schema-inline">{renderSchemaCard()}</div>
+            {props.message && <div className="success-card">{props.message}</div>}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KieDraftPreview(props: {
+  file: File | null;
+  previewUrl: string | null;
+  regions: SchemaRegion[];
+  showRegions: boolean;
+}) {
+  if (!props.file) {
+    return <div className="module-draft-preview empty">선택한 파일의 preview가 여기에 표시됩니다.</div>;
+  }
+  const extension = props.file.name.split(".").pop()?.toLowerCase() ?? "";
+
+  if (props.previewUrl && isImageFile(props.file)) {
+    return (
+      <div className="module-draft-preview">
+        <div className="draft-preview-image-wrap">
+          <img src={props.previewUrl} alt={fileDisplayName(props.file)} />
+          {props.showRegions && <RegionOverlay regions={props.regions} page={1} />}
         </div>
       </div>
+    );
+  }
 
-      <div className="unified-upload-layout" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
-        <section className="unified-upload-actions">
-          <label className="batch-upload folder-upload-action">
-            <UploadCloud size={18} />
-            <span>폴더 선택</span>
-            <input
-              type="file"
-              accept={KIE_FILE_ACCEPT}
-              multiple
-              onChange={onUnifiedFileChange}
-              {...{ webkitdirectory: "", directory: "" }}
-            />
-          </label>
-          <label className="batch-upload file-upload-action">
-            <FileUp size={18} />
-            <span>파일 선택</span>
-            <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
-          </label>
-          {props.message && <div className="success-card">{props.message}</div>}
-        </section>
-
-        <label className="upload-zone unified-upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
-          <SampleUploadPreview />
-          <div className="sample-upload-cta">
-            <UploadCloud size={32} />
-            <strong>파일 또는 폴더를 끌어오세요</strong>
-            <span>지원 파일 1개는 단일 실행, 2개 이상은 배치 실행으로 처리합니다.</span>
-          </div>
-          <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
-        </label>
+  if (props.previewUrl && extension === "pdf") {
+    return (
+      <div className="module-draft-preview">
+        <iframe src={props.previewUrl} title={fileDisplayName(props.file)} />
       </div>
+    );
+  }
+
+  return (
+    <div className="module-draft-preview office-file">
+      <FileUp size={28} />
+      <strong>{fileDisplayName(props.file)}</strong>
+      <span>실행 후 PDF/page preview로 확인됩니다.</span>
     </div>
   );
 }
@@ -2924,7 +2935,6 @@ function SampleUploadPreview() {
       <img src="/sample/bank_00070.jpg" alt="샘플 신청서 문서" />
       <div>
         <span>샘플 문서</span>
-        <strong>bank_00070.jpg</strong>
       </div>
     </div>
   );
@@ -3679,7 +3689,7 @@ function BatchPanel(props: {
 
         <button className="primary run-batch-button" disabled={!props.activeSchemaReady || !props.selectedFiles.length} onClick={props.onRunBatch}>
           <Play size={16} />
-          배치 실행
+          실행
         </button>
       </div>
 
