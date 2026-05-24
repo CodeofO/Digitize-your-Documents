@@ -589,7 +589,7 @@ textarea {
 }
 
 .workflow-run-sidebar-toggle.open {
-  right: min(448px, calc(100% - 54px));
+  right: min(588px, calc(100% - 54px));
 }
 
 .workflow-run-sidebar {
@@ -598,7 +598,7 @@ textarea {
   position: absolute;
   right: 14px;
   top: 74px;
-  width: 420px;
+  width: 560px;
   z-index: 8;
 }
 
@@ -608,6 +608,18 @@ textarea {
   box-shadow: var(--tds-shadow-card);
   height: 100%;
   max-height: none;
+}
+
+.workflow-run-sidebar .workflow-run-history-item {
+  align-items: stretch;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workflow-run-sidebar .workflow-run-history-actions {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 
 .workflow-run-history-head {
@@ -717,6 +729,7 @@ textarea {
 .workflow-run-history-actions .link-button {
   min-height: 32px;
   padding: 7px 9px;
+  white-space: nowrap;
 }
 
 .workflow-run-history-empty {

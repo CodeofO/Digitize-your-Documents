@@ -1535,9 +1535,9 @@ function WorkflowRunHistory(props: {
                   <span className="workflow-run-history-status">{workflowRunStatusLabel(run)}</span>
                   <strong>{run.workflow_name || "워크플로우"} · {workflowRunHeadline(run)}</strong>
                   <small>
-                    {formatWorkflowRunDate(run.created_at)} · {run.id} · {finishedCount.toLocaleString()} / {run.total_count.toLocaleString()} 처리
-                    {run.restarted_from_run_id ? ` · 재시작 원본 ${run.restarted_from_run_id}` : ""}
-                    {run.queued_from_run_id ? ` · 대기 원본 ${run.queued_from_run_id}` : ""}
+                    {formatWorkflowRunDate(run.created_at)} · {finishedCount.toLocaleString()} / {run.total_count.toLocaleString()} 처리
+                    {run.restarted_from_run_id ? " · 재시작" : ""}
+                    {run.queued_from_run_id ? " · 대기 실행" : ""}
                     {run.queue_order ? ` · 대기열 #${run.queue_order}` : ""}
                     {run.failed_count ? ` · ${run.failed_count.toLocaleString()} 실패` : ""}
                     {run.needs_review_count ? ` · ${run.needs_review_count.toLocaleString()} 검토` : ""}
