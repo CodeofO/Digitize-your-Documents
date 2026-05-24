@@ -1445,7 +1445,7 @@ function WorkflowRunProgressDock(props: {
           )}
           {workflowRunCanEnqueue(props.run) && (
             <button type="button" className="secondary" onClick={props.onEnqueue}>
-              <Plus size={15} /> 대기열 추가
+              <Plus size={15} /> 큐에 예약
             </button>
           )}
           {workflowRunCanStartWaiting(props.run) && props.canStartWaiting !== false && (
@@ -1550,7 +1550,7 @@ function WorkflowRunHistory(props: {
                 <div className="workflow-run-history-actions">
                   {workflowRunCanEnqueue(run) && (
                     <button type="button" className="secondary" onClick={() => props.onEnqueue(run.id)}>
-                      <Plus size={14} /> 대기 추가
+                      <Plus size={14} /> 큐에 예약
                     </button>
                   )}
                   {workflowRunCanStartWaiting(run, props.runs) && (
@@ -1698,7 +1698,7 @@ function WorkflowRunResults(props: {
           )}
           {props.onEnqueue && workflowRunCanEnqueue(props.run) && (
             <button type="button" className="secondary" onClick={props.onEnqueue}>
-              <Plus size={15} /> 대기열 추가
+              <Plus size={15} /> 큐에 예약
             </button>
           )}
           {props.onStartWaiting && workflowRunCanStartWaiting(props.run) && (
