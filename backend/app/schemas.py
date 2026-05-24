@@ -34,6 +34,7 @@ class FieldDefinition(BaseModel):
     output_format: OutputFormat
     region_id: str | None = Field(default=None, max_length=80)
     region: FieldRegion | None = None
+    judgement_enabled: bool = False
 
     @field_validator("key_name")
     @classmethod
@@ -790,6 +791,8 @@ class WorkflowRunItemRead(BaseModel):
 class WorkflowRunRead(BaseModel):
     id: str
     workflow_id: str
+    workflow_name: str | None = None
+    restarted_from_run_id: str | None = None
     status: str
     total_count: int
     completed_count: int
@@ -813,6 +816,10 @@ class WorkflowRunRead(BaseModel):
 
 class WorkflowRunInitRequest(BaseModel):
     total_count: int = Field(ge=1)
+
+
+class WorkflowRunRestartRequest(BaseModel):
+    workflow_id: str | None = None
 
 
 class ArchiveSearchResult(BaseModel):

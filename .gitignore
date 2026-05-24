@@ -27,6 +27,9 @@ backend/alembic/versions/*
 !backend/app/
 backend/app/*
 !backend/app/*.py
+!backend/app/prompts/
+backend/app/prompts/*
+!backend/app/prompts/*.py
 !backend/tests/
 backend/tests/*
 !backend/tests/*.py

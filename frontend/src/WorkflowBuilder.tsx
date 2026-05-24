@@ -32,6 +32,7 @@ import {
   Pause,
   Play,
   Plus,
+  RefreshCcw,
   Save,
   Sparkles,
   Unlink2,
@@ -55,6 +56,11 @@ const WORKFLOW_RESULT_SPLITTER_WIDTH = 12;
 
 type WorkflowNodeKind = "input" | "classifier" | "branch" | "kie" | "required-checker" | "merge" | "export";
 type WorkflowResultFilter = "all" | "success" | "failed" | "waiting" | "running" | "review";
+type WorkflowClassFilterOption = {
+  value: string;
+  label: string;
+  count: number;
+};
 type WorkflowUploadSource = "files" | "folder";
 
 type WorkflowNodeData = {
@@ -135,6 +141,8 @@ type WorkflowDocument = {
 type WorkflowRun = {
   id: string;
   workflow_id: string;
+  workflow_name?: string | null;
+  restarted_from_run_id?: string | null;
   status: string;
   total_count: number;
   completed_count: number;
@@ -612,16 +620,24 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
 
   async function restartRun(runId: string) {
     setError(null);
+    setIsSaving(true);
     try {
       const currentRun = runs.find((item) => item.id === runId) ?? activeRun;
       if (!confirmWorkflowRestart(currentRun)) return;
-      const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/restart`, { method: "POST" });
+      const saved = await persistWorkflow();
+      const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/restart`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workflow_id: saved.id })
+      });
       upsertRun(run);
       setActiveRunId(run.id);
-      setMessage("업로드된 문서는 유지하고 전체 추론 결과를 초기화한 뒤 다시 실행합니다.");
+      setMessage("업로드된 문서는 재사용하고 새 워크플로우 실행 기록으로 다시 추론합니다.");
       void refreshRun(run.id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우를 재시작하지 못했습니다.");
+    } finally {
+      setIsSaving(false);
     }
   }
 
@@ -1022,9 +1038,25 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
       setRun(nextRun);
       setSelectedItemId((current) => current ?? nextRun.items[0]?.id ?? null);
       setError(null);
-      void refreshRun();
+      if (nextRun.id !== runId) {
+        openWorkflowResultScreen(nextRun.id);
+      } else {
+        void refreshRun();
+      }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우를 재시작하지 못했습니다.");
+    }
+  }
+
+  async function retryFailedRun() {
+    try {
+      const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/retry-failed`, { method: "POST" });
+      setRun(nextRun);
+      setSelectedItemId((current) => current ?? nextRun.items[0]?.id ?? null);
+      setError(null);
+      void refreshRun();
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "실패한 항목을 재시도하지 못했습니다.");
     }
   }
 
@@ -1060,6 +1092,7 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
           onResume={() => void resumeRun()}
           onPause={() => void pauseRun()}
           onRestart={() => void restartRun()}
+          onRetryFailed={() => void retryFailedRun()}
           onDiscard={() => void discardRun()}
           onClose={closeWindow}
         />
@@ -1260,7 +1293,7 @@ function WorkflowRunProgressDock(props: {
       <div className="workflow-progress-dock-head">
         <div>
           <p className="eyebrow">Run</p>
-          <h3>{workflowRunHeadline(props.run)} · {percent}%</h3>
+          <h3>{props.run.workflow_name || "워크플로우"} · {workflowRunHeadline(props.run)} · {percent}%</h3>
         </div>
         <div className="workflow-run-kpis">
           <span><strong>{uploadedCount}</strong> / {props.run.total_count.toLocaleString()} 업로드됨</span>
@@ -1365,9 +1398,10 @@ function WorkflowRunHistory(props: {
               <article key={run.id} className={`workflow-run-history-item ${isActive ? "active" : ""}`}>
                 <div className="workflow-run-history-main">
                   <span className="workflow-run-history-status">{workflowRunStatusLabel(run)}</span>
-                  <strong>{workflowRunHeadline(run)}</strong>
+                  <strong>{run.workflow_name || "워크플로우"} · {workflowRunHeadline(run)}</strong>
                   <small>
-                    {formatWorkflowRunDate(run.created_at)} · {finishedCount.toLocaleString()} / {run.total_count.toLocaleString()} 처리
+                    {formatWorkflowRunDate(run.created_at)} · {run.id} · {finishedCount.toLocaleString()} / {run.total_count.toLocaleString()} 처리
+                    {run.restarted_from_run_id ? ` · 재시작 원본 ${run.restarted_from_run_id}` : ""}
                     {run.failed_count ? ` · ${run.failed_count.toLocaleString()} 실패` : ""}
                     {run.needs_review_count ? ` · ${run.needs_review_count.toLocaleString()} 검토` : ""}
                   </small>
@@ -1413,22 +1447,33 @@ function WorkflowRunResults(props: {
   onResume?: () => void;
   onPause?: () => void;
   onRestart?: () => void;
+  onRetryFailed?: () => void;
   onDiscard?: () => void;
   onClose: () => void;
 }) {
   const finishedCount = workflowRunFinishedCount(props.run);
-  const [itemFilter, setItemFilter] = useState<WorkflowResultFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<WorkflowResultFilter>("all");
+  const [classFilter, setClassFilter] = useState("all");
   const [leftWidth, setLeftWidth] = useState(() => readWorkflowResultPaneWidth(WORKFLOW_RESULT_LEFT_WIDTH_KEY, 280));
   const [rightWidth, setRightWidth] = useState(() => readWorkflowResultPaneWidth(WORKFLOW_RESULT_RIGHT_WIDTH_KEY, 520));
+  const statusScopedItems = useMemo(
+    () => props.run.items.filter((item) => workflowResultFilterMatches(item, statusFilter)),
+    [props.run.items, statusFilter]
+  );
+  const classScopedItems = useMemo(
+    () => props.run.items.filter((item) => workflowClassFilterMatches(item, classFilter)),
+    [props.run.items, classFilter]
+  );
   const filteredItems = useMemo(
-    () => props.run.items.filter((item) => workflowResultFilterMatches(item, itemFilter)),
-    [itemFilter, props.run.items]
+    () => props.run.items.filter((item) => workflowResultFilterMatches(item, statusFilter) && workflowClassFilterMatches(item, classFilter)),
+    [classFilter, props.run.items, statusFilter]
   );
   const visibleSelectedItem =
     props.selectedItem && filteredItems.some((item) => item.id === props.selectedItem?.id)
       ? props.selectedItem
       : filteredItems[0] ?? null;
-  const filterCounts = useMemo(() => workflowResultFilterCounts(props.run.items), [props.run.items]);
+  const filterCounts = useMemo(() => workflowResultFilterCounts(classScopedItems), [classScopedItems]);
+  const classFilterOptions = useMemo(() => workflowClassFilterOptions(statusScopedItems), [statusScopedItems]);
   const workbenchStyle = useMemo<CSSProperties>(
     () => ({
       gridTemplateColumns: `${leftWidth}px ${WORKFLOW_RESULT_SPLITTER_WIDTH}px minmax(${WORKFLOW_RESULT_MIN_MIDDLE_WIDTH}px, 1fr) ${WORKFLOW_RESULT_SPLITTER_WIDTH}px ${rightWidth}px`
@@ -1443,6 +1488,12 @@ function WorkflowRunResults(props: {
     }
   }, [filteredItems, props.selectedItem?.id, props.onSelectItem]);
 
+  useEffect(() => {
+    if (classFilter !== "all" && !classFilterOptions.some((option) => option.value === classFilter)) {
+      setClassFilter("all");
+    }
+  }, [classFilter, classFilterOptions]);
+
   const onLeftResize = useCallback((event: PointerEvent<HTMLButtonElement>) => {
     startWorkflowResultResize(event, "left", leftWidth, rightWidth, setLeftWidth, setRightWidth);
   }, [leftWidth, rightWidth]);
@@ -1455,7 +1506,7 @@ function WorkflowRunResults(props: {
       <div className="workflow-results-header">
         <div>
           <p className="eyebrow">Run</p>
-          <h2>{workflowRunHeadline(props.run)} · {Math.round(props.run.progress * 100)}%</h2>
+          <h2>{props.run.workflow_name || "워크플로우"} · {workflowRunHeadline(props.run)} · {Math.round(props.run.progress * 100)}%</h2>
         </div>
         <div className="workflow-run-kpis">
           <span><strong>{finishedCount}</strong> 완료/검토/실패</span>
@@ -1490,6 +1541,11 @@ function WorkflowRunResults(props: {
               <Play size={15} /> 재시작
             </button>
           )}
+          {props.onRetryFailed && workflowRunCanRetryFailed(props.run) && (
+            <button type="button" className="secondary" onClick={props.onRetryFailed}>
+              <RefreshCcw size={15} /> 실패 재시도
+            </button>
+          )}
           {props.onDiscard && workflowRunCanDiscard(props.run) && (
             <button type="button" className="secondary danger-outline" onClick={props.onDiscard}>
               <X size={15} /> 중단·정리
@@ -1504,9 +1560,12 @@ function WorkflowRunResults(props: {
           run={props.run}
           items={filteredItems}
           selectedItem={visibleSelectedItem}
-          filter={itemFilter}
+          statusFilter={statusFilter}
+          classFilter={classFilter}
           filterCounts={filterCounts}
-          onFilter={setItemFilter}
+          classFilterOptions={classFilterOptions}
+          onStatusFilter={setStatusFilter}
+          onClassFilter={setClassFilter}
           onSelectItem={props.onSelectItem}
         />
         <button className="splitter workflow-result-splitter" type="button" title="목록 영역 너비 조절" aria-label="목록 영역 너비 조절" onPointerDown={onLeftResize}>
@@ -1555,6 +1614,40 @@ function workflowResultFilterMatches(item: WorkflowRunItem, filter: WorkflowResu
   return item.status === "needs_review";
 }
 
+function workflowClassFilterMatches(item: WorkflowRunItem, filter: string) {
+  if (filter === "all") return true;
+  return workflowItemClassFilterValue(item) === filter;
+}
+
+function workflowClassFilterOptions(items: WorkflowRunItem[]): WorkflowClassFilterOption[] {
+  const counts = new Map<string, { label: string; count: number }>();
+  for (const item of items) {
+    const value = workflowItemClassFilterValue(item);
+    const label = workflowItemClassLabel(item);
+    const current = counts.get(value);
+    if (current) {
+      current.count += 1;
+    } else {
+      counts.set(value, { label, count: 1 });
+    }
+  }
+  return [
+    { value: "all", label: "전체 class", count: items.length },
+    ...Array.from(counts.entries())
+      .map(([value, item]) => ({ value, label: item.label, count: item.count }))
+      .sort((a, b) => a.label.localeCompare(b.label, "ko"))
+  ];
+}
+
+function workflowItemClassLabel(item: WorkflowRunItem) {
+  const classification = item.result?.classification;
+  return classification?.class_name || classification?.status || "미분류";
+}
+
+function workflowItemClassFilterValue(item: WorkflowRunItem) {
+  return workflowItemClassLabel(item).trim().toLowerCase() || "미분류";
+}
+
 function workflowRunCanResume(run: WorkflowRun) {
   const uploadedCount = run.uploaded_count ?? run.items.length;
   const pausedCount = run.items.filter((item) => item.status === "paused").length;
@@ -1572,6 +1665,12 @@ function workflowRunCanPause(run: WorkflowRun) {
 function workflowRunCanRestart(run: WorkflowRun) {
   const uploadedCount = run.uploaded_count ?? run.items.length;
   return run.status !== "canceled" && run.items.length > 0 && (uploadedCount === run.total_count || run.status === "paused");
+}
+
+function workflowRunCanRetryFailed(run: WorkflowRun) {
+  if (run.status === "canceled" || run.failed_count <= 0) return false;
+  const activeCount = run.items.filter((item) => ["uploading", "preprocessing", "queued", "running", "paused"].includes(item.status)).length;
+  return activeCount === 0;
 }
 
 function workflowRunCanResumeUpload(run: WorkflowRun) {
@@ -1692,7 +1791,7 @@ function confirmWorkflowRestart(run: WorkflowRun | null | undefined) {
     ["completed", "failed", "needs_review", "running", "paused"].includes(item.status) || item.inference_duration_ms !== null && item.inference_duration_ms !== undefined
   ).length;
   return window.confirm(
-    `현재 ${inferredCount.toLocaleString()} / ${run.total_count.toLocaleString()}개 문서에 추론 결과나 진행 기록이 있습니다.\n\n재시작하면 업로드된 원본은 유지하지만, 기존 추론 결과와 문서별 추론 시간은 모두 초기화하고 처음부터 다시 추론합니다.\n\n계속할까요?`
+    `현재 ${inferredCount.toLocaleString()} / ${run.total_count.toLocaleString()}개 문서에 추론 결과나 진행 기록이 있습니다.\n\n재시작하면 업로드된 원본은 재사용하고, 새 실행 기록을 만들어 처음부터 다시 추론합니다. 기존 실행 기록과 export는 HISTORY에 남습니다.\n\n계속할까요?`
   );
 }
 
@@ -1761,9 +1860,12 @@ function WorkflowRunRail(props: {
   run: WorkflowRun;
   items: WorkflowRunItem[];
   selectedItem: WorkflowRunItem | null;
-  filter: WorkflowResultFilter;
+  statusFilter: WorkflowResultFilter;
+  classFilter: string;
   filterCounts: Record<WorkflowResultFilter, number>;
-  onFilter: (filter: WorkflowResultFilter) => void;
+  classFilterOptions: WorkflowClassFilterOption[];
+  onStatusFilter: (filter: WorkflowResultFilter) => void;
+  onClassFilter: (filter: string) => void;
   onSelectItem: (itemId: string) => void;
 }) {
   const activeIndex = Math.max(0, props.items.findIndex((item) => item.id === props.selectedItem?.id));
@@ -1781,14 +1883,35 @@ function WorkflowRunRail(props: {
           <button
             key={option.value}
             type="button"
-            className={props.filter === option.value ? "active" : ""}
-            onClick={() => props.onFilter(option.value)}
+            className={props.statusFilter === option.value ? "active" : ""}
+            onClick={() => props.onStatusFilter(option.value)}
           >
             <span>{option.label}</span>
             <strong>{props.filterCounts[option.value].toLocaleString()}</strong>
           </button>
         ))}
       </div>
+      <label className="workflow-class-filter">
+        <span>Class</span>
+        <select value={props.classFilter} onChange={(event) => props.onClassFilter(event.target.value)}>
+          {props.classFilterOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label} · {option.count.toLocaleString()}
+            </option>
+          ))}
+        </select>
+      </label>
+      {(props.statusFilter !== "all" || props.classFilter !== "all") && (
+        <div className="workflow-active-filters">
+          <span>{props.items.length.toLocaleString()}개 표시 중</span>
+          <button type="button" onClick={() => {
+            props.onStatusFilter("all");
+            props.onClassFilter("all");
+          }}>
+            필터 해제
+          </button>
+        </div>
+      )}
       <div className="workflow-run-list workflow-virtual-list" ref={virtual.containerRef} onScroll={virtual.onScroll}>
         {props.items.length ? (
           <div className="virtual-list-spacer" style={virtual.spacerStyle}>

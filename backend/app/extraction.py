@@ -14,7 +14,7 @@ from app.models import Document, ExtractionJob, ExtractionResult, Schema
 from app.schemas import FieldDefinition, FieldRegion, SchemaRegion
 from app.storage import materialize_storage_ref, scratch_dir_for_ref
 from app.validation import validate_extracted_values
-from app.vlm import extract_with_vlm, format_vlm_exception
+from app.vlm import correct_extraction_with_vlm, extract_with_vlm, format_vlm_exception, judge_extraction_with_vlm
 
 
 TERMINAL_JOB_STATUSES = {"completed", "needs_review", "failed", "canceled"}
@@ -47,7 +47,9 @@ def run_extraction_job(job_id: str) -> None:
         if not context:
             return
         raw_values = _extract_grouped_values(context.document, context.fields, context.regions, job_id)
-        _save_extraction_result(job_id, context, raw_values)
+        values, warnings = validate_extracted_values(raw_values, context.fields)
+        values, warnings = _apply_ai_judgement(context.document, context.fields, context.regions, job_id, values, warnings)
+        _save_extraction_result(job_id, context, raw_values, values, warnings)
     except Exception as exc:
         _mark_job_failed(job_id, format_vlm_exception(exc))
 
@@ -116,7 +118,13 @@ def _prepare_extraction_job(job_id: str) -> ExtractionContext | None:
         db.close()
 
 
-def _save_extraction_result(job_id: str, context: ExtractionContext, raw_values: dict[str, Any]) -> None:
+def _save_extraction_result(
+    job_id: str,
+    context: ExtractionContext,
+    raw_values: dict[str, Any],
+    values: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> None:
     db = SessionLocal()
     try:
         job = db.get(ExtractionJob, job_id)
@@ -134,7 +142,6 @@ def _save_extraction_result(job_id: str, context: ExtractionContext, raw_values:
             db.commit()
             return
 
-        values, warnings = validate_extracted_values(raw_values, context.fields)
         validated_output = {
             "document_id": context.document.id,
             "schema_id": context.schema_id,
@@ -165,6 +172,141 @@ def _save_extraction_result(job_id: str, context: ExtractionContext, raw_values:
         db.commit()
     finally:
         db.close()
+
+
+def _apply_ai_judgement(
+    document: DocumentSnapshot,
+    fields: list[FieldDefinition],
+    regions: list[SchemaRegion],
+    job_id: str,
+    values: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    review_fields = [field for field in fields if field.judgement_enabled]
+    if not review_fields:
+        return values, warnings
+
+    inputs_by_field = _build_judgement_inputs(document, review_fields, regions, job_id)
+    next_values = dict(values)
+    next_warnings = list(warnings)
+
+    for field in review_fields:
+        current = dict(next_values.get(field.key_name, {}))
+        initial_value = current.get("value")
+        initial_evidence = current.get("evidence") if isinstance(current.get("evidence"), str) else None
+        image_inputs = inputs_by_field.get(field.key_name)
+        ai_review: dict[str, Any] = {
+            "enabled": True,
+            "mode": "region" if field.region_id or field.region is not None else "full_page",
+            "judgement_status": "failed",
+            "judgement_reason": None,
+            "judgement_confidence": None,
+            "initial_value": initial_value,
+            "initial_evidence": initial_evidence,
+            "corrected": False,
+            "correction_reason": None,
+        }
+
+        if not image_inputs:
+            _append_field_warning(current, next_warnings, field.key_name, "ai_review_failed")
+            ai_review["judgement_reason"] = "AI review images could not be prepared."
+            current["ai_review"] = ai_review
+            next_values[field.key_name] = current
+            continue
+
+        try:
+            judgement = judge_extraction_with_vlm(field, initial_value, initial_evidence, image_inputs)
+            status = judgement.get("judgement_status")
+            if status not in {"correct", "needs_correction"}:
+                raise RuntimeError(f"Unsupported judgement_status: {status}")
+            ai_review["judgement_status"] = status
+            ai_review["judgement_reason"] = str(judgement.get("reason") or "")
+            confidence = judgement.get("confidence")
+            ai_review["judgement_confidence"] = float(confidence) if isinstance(confidence, (int, float)) else None
+            if status == "needs_correction":
+                correction = correct_extraction_with_vlm(field, initial_value, initial_evidence, ai_review["judgement_reason"], image_inputs)
+                corrected_values, correction_warnings = validate_extracted_values({field.key_name: correction}, [field])
+                corrected_entry = dict(corrected_values[field.key_name])
+                corrected_entry["ai_review"] = {
+                    **ai_review,
+                    "corrected": True,
+                    "correction_reason": str(correction.get("correction_reason") or ""),
+                }
+                next_values[field.key_name] = corrected_entry
+                next_warnings = [warning for warning in next_warnings if not warning.startswith(f"{field.key_name}:")]
+                next_warnings.extend(correction_warnings)
+                continue
+        except Exception as exc:
+            warning = "ai_correction_failed" if ai_review["judgement_status"] == "needs_correction" else "ai_review_failed"
+            _append_field_warning(current, next_warnings, field.key_name, warning)
+            if warning == "ai_correction_failed":
+                ai_review["correction_reason"] = str(exc)
+            else:
+                ai_review["judgement_reason"] = str(exc)
+            ai_review["judgement_status"] = "failed"
+
+        current["ai_review"] = ai_review
+        next_values[field.key_name] = current
+
+    return next_values, next_warnings
+
+
+def _append_field_warning(entry: dict[str, Any], warnings: list[str], field_name: str, warning: str) -> None:
+    field_warnings = entry.get("warnings")
+    if not isinstance(field_warnings, list):
+        field_warnings = []
+    if warning not in field_warnings:
+        field_warnings.append(warning)
+    entry["warnings"] = field_warnings
+    warnings.append(f"{field_name}:{warning}")
+
+
+def _build_judgement_inputs(
+    document: DocumentSnapshot,
+    fields: list[FieldDefinition],
+    regions: list[SchemaRegion],
+    job_id: str,
+) -> dict[str, list[dict[str, str]]]:
+    page_map = {page.page_number: page for page in document.pages}
+    region_map = {region.id: region for region in regions}
+    field_region_refs = _field_region_refs(fields, region_map)
+    crop_dir = scratch_dir_for_ref(document.storage_path, "judgement_regions", job_id)
+    inputs_by_field: dict[str, list[dict[str, str]]] = {}
+
+    for index, field in enumerate(fields, start=1):
+        region_ref = field_region_refs.get(field.key_name)
+        if not region_ref:
+            inputs_by_field[field.key_name] = [
+                {
+                    "path": page.image_path,
+                    "label": f"Full document page {page.page_number} for second-stage KIE judgement of field '{field.key_name}'.",
+                }
+                for page in document.pages
+            ]
+            continue
+
+        region = region_ref["region"]
+        page = page_map.get(region.page)
+        if not page:
+            continue
+        crop_path = _crop_region_image(page, region, crop_dir / f"field_{index}_crop.png")
+        inputs_by_field[field.key_name] = [
+            {
+                "path": page.image_path,
+                "label": (
+                    f"Full page context for second-stage KIE judgement of field '{field.key_name}' "
+                    f"in region '{region_ref['label']}' on page {region.page}."
+                ),
+            },
+            {
+                "path": str(crop_path),
+                "label": (
+                    f"Cropped region '{region_ref['label']}' on page {region.page} for second-stage KIE judgement of field '{field.key_name}'. "
+                    "This crop is already the user-designated region from the original page."
+                ),
+            },
+        ]
+    return inputs_by_field
 
 
 def _mark_job_failed(job_id: str, message: str) -> None:

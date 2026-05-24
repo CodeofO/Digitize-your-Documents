@@ -76,6 +76,7 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | `이어가기` | 새로고침 등으로 끊긴 업로드에서 같은 원본을 재선택해 누락 파일만 등록합니다. |
 | `일시중단` | 업로드된 문서는 보존하고, 새 item 실행을 멈춥니다. 진행 중인 VLM 호출은 현재 item까지만 마무리합니다. |
 | `재시작` | 업로드된 원본은 유지하고 기존 추론 결과와 문서별 추론 시간을 초기화한 뒤 처음부터 다시 추론합니다. |
+| `실패 재시도` | 결과 상세 화면에서 실패한 문서만 다시 queue에 넣고, 성공한 문서는 그대로 보존합니다. |
 
 ## Input / Output
 
@@ -99,7 +100,7 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | --- | --- |
 | System status | `GET /api/system/status` |
 | Workflow upload | `POST /api/workflows/{workflow_id}/runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
-| Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart` |
+| Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart`, `POST /api/workflow-runs/{run_id}/retry-failed` |
 | Batch upload | `POST /api/batches/init`, `POST /api/batches/{batch_id}/items`, `POST /api/batches/{batch_id}/start` |
 | Classification batch | `POST /api/classification-batches/init`, `POST /api/classification-batches/{batch_id}/items`, `POST /api/classification-batches/{batch_id}/start` |
 | Required check batch | `POST /api/required-field-check-batches/init`, `POST /api/required-field-check-batches/{batch_id}/items`, `POST /api/required-field-check-batches/{batch_id}/start` |
@@ -151,6 +152,9 @@ VLM_MODEL_NAME=mock-vlm
 | `DOCUMENT_PAGE_MAX_LONG_EDGE` | `3000` | preview/VLM용 JPEG 긴 변 제한 |
 | `DOCUMENT_PAGE_JPEG_QUALITY` | `88` | preview/VLM용 JPEG 품질 |
 | `VLM_MAX_CONCURRENT_REQUESTS` | `8` | workflow, batch, KIE field-group VLM 동시 실행 수 |
+| `DATABASE_POOL_SIZE` | `64` | SQLAlchemy DB connection pool 크기 |
+| `DATABASE_MAX_OVERFLOW` | `0` | pool 크기를 넘는 임시 connection 허용 수 |
+| `DATABASE_POOL_TIMEOUT_SECONDS` | `60` | DB connection 대기 timeout |
 | `UPLOAD_MAX_BATCH_FILES` | `10000` | 한 번에 업로드할 수 있는 batch 파일 수 |
 | `UPLOAD_RETENTION_HOURS` | `24` | 업로드 문서 보존 시간 |
 

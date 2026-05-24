@@ -2,6 +2,7 @@ import csv
 import errno
 import io
 import json
+import re
 import shutil
 import threading
 from collections.abc import AsyncIterator
@@ -9,8 +10,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -127,6 +129,7 @@ from app.schemas import (
     WorkflowDefinitionUpdate,
     WorkflowRunInitRequest,
     WorkflowRunRead,
+    WorkflowRunRestartRequest,
 )
 from app.vlm import (
     recommend_required_field_checklist_with_vlm,
@@ -589,6 +592,53 @@ def get_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRead:
     return _schema_read(schema)
 
 
+@app.post("/api/schemas/{schema_id}/duplicate", response_model=SchemaRead)
+def duplicate_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRead:
+    schema = db.get(Schema, schema_id)
+    if not schema:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    if schema.ephemeral:
+        raise HTTPException(status_code=400, detail="Draft schemas cannot be duplicated from the library")
+    schema_data = _schema_data(schema)
+    existing_names = {
+        row[0]
+        for row in db.query(Schema.name)
+        .filter(Schema.ephemeral == False, Schema.archived == False)  # noqa: E712
+        .all()
+    }
+    duplicated_name = _duplicate_name(schema.name, existing_names)
+    duplicated_data = {
+        **schema_data,
+        "name": duplicated_name,
+        "display_name": duplicated_name,
+    }
+    duplicated = Schema(
+        name=duplicated_name,
+        display_name=duplicated_name,
+        description=schema.description,
+        current_version=1,
+        schema_json=json.dumps(duplicated_data, ensure_ascii=False),
+        is_template=schema.is_template,
+        template_category=schema.template_category,
+        pinned=schema.pinned,
+        ephemeral=False,
+        archived=False,
+    )
+    db.add(duplicated)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="schema",
+        entity_id=duplicated.id,
+        action="duplicated",
+        message=f"Duplicated schema {schema.name} to {duplicated.name}",
+        metadata={"source_schema_id": schema.id, "field_count": len(duplicated_data["fields"])},
+    )
+    db.commit()
+    db.refresh(duplicated)
+    return _schema_read(duplicated)
+
+
 @app.patch("/api/schemas/{schema_id}", response_model=SchemaRead)
 def update_schema(schema_id: str, payload: SchemaUpdate, db: Session = Depends(get_db)) -> SchemaRead:
     schema = db.get(Schema, schema_id)
@@ -705,6 +755,45 @@ def get_document_classifier(classifier_id: str, db: Session = Depends(get_db)) -
     if not classifier:
         raise HTTPException(status_code=404, detail="Document classifier not found")
     return _classifier_read(classifier)
+
+
+@app.post("/api/document-classifiers/{classifier_id}/duplicate", response_model=DocumentClassifierRead)
+def duplicate_document_classifier(classifier_id: str, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+    classifier = db.get(DocumentClassifier, classifier_id)
+    if not classifier:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
+    config = _classifier_data(classifier)
+    existing_names = {
+        row[0]
+        for row in db.query(DocumentClassifier.name)
+        .filter(DocumentClassifier.archived == False)  # noqa: E712
+        .all()
+    }
+    duplicated_name = _duplicate_name(classifier.name, existing_names)
+    duplicated_config = {
+        **config,
+        "name": duplicated_name,
+    }
+    duplicated = DocumentClassifier(
+        name=duplicated_name,
+        description=classifier.description,
+        allow_unknown=classifier.allow_unknown,
+        config_json=json.dumps(duplicated_config, ensure_ascii=False),
+        archived=False,
+    )
+    db.add(duplicated)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="document_classifier",
+        entity_id=duplicated.id,
+        action="duplicated",
+        message=f"Duplicated document classifier {classifier.name} to {duplicated.name}",
+        metadata={"source_classifier_id": classifier.id, "class_count": len(duplicated_config["classes"])},
+    )
+    db.commit()
+    db.refresh(duplicated)
+    return _classifier_read(duplicated)
 
 
 @app.patch("/api/document-classifiers/{classifier_id}", response_model=DocumentClassifierRead)
@@ -888,6 +977,44 @@ def get_required_field_checklist(checklist_id: str, db: Session = Depends(get_db
     if not checklist:
         raise HTTPException(status_code=404, detail="Required field checklist not found")
     return _checklist_read(checklist)
+
+
+@app.post("/api/required-field-checklists/{checklist_id}/duplicate", response_model=RequiredFieldChecklistRead)
+def duplicate_required_field_checklist(checklist_id: str, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+    checklist = db.get(RequiredFieldChecklist, checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    config = _checklist_data(checklist)
+    existing_names = {
+        row[0]
+        for row in db.query(RequiredFieldChecklist.name)
+        .filter(RequiredFieldChecklist.archived == False)  # noqa: E712
+        .all()
+    }
+    duplicated_name = _duplicate_name(checklist.name, existing_names)
+    duplicated_config = {
+        **config,
+        "name": duplicated_name,
+    }
+    duplicated = RequiredFieldChecklist(
+        name=duplicated_name,
+        description=checklist.description,
+        config_json=json.dumps(duplicated_config, ensure_ascii=False),
+        archived=False,
+    )
+    db.add(duplicated)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="required_field_checklist",
+        entity_id=duplicated.id,
+        action="duplicated",
+        message=f"Duplicated required field checklist {checklist.name} to {duplicated.name}",
+        metadata={"source_checklist_id": checklist.id, "item_count": len(duplicated_config["items"])},
+    )
+    db.commit()
+    db.refresh(duplicated)
+    return _checklist_read(duplicated)
 
 
 @app.patch("/api/required-field-checklists/{checklist_id}", response_model=RequiredFieldChecklistRead)
@@ -1155,11 +1282,16 @@ def export_extraction_result(
     if not result:
         raise HTTPException(status_code=404, detail="Extraction result not found")
 
+    job = result.job or db.get(ExtractionJob, result.job_id)
+    schema = db.get(Schema, job.schema_id) if job else None
     payload = json.loads(result.corrected_output) if result.corrected_output else json.loads(result.validated_output)
+    original_payload = json.loads(result.validated_output)
+    reviewed_fields = set(json.loads(result.reviewed_fields or "[]"))
     preset = db.get(ExportPreset, preset_id) if preset_id else None
     if preset_id and not preset:
         raise HTTPException(status_code=404, detail="Export preset not found")
     export_payload = _apply_export_preset(payload, preset) if preset else payload
+    original_export_payload = _apply_export_preset(original_payload, preset) if preset else original_payload
     log_audit_event(
         db,
         entity_type="extraction_result",
@@ -1169,28 +1301,65 @@ def export_extraction_result(
         metadata={"format": format, "preset_id": preset_id},
     )
     db.commit()
+    filename = _export_filename("KIE", schema.name if schema else "schema", job.id if job else result_id, format)
     if format == "json":
-        return JSONResponse(export_payload)
+        return JSONResponse(export_payload, headers=_download_headers(filename))
 
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
-        fieldnames=["key_name", "value", "normalized_value", "page", "confidence", "evidence", "warnings"],
+        fieldnames=[
+            "key_name",
+            "value",
+            "normalized_value",
+            "page",
+            "confidence",
+            "evidence",
+            "warnings",
+            "original_value",
+            "changed",
+            "reviewed",
+            "ai_review_enabled",
+            "ai_review_status",
+            "ai_corrected",
+            "ai_review_reason",
+            "ai_review_confidence",
+            "ai_initial_value",
+            "ai_initial_evidence",
+            "ai_correction_reason",
+        ],
     )
     writer.writeheader()
+    original_values = original_export_payload.get("values", {}) if isinstance(original_export_payload.get("values"), dict) else {}
     for key, value in export_payload.get("values", {}).items():
+        value_dict = value if isinstance(value, dict) else {}
+        original_value = original_values.get(key)
+        ai_review = value_dict.get("ai_review") if isinstance(value_dict.get("ai_review"), dict) else {}
+        current_cell = _extract_kie_cell_value(value)
+        original_cell = _extract_kie_cell_value(original_value) if original_value is not None else current_cell
         writer.writerow(
             {
                 "key_name": key,
-                "value": value.get("value"),
-                "normalized_value": value.get("normalized_value"),
-                "page": value.get("page"),
-                "confidence": value.get("confidence"),
-                "evidence": value.get("evidence"),
-                "warnings": ";".join(value.get("warnings", [])),
+                "value": current_cell,
+                "normalized_value": value_dict.get("normalized_value"),
+                "page": value_dict.get("page"),
+                "confidence": value_dict.get("confidence"),
+                "evidence": value_dict.get("evidence"),
+                "warnings": ";".join(value_dict.get("warnings", [])),
+                "original_value": original_cell,
+                "changed": current_cell != original_cell,
+                "reviewed": key in reviewed_fields,
+                "ai_review_enabled": bool(ai_review.get("enabled")),
+                "ai_review_status": ai_review.get("judgement_status"),
+                "ai_corrected": bool(ai_review.get("corrected")),
+                "ai_review_reason": ai_review.get("judgement_reason"),
+                "ai_review_confidence": ai_review.get("judgement_confidence"),
+                "ai_initial_value": ai_review.get("initial_value"),
+                "ai_initial_evidence": ai_review.get("initial_evidence"),
+                "ai_correction_reason": ai_review.get("correction_reason"),
             }
         )
-    return _csv_download_response(output.getvalue(), f"{result_id}.csv")
+    return _csv_download_response(output.getvalue(), filename)
 
 
 @app.post("/api/export-presets", response_model=ExportPresetRead)
@@ -1388,7 +1557,13 @@ async def create_workflow_run(
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
 
-    run = WorkflowRun(workflow_id=workflow.id, status="uploading", total_count=len(files))
+    run = WorkflowRun(
+        workflow_id=workflow.id,
+        workflow_name=workflow.name,
+        workflow_definition_json=workflow.definition_json,
+        status="uploading",
+        total_count=len(files),
+    )
     db.add(run)
     db.flush()
     log_audit_event(
@@ -1443,7 +1618,13 @@ def init_workflow_run(
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
 
-    run = WorkflowRun(workflow_id=workflow.id, status="uploading", total_count=payload.total_count)
+    run = WorkflowRun(
+        workflow_id=workflow.id,
+        workflow_name=workflow.name,
+        workflow_definition_json=workflow.definition_json,
+        status="uploading",
+        total_count=payload.total_count,
+    )
     db.add(run)
     db.flush()
     log_audit_event(
@@ -1623,39 +1804,109 @@ def pause_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRu
 def restart_workflow_run(
     run_id: str,
     background_tasks: BackgroundTasks,
+    payload: WorkflowRunRestartRequest | None = Body(default=None),
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
-    if run.status == "canceled":
-        raise HTTPException(status_code=409, detail="Canceled workflow run cannot be restarted")
     if not run.items:
         raise HTTPException(status_code=422, detail="No uploaded workflow items are available to restart")
+    workflow_id = payload.workflow_id if payload and payload.workflow_id else run.workflow_id
+    workflow = db.get(WorkflowDefinition, workflow_id)
+    if not workflow or workflow.archived:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    try:
+        validate_workflow_definition(json.loads(workflow.definition_json), db)
+    except WorkflowDefinitionError as exc:
+        raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
+
     sealed_missing_count = _seal_missing_workflow_upload_items(run, db)
     if sealed_missing_count:
         db.flush()
         db.expire(run, ["items"])
     _validate_owner_upload_complete(run, run.items)
     now = datetime.utcnow()
+    if run.status not in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}:
+        _accumulate_workflow_run_inference_duration(run, now)
+        run.execution_generation = (run.execution_generation or 0) + 1
+        run.status = "canceled"
+        run.error_message = "Replaced by restarted workflow run"
+        run.completed_at = now
+    new_run, queued_count = _create_restarted_workflow_run(run, workflow, now, db)
+    if not queued_count:
+        new_run.status = "completed_with_errors"
+        new_run.completed_at = now
+        new_run.inference_started_at = None
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=new_run.id,
+        action="restarted",
+        message=f"Created restarted workflow run with {queued_count} queued item(s)",
+        metadata={
+            "workflow_id": new_run.workflow_id,
+            "source_run_id": run.id,
+            "queued_count": queued_count,
+            "sealed_missing_count": sealed_missing_count,
+        },
+    )
+    db.commit()
+    db.refresh(new_run)
+    response = WorkflowRunRead(**workflow_run_to_read(new_run))
+    if queued_count:
+        background_tasks.add_task(run_workflow_run, new_run.id, new_run.execution_generation)
+    return response
+
+
+@app.post("/api/workflow-runs/{run_id}/retry-failed", response_model=WorkflowRunRead)
+def retry_failed_workflow_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> WorkflowRunRead:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if run.status == "canceled":
+        raise HTTPException(status_code=409, detail="Canceled workflow run cannot retry failed items")
+    blocking_statuses = {"uploading", "preprocessing", "queued", "running", "paused"}
+    blocking_count = sum(1 for item in run.items if item.status in blocking_statuses)
+    if blocking_count:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Failed items can be retried after active or paused items are finished.",
+                "blocking_count": blocking_count,
+            },
+        )
+    failed_count = sum(1 for item in run.items if item.status == "failed")
+    if not failed_count:
+        raise HTTPException(status_code=422, detail="No failed workflow items are available to retry")
+
+    now = datetime.utcnow()
     _accumulate_workflow_run_inference_duration(run, now)
     run.execution_generation = (run.execution_generation or 0) + 1
-    queued_count = _prepare_workflow_run_restart(run)
+    queued_count = _prepare_workflow_run_retry_failed(run)
     if not queued_count:
-        raise HTTPException(status_code=422, detail="No restartable workflow items are available")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "No failed workflow items can be retried because their documents are not ready.",
+                "failed_count": failed_count,
+            },
+        )
     run.status = "running"
     run.completed_at = None
     run.error_message = None
-    run.upload_duration_ms = _workflow_upload_duration_ms(run)
-    run.inference_duration_ms = None
     run.inference_started_at = now
     log_audit_event(
         db,
         entity_type="workflow_run",
         entity_id=run.id,
-        action="restarted",
-        message=f"Restarted workflow run with {queued_count} queued item(s)",
-        metadata={"workflow_id": run.workflow_id, "queued_count": queued_count, "sealed_missing_count": sealed_missing_count},
+        action="retry_failed",
+        message=f"Retried {queued_count} failed workflow item(s)",
+        metadata={"workflow_id": run.workflow_id, "queued_count": queued_count, "failed_count": failed_count},
     )
     db.commit()
     db.refresh(run)
@@ -1705,9 +1956,11 @@ def export_workflow_run(
         metadata={"format": format},
     )
     db.commit()
+    workflow_name = payload.get("workflow_name") or (run.workflow.name if run.workflow else "workflow")
+    filename = _export_filename("workflow", workflow_name, run.id, format)
     if format == "json":
-        return JSONResponse(payload, headers={"Content-Disposition": f'attachment; filename="{run.id}.json"'})
-    return _csv_download_response(workflow_run_export_csv(run), f"{run.id}.csv")
+        return JSONResponse(payload, headers=_download_headers(filename))
+    return _csv_download_response(workflow_run_export_csv(run), filename)
 
 
 @app.post("/api/batches", response_model=BatchRead)
@@ -1955,6 +2208,7 @@ def export_batch(
     payload = {
         "batch_id": batch.id,
         "schema_id": batch.schema_id,
+        "schema_name": schema.name,
         "status": _batch_read(batch).status,
         "total_count": batch.total_count,
         "rows": rows,
@@ -1969,20 +2223,22 @@ def export_batch(
     )
     db.commit()
 
+    filename = _export_filename("KIE", schema.name, batch.id, format)
     if format == "json":
         return JSONResponse(
             payload,
-            headers={"Content-Disposition": f'attachment; filename="{batch.id}.json"'},
+            headers=_download_headers(filename),
         )
 
     output = io.StringIO()
+    field_columns = [column for field_name in field_names for column in _kie_export_columns(field_name)]
     fieldnames = [
         "filename",
         "document_id",
         "job_id",
         "status",
         "error_message",
-        *field_names,
+        *field_columns,
         "warnings",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
@@ -1990,7 +2246,7 @@ def export_batch(
     for row in rows:
         writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
 
-    return _csv_download_response(output.getvalue(), f"{batch.id}.csv")
+    return _csv_download_response(output.getvalue(), filename)
 
 
 @app.post("/api/classification-batches", response_model=ClassificationBatchRead)
@@ -2203,10 +2459,14 @@ def export_classification_batch(
     batch = db.get(ClassificationBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Classification batch not found")
+    classifier = db.get(DocumentClassifier, batch.classifier_id)
+    if not classifier:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
     rows = [_classification_batch_export_row(item) for item in _sorted_module_items(batch.items)]
     payload = {
         "batch_id": batch.id,
         "classifier_id": batch.classifier_id,
+        "classifier_name": classifier.name,
         "status": _classification_batch_read(batch).status,
         "total_count": batch.total_count,
         "rows": rows,
@@ -2220,8 +2480,9 @@ def export_classification_batch(
         metadata={"format": format},
     )
     db.commit()
+    filename = _export_filename("classification", classifier.name, batch.id, format)
     if format == "json":
-        return JSONResponse(payload, headers={"Content-Disposition": f'attachment; filename="{batch.id}.json"'})
+        return JSONResponse(payload, headers=_download_headers(filename))
 
     output = io.StringIO()
     fieldnames = [
@@ -2240,7 +2501,7 @@ def export_classification_batch(
     writer.writeheader()
     for row in rows:
         writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
-    return _csv_download_response(output.getvalue(), f"{batch.id}.csv")
+    return _csv_download_response(output.getvalue(), filename)
 
 
 @app.post("/api/required-field-check-batches", response_model=RequiredFieldCheckBatchRead)
@@ -2472,6 +2733,7 @@ def export_required_field_check_batch(
     payload = {
         "batch_id": batch.id,
         "checklist_id": batch.checklist_id,
+        "checklist_name": checklist.name,
         "status": _required_field_batch_read(batch).status,
         "total_count": batch.total_count,
         "rows": rows,
@@ -2485,8 +2747,9 @@ def export_required_field_check_batch(
         metadata={"format": format},
     )
     db.commit()
+    filename = _export_filename("required_checker", checklist.name, batch.id, format)
     if format == "json":
-        return JSONResponse(payload, headers={"Content-Disposition": f'attachment; filename="{batch.id}.json"'})
+        return JSONResponse(payload, headers=_download_headers(filename))
 
     output = io.StringIO()
     item_columns = [f"{name}_status" for name in item_names] + [f"{name}_evidence" for name in item_names]
@@ -2503,7 +2766,7 @@ def export_required_field_check_batch(
     writer.writeheader()
     for row in rows:
         writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
-    return _csv_download_response(output.getvalue(), f"{batch.id}.csv")
+    return _csv_download_response(output.getvalue(), filename)
 
 
 @app.get("/api/archive/search", response_model=list[ArchiveSearchResult])
@@ -2963,6 +3226,17 @@ def _raise_if_schema_name_conflicts(db: Session, name: str, schema_id: str | Non
         raise HTTPException(status_code=409, detail=f"Schema name already exists: {normalized}")
 
 
+def _duplicate_name(name: str, existing_names: set[str], max_length: int = 120) -> str:
+    base = name.strip() or "schema"
+    for index in range(1, 10000):
+        suffix = f" ({index})"
+        truncated_base = base[: max(1, max_length - len(suffix))].rstrip()
+        candidate = f"{truncated_base}{suffix}"
+        if candidate not in existing_names:
+            return candidate
+    raise HTTPException(status_code=409, detail=f"Could not create a duplicate name for: {base}")
+
+
 def _merge_duplicate_schema_names_into(db: Session, schema: Schema, name: str) -> None:
     normalized = name.strip()
     if not normalized:
@@ -3286,6 +3560,86 @@ def _prepare_workflow_run_restart(run: WorkflowRun) -> int:
     return queued_count
 
 
+def _create_restarted_workflow_run(
+    source_run: WorkflowRun,
+    workflow: WorkflowDefinition,
+    now: datetime,
+    db: Session,
+) -> tuple[WorkflowRun, int]:
+    new_run = WorkflowRun(
+        workflow_id=workflow.id,
+        workflow_name=workflow.name,
+        workflow_definition_json=workflow.definition_json,
+        restarted_from_run_id=source_run.id,
+        status="running",
+        total_count=source_run.total_count,
+        upload_duration_ms=source_run.upload_duration_ms or _workflow_upload_duration_ms(source_run),
+        inference_started_at=now,
+        execution_generation=1,
+    )
+    db.add(new_run)
+    db.flush()
+
+    queued_count = 0
+    for source_item in _sorted_workflow_items(source_run.items):
+        document = source_item.document or db.get(Document, source_item.document_id)
+        ready = bool(document and document.status == "ready" and document.pages)
+        status = "queued" if ready else "failed"
+        message = None if ready else (document.error_message if document else source_item.error_message or "Document preprocessing was interrupted")
+        result_json = (
+            _initial_workflow_item_payload(document)
+            if ready and document
+            else json.dumps(
+                {
+                    "document_id": source_item.document_id,
+                    "filename": source_item.filename,
+                    "node_results": {},
+                    "error_message": message,
+                },
+                ensure_ascii=False,
+            )
+        )
+        db.add(
+            WorkflowRunItem(
+                run_id=new_run.id,
+                document_id=source_item.document_id,
+                filename=source_item.filename,
+                upload_index=source_item.upload_index,
+                status=status,
+                error_message=message,
+                client_file_id=source_item.client_file_id,
+                upload_duration_ms=source_item.upload_duration_ms,
+                execution_generation=new_run.execution_generation,
+                result_json=result_json,
+                completed_at=None if ready else now,
+            )
+        )
+        if ready:
+            queued_count += 1
+    return new_run, queued_count
+
+
+def _prepare_workflow_run_retry_failed(run: WorkflowRun) -> int:
+    queued_count = 0
+    now = datetime.utcnow()
+    for item in run.items:
+        if item.status != "failed":
+            continue
+        if item.document and item.document.status == "ready" and item.document.pages:
+            item.status = "queued"
+            item.error_message = None
+            item.completed_at = None
+            item.inference_duration_ms = None
+            item.execution_generation = run.execution_generation
+            item.result_json = _initial_workflow_item_payload(item.document)
+            queued_count += 1
+        else:
+            item.error_message = item.document.error_message if item.document else "Document preprocessing was interrupted"
+            item.completed_at = now
+            item.execution_generation = run.execution_generation
+    return queued_count
+
+
 def _workflow_upload_duration_ms(run: WorkflowRun) -> int | None:
     durations = [item.upload_duration_ms for item in run.items if item.upload_duration_ms is not None]
     if not durations:
@@ -3386,6 +3740,10 @@ def _batch_item_sort_key(item: BatchItem) -> tuple[str, str]:
 
 
 def _sorted_module_items(items) -> list[Any]:
+    return sorted(items, key=_module_item_sort_key)
+
+
+def _sorted_workflow_items(items) -> list[WorkflowRunItem]:
     return sorted(items, key=_module_item_sort_key)
 
 
@@ -4036,6 +4394,55 @@ def _upload_item_status(item: Any) -> str:
     return "unknown"
 
 
+def _extract_kie_cell_value(value: Any) -> Any:
+    return value.get("value") if isinstance(value, dict) else value
+
+
+def _add_kie_review_export_columns(
+    row: dict[str, Any],
+    column_prefix: str,
+    value: Any,
+    original_value: Any = None,
+    reviewed_fields: set[str] | None = None,
+    field_name: str | None = None,
+) -> None:
+    value_dict = value if isinstance(value, dict) else {}
+    ai_review = value_dict.get("ai_review") if isinstance(value_dict.get("ai_review"), dict) else {}
+    current = _extract_kie_cell_value(value)
+    original = _extract_kie_cell_value(original_value) if original_value is not None else current
+    row[column_prefix] = current
+    row[f"{column_prefix}_original"] = original
+    row[f"{column_prefix}_changed"] = current != original
+    row[f"{column_prefix}_reviewed"] = field_name in reviewed_fields if reviewed_fields is not None and field_name else False
+    row[f"{column_prefix}_warnings"] = value_dict.get("warnings", [])
+    row[f"{column_prefix}_ai_review_enabled"] = bool(ai_review.get("enabled"))
+    row[f"{column_prefix}_ai_review_status"] = ai_review.get("judgement_status")
+    row[f"{column_prefix}_ai_corrected"] = bool(ai_review.get("corrected"))
+    row[f"{column_prefix}_ai_review_reason"] = ai_review.get("judgement_reason")
+    row[f"{column_prefix}_ai_review_confidence"] = ai_review.get("judgement_confidence")
+    row[f"{column_prefix}_ai_initial_value"] = ai_review.get("initial_value")
+    row[f"{column_prefix}_ai_initial_evidence"] = ai_review.get("initial_evidence")
+    row[f"{column_prefix}_ai_correction_reason"] = ai_review.get("correction_reason")
+
+
+def _kie_export_columns(field_name: str) -> list[str]:
+    return [
+        field_name,
+        f"{field_name}_original",
+        f"{field_name}_changed",
+        f"{field_name}_reviewed",
+        f"{field_name}_warnings",
+        f"{field_name}_ai_review_enabled",
+        f"{field_name}_ai_review_status",
+        f"{field_name}_ai_corrected",
+        f"{field_name}_ai_review_reason",
+        f"{field_name}_ai_review_confidence",
+        f"{field_name}_ai_initial_value",
+        f"{field_name}_ai_initial_evidence",
+        f"{field_name}_ai_correction_reason",
+    ]
+
+
 def _batch_export_row(item: BatchItem, field_names: list[str]) -> dict[str, Any]:
     job = item.job
     row: dict[str, Any] = {
@@ -4052,15 +4459,18 @@ def _batch_export_row(item: BatchItem, field_names: list[str]) -> dict[str, Any]
         return row
 
     output = json.loads(job.result.corrected_output) if job.result.corrected_output else json.loads(job.result.validated_output)
+    original_output = json.loads(job.result.validated_output)
+    reviewed_fields = set(json.loads(job.result.reviewed_fields or "[]"))
     values = output.get("values", {})
+    original_values = original_output.get("values", {}) if isinstance(original_output.get("values"), dict) else {}
     warnings: list[str] = []
     for field_name in field_names:
         value = values.get(field_name)
         if isinstance(value, dict):
-            row[field_name] = value.get("value")
+            _add_kie_review_export_columns(row, field_name, value, original_values.get(field_name), reviewed_fields, field_name)
             warnings.extend(str(warning) for warning in value.get("warnings", []))
         else:
-            row[field_name] = value
+            _add_kie_review_export_columns(row, field_name, value, original_values.get(field_name), reviewed_fields, field_name)
     row["warnings"] = warnings
     return row
 
@@ -4126,11 +4536,35 @@ def _csv_cell(value: Any) -> Any:
     return value
 
 
+def _safe_filename_part(value: Any, fallback: str = "export") -> str:
+    text_value = str(value or "").strip() or fallback
+    text_value = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", text_value)
+    text_value = re.sub(r"\s+", "_", text_value)
+    text_value = text_value.strip("._ ")
+    return (text_value or fallback)[:100]
+
+
+def _export_filename(module: str, name: Any, identifier: str, extension: str) -> str:
+    return "_".join(
+        [
+            _safe_filename_part(module, "module"),
+            _safe_filename_part(name, "untitled"),
+            _safe_filename_part(identifier, "job"),
+        ]
+    ) + f".{extension}"
+
+
+def _download_headers(filename: str) -> dict[str, str]:
+    ascii_filename = "".join(ch if 32 <= ord(ch) < 127 else "_" for ch in filename).replace("\\", "_").replace('"', "_")
+    ascii_filename = ascii_filename or "export"
+    return {"Content-Disposition": f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{quote(filename)}"}
+
+
 def _csv_download_response(content: str, filename: str) -> Response:
     return Response(
         content=f"\ufeff{content}",
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_download_headers(filename),
     )
 
 

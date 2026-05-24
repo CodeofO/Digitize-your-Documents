@@ -70,6 +70,21 @@ def workflow_definition_to_read(workflow: WorkflowDefinition, db: Session) -> di
     }
 
 
+def _workflow_run_name(run: WorkflowRun) -> str | None:
+    return run.workflow_name or (run.workflow.name if run.workflow else None)
+
+
+def _workflow_definition_for_run(run: WorkflowRun, workflow: WorkflowDefinition | None) -> dict[str, Any]:
+    if run.workflow_definition_json:
+        try:
+            return json.loads(run.workflow_definition_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Workflow run definition snapshot is invalid") from exc
+    if not workflow or workflow.archived:
+        raise ValueError("Workflow definition not found")
+    return _workflow_definition_json(workflow)
+
+
 def workflow_run_to_read(run: WorkflowRun, *, include_items: bool = True) -> dict[str, Any]:
     items = sorted(run.items, key=_workflow_item_sort_key)
     counters = _workflow_run_counters(run, items)
@@ -79,6 +94,8 @@ def workflow_run_to_read(run: WorkflowRun, *, include_items: bool = True) -> dic
     return {
         "id": run.id,
         "workflow_id": run.workflow_id,
+        "workflow_name": _workflow_run_name(run),
+        "restarted_from_run_id": run.restarted_from_run_id,
         "status": counters["status"],
         "total_count": run.total_count,
         "completed_count": len(completed),
@@ -146,13 +163,13 @@ def run_workflow_run(run_id: str, execution_generation: int | None = None) -> No
         if run.execution_generation != generation:
             return
         workflow = db.get(WorkflowDefinition, run.workflow_id)
-        if not workflow or workflow.archived:
-            _fail_run(db, run, "Workflow definition not found")
-            return
         try:
-            graph = validate_workflow_definition(_workflow_definition_json(workflow), db)
+            graph = validate_workflow_definition(_workflow_definition_for_run(run, workflow), db)
         except WorkflowDefinitionError as exc:
             _fail_run(db, run, "; ".join(exc.errors))
+            return
+        except ValueError as exc:
+            _fail_run(db, run, str(exc))
             return
         run.status = "running"
         db.commit()
@@ -193,6 +210,8 @@ def workflow_run_export_payload(run: WorkflowRun) -> dict[str, Any]:
     return {
         "workflow_run_id": run.id,
         "workflow_id": run.workflow_id,
+        "workflow_name": _workflow_run_name(run),
+        "restarted_from_run_id": run.restarted_from_run_id,
         "status": _workflow_run_status(run, items),
         "total_count": run.total_count,
         "rows": rows,
@@ -1069,6 +1088,54 @@ def _workflow_run_counters(run: WorkflowRun, items: list[WorkflowRunItem]) -> di
     }
 
 
+def _extract_kie_cell_value(value: Any) -> Any:
+    return value.get("value") if isinstance(value, dict) else value
+
+
+def _values_payload(output: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(output, dict):
+        return {}
+    corrected = output.get("corrected_output")
+    if isinstance(corrected, dict):
+        return corrected
+    validated = output.get("validated_output")
+    return validated if isinstance(validated, dict) else {}
+
+
+def _validated_values_payload(output: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(output, dict):
+        return {}
+    validated = output.get("validated_output")
+    return validated if isinstance(validated, dict) else {}
+
+
+def _add_kie_review_export_columns(
+    row: dict[str, Any],
+    column_prefix: str,
+    value: Any,
+    original_value: Any = None,
+    reviewed_fields: set[str] | None = None,
+    field_name: str | None = None,
+) -> None:
+    value_dict = value if isinstance(value, dict) else {}
+    ai_review = value_dict.get("ai_review") if isinstance(value_dict.get("ai_review"), dict) else {}
+    current = _extract_kie_cell_value(value)
+    original = _extract_kie_cell_value(original_value) if original_value is not None else current
+    row[column_prefix] = current
+    row[f"{column_prefix}_original"] = original
+    row[f"{column_prefix}_changed"] = current != original
+    row[f"{column_prefix}_reviewed"] = field_name in reviewed_fields if reviewed_fields is not None and field_name else False
+    row[f"{column_prefix}_warnings"] = value_dict.get("warnings", [])
+    row[f"{column_prefix}_ai_review_enabled"] = bool(ai_review.get("enabled"))
+    row[f"{column_prefix}_ai_review_status"] = ai_review.get("judgement_status")
+    row[f"{column_prefix}_ai_corrected"] = bool(ai_review.get("corrected"))
+    row[f"{column_prefix}_ai_review_reason"] = ai_review.get("judgement_reason")
+    row[f"{column_prefix}_ai_review_confidence"] = ai_review.get("judgement_confidence")
+    row[f"{column_prefix}_ai_initial_value"] = ai_review.get("initial_value")
+    row[f"{column_prefix}_ai_initial_evidence"] = ai_review.get("initial_evidence")
+    row[f"{column_prefix}_ai_correction_reason"] = ai_review.get("correction_reason")
+
+
 def _workflow_export_row(item: WorkflowRunItem) -> dict[str, Any]:
     result = _json_or_empty(item.result_json)
     classification = result.get("classification") if isinstance(result.get("classification"), dict) else {}
@@ -1086,7 +1153,26 @@ def _workflow_export_row(item: WorkflowRunItem) -> dict[str, Any]:
     }
     kie_values = result.get("kie_values") if isinstance(result.get("kie_values"), dict) else {}
     for key, value in kie_values.items():
-        row[f"kie_{key}"] = value.get("value") if isinstance(value, dict) else value
+        _add_kie_review_export_columns(row, f"kie_{key}", value, field_name=key)
+    node_results = result.get("node_results") if isinstance(result.get("node_results"), dict) else {}
+    for node_result in node_results.values():
+        if not isinstance(node_result, dict) or node_result.get("kind") != "kie":
+            continue
+        output = node_result.get("result") if isinstance(node_result.get("result"), dict) else {}
+        values = _values_payload(output).get("values", {})
+        original_values = _validated_values_payload(output).get("values", {})
+        reviewed_fields = set(output.get("reviewed_fields", [])) if isinstance(output.get("reviewed_fields"), list) else set()
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            _add_kie_review_export_columns(
+                row,
+                f"kie_{key}",
+                value,
+                original_values.get(key) if isinstance(original_values, dict) else None,
+                reviewed_fields,
+                key,
+            )
     row["required_overall_status"] = result.get("required_overall_status")
     required_items = result.get("required_items") if isinstance(result.get("required_items"), dict) else {}
     for item_name, entry in required_items.items():

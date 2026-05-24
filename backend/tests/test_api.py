@@ -39,6 +39,7 @@ def test_system_status_mock_mode(monkeypatch) -> None:
         monkeypatch.setenv("VLM_PROVIDER", "mock")
         monkeypatch.setenv("UPLOAD_MAX_BATCH_FILES", "1234")
         monkeypatch.setenv("UPLOAD_CHUNK_FILES", "10")
+        monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "8")
         get_settings.cache_clear()
         with get_client() as client:
             response = client.get("/api/system/status")
@@ -56,6 +57,15 @@ def test_system_status_mock_mode(monkeypatch) -> None:
         assert "vlm_api_key" not in payload
     finally:
         get_settings.cache_clear()
+
+
+def test_database_pool_defaults_to_64_connections() -> None:
+    from app.database import engine
+
+    pool_size = getattr(engine.pool, "size", None)
+    assert callable(pool_size)
+    assert pool_size() == 64
+    assert getattr(engine.pool, "_max_overflow", None) == 0
 
 
 def test_root_env_upsert_creates_vlm_settings(monkeypatch, tmp_path) -> None:
@@ -929,6 +939,22 @@ def test_schema_delete_archives_and_allows_name_reuse() -> None:
         assert recreated["id"] != schema["id"]
 
 
+def test_schema_duplicate_copies_definition_with_incremented_name() -> None:
+    with get_client() as client:
+        schema = create_schema(client, name="성명")
+        duplicated = client.post(f"/api/schemas/{schema['id']}/duplicate")
+        assert duplicated.status_code == 200, duplicated.text
+        payload = duplicated.json()
+        assert payload["id"] != schema["id"]
+        assert payload["name"] == "성명 (1)"
+        assert payload["display_name"] == "성명 (1)"
+        assert payload["fields"] == schema["fields"]
+
+        duplicated_again = client.post(f"/api/schemas/{schema['id']}/duplicate")
+        assert duplicated_again.status_code == 200, duplicated_again.text
+        assert duplicated_again.json()["name"] == "성명 (2)"
+
+
 def test_schema_recommendation_mock_mode() -> None:
     try:
         os.environ["VLM_PROVIDER"] = "mock"
@@ -1244,6 +1270,154 @@ def test_extraction_uses_schema_regions_for_cropped_inputs(monkeypatch) -> None:
     assert region_fields[1].region_id == "region_1"
 
 
+def test_kie_prompts_are_split_by_region_presence() -> None:
+    from app.prompts.kie import build_extraction_prompt
+    from app.schemas import FieldDefinition
+
+    full_prompt = build_extraction_prompt([
+        FieldDefinition(key_name="document_date", description="Date visible on the document.", output_format="date")
+    ])
+    region_prompt = build_extraction_prompt([
+        FieldDefinition(key_name="signature", description="Signature in the lower right area.", output_format="string", region_id="region_1")
+    ])
+
+    assert "full document page images" in full_prompt
+    assert "user-designated extraction region" not in full_prompt
+    assert "labeled extraction region images" in region_prompt
+    assert "crop image is already the user-designated extraction region" in region_prompt
+
+
+def test_kie_ai_judgement_corrects_enabled_field(monkeypatch) -> None:
+    def fake_extract(fields, image_paths=None, image_inputs=None):
+        return {
+            field.key_name: {
+                "value": "WRONG" if field.key_name == "invoice_number" else "1,234.50",
+                "page": 1,
+                "evidence": f"first evidence {field.key_name}",
+                "confidence": 0.82,
+            }
+            for field in fields
+        }
+
+    judgement_calls = []
+    correction_calls = []
+
+    def fake_judge(field, initial_value, initial_evidence, image_inputs):
+        judgement_calls.append((field.key_name, initial_value, initial_evidence, image_inputs))
+        return {
+            "judgement_status": "needs_correction",
+            "reason": "The visible invoice number is different from the first-stage value.",
+            "confidence": 0.93,
+            "evidence": "Invoice number area",
+        }
+
+    def fake_correct(field, initial_value, initial_evidence, judgement_reason, image_inputs):
+        correction_calls.append((field.key_name, judgement_reason, image_inputs))
+        return {
+            "value": "INV-2026-001",
+            "page": 1,
+            "evidence": "Corrected invoice number",
+            "confidence": 0.95,
+            "correction_reason": "Correct value is visible near the top.",
+        }
+
+    monkeypatch.setattr("app.extraction.extract_with_vlm", fake_extract)
+    monkeypatch.setattr("app.extraction.judge_extraction_with_vlm", fake_judge)
+    monkeypatch.setattr("app.extraction.correct_extraction_with_vlm", fake_correct)
+
+    with get_client() as client:
+        document = upload_png(client)
+        schema = client.post(
+            "/api/schemas",
+            json={
+                "name": "judgement_schema",
+                "fields": [
+                    {
+                        "key_name": "invoice_number",
+                        "description": "Invoice number near the top.",
+                        "output_format": "string",
+                        "judgement_enabled": True,
+                    },
+                    {
+                        "key_name": "total_amount",
+                        "description": "Final total amount.",
+                        "output_format": "float",
+                    },
+                ],
+            },
+        )
+        assert schema.status_code == 200, schema.text
+        duplicated = client.post(f"/api/schemas/{schema.json()['id']}/duplicate")
+        assert duplicated.status_code == 200, duplicated.text
+        assert duplicated.json()["fields"][0]["judgement_enabled"] is True
+
+        job_response = client.post(
+            "/api/extraction-jobs",
+            json={"document_id": document["document_id"], "schema_id": schema.json()["id"]},
+        )
+        assert job_response.status_code == 200, job_response.text
+        job = client.get(f"/api/extraction-jobs/{job_response.json()['job_id']}").json()
+
+    assert job["status"] == "completed"
+    values = job["result"]["validated_output"]["values"]
+    assert values["invoice_number"]["value"] == "INV-2026-001"
+    assert values["invoice_number"]["ai_review"]["corrected"] is True
+    assert values["invoice_number"]["ai_review"]["initial_value"] == "WRONG"
+    assert "ai_review" not in values["total_amount"]
+    assert job["result"]["raw_model_output"]["invoice_number"]["value"] == "WRONG"
+    assert [call[0] for call in judgement_calls] == ["invoice_number"]
+    assert [call[0] for call in correction_calls] == ["invoice_number"]
+
+
+def test_kie_ai_judgement_failure_needs_review_without_failing_job(monkeypatch) -> None:
+    def fake_extract(fields, image_paths=None, image_inputs=None):
+        return {
+            field.key_name: {
+                "value": "INV-1",
+                "page": 1,
+                "evidence": "first evidence",
+                "confidence": 0.82,
+            }
+            for field in fields
+        }
+
+    def fake_judge(field, initial_value, initial_evidence, image_inputs):
+        raise RuntimeError("synthetic judgement failure")
+
+    monkeypatch.setattr("app.extraction.extract_with_vlm", fake_extract)
+    monkeypatch.setattr("app.extraction.judge_extraction_with_vlm", fake_judge)
+
+    with get_client() as client:
+        document = upload_png(client)
+        schema = client.post(
+            "/api/schemas",
+            json={
+                "name": "judgement_failure_schema",
+                "fields": [
+                    {
+                        "key_name": "invoice_number",
+                        "description": "Invoice number near the top.",
+                        "output_format": "string",
+                        "judgement_enabled": True,
+                    }
+                ],
+            },
+        )
+        assert schema.status_code == 200, schema.text
+        job_response = client.post(
+            "/api/extraction-jobs",
+            json={"document_id": document["document_id"], "schema_id": schema.json()["id"]},
+        )
+        assert job_response.status_code == 200, job_response.text
+        job = client.get(f"/api/extraction-jobs/{job_response.json()['job_id']}").json()
+
+    assert job["status"] == "needs_review"
+    value = job["result"]["validated_output"]["values"]["invoice_number"]
+    assert value["value"] == "INV-1"
+    assert "ai_review_failed" in value["warnings"]
+    assert value["ai_review"]["judgement_status"] == "failed"
+
+
 def test_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:
     monkeypatch.setattr("app.main.run_batch_jobs", lambda batch_id, job_ids: None)
 
@@ -1342,7 +1516,11 @@ def test_batch_export_csv_and_json_mock_mode() -> None:
             assert csv_response.content.startswith(b"\xef\xbb\xbf")
             assert "charset=utf-8" in csv_response.headers["content-type"]
             csv_text = csv_response.text
-            assert "filename,document_id,job_id,status,error_message,invoice_number,total_amount,warnings" in csv_text.splitlines()[0]
+            header = csv_text.splitlines()[0]
+            assert "filename,document_id,job_id,status,error_message,invoice_number" in header
+            assert "invoice_number_original" in header
+            assert "invoice_number_ai_review_status" in header
+            assert "total_amount_ai_corrected" in header
             assert "a_first.png" in csv_text
             assert "Sample invoice_number" in csv_text
             assert csv_text.index("a_first.png") < csv_text.index("z_last.png")
@@ -1469,6 +1647,18 @@ def test_document_classifier_config_single_job_and_patch() -> None:
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
+
+
+def test_document_classifier_duplicate_copies_classes() -> None:
+    with get_client() as client:
+        classifier = create_document_classifier(client, name="신청서 분류")
+        duplicated = client.post(f"/api/document-classifiers/{classifier['id']}/duplicate")
+        assert duplicated.status_code == 200, duplicated.text
+        payload = duplicated.json()
+        assert payload["id"] != classifier["id"]
+        assert payload["name"] == "신청서 분류 (1)"
+        assert payload["classes"] == classifier["classes"]
+        assert payload["allow_unknown"] == classifier["allow_unknown"]
 
 
 def test_document_classifier_batch_cancel_and_export(monkeypatch) -> None:
@@ -1605,6 +1795,68 @@ def test_required_field_checklist_single_job_and_region_validation() -> None:
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
+
+
+def test_required_checker_splits_full_page_and_region_requests(monkeypatch) -> None:
+    captured_calls: list[dict[str, object]] = []
+
+    def fake_check(items, regions, image_paths=None, image_inputs=None):
+        captured_calls.append(
+            {
+                "item_names": [item.item_name for item in items],
+                "region_ids": [region.id for region in regions],
+                "labels": [item["label"] for item in image_inputs or []],
+            }
+        )
+        return {
+            "overall_status": "complete",
+            "items": [
+                {
+                    "item_name": item.item_name,
+                    "status": "present",
+                    "confidence": 0.9,
+                    "evidence": "captured",
+                    "page": 1,
+                }
+                for item in items
+            ],
+        }
+
+    monkeypatch.setattr("app.document_modules.check_required_fields_with_vlm", fake_check)
+
+    with get_client() as client:
+        checklist = create_required_field_checklist(client, name="split_required_checklist")
+        document = upload_png(client)
+        response = client.post(
+            "/api/required-field-check-jobs",
+            json={"document_id": document["document_id"], "checklist_id": checklist["id"]},
+        )
+        assert response.status_code == 200, response.text
+        job = client.get(f"/api/required-field-check-jobs/{response.json()['job_id']}").json()
+
+    assert job["status"] == "completed"
+    assert len(captured_calls) == 2
+    full_page_call = next(call for call in captured_calls if call["region_ids"] == [])
+    assert full_page_call["item_names"] == ["성명", "체크박스"]
+    assert any("Full document page" in label for label in full_page_call["labels"])
+
+    region_call = next(call for call in captured_calls if call["region_ids"] == ["signature_region"])
+    assert region_call["item_names"] == ["서명"]
+    assert any("Masked context" in label and "서명 영역" in label for label in region_call["labels"])
+    assert any("Cropped required field region" in label and "서명 영역" in label for label in region_call["labels"])
+    assert not any("Full document page" in label for label in region_call["labels"])
+
+
+def test_required_field_checklist_duplicate_copies_items_and_regions() -> None:
+    with get_client() as client:
+        checklist = create_required_field_checklist(client, name="필수 정보")
+        duplicated = client.post(f"/api/required-field-checklists/{checklist['id']}/duplicate")
+        assert duplicated.status_code == 200, duplicated.text
+        payload = duplicated.json()
+        assert payload["id"] != checklist["id"]
+        assert payload["name"] == "필수 정보 (1)"
+        assert payload["items"] == checklist["items"]
+        assert payload["regions"] == checklist["regions"]
 
 
 def test_required_field_check_batch_export_mock_mode() -> None:
@@ -1926,6 +2178,8 @@ def test_workflow_restart_seals_missing_upload_slots(monkeypatch) -> None:
         restarted = client.post(f"/api/workflow-runs/{run_id}/restart")
         assert restarted.status_code == 200, restarted.text
         payload = restarted.json()
+        assert payload["id"] != run_id
+        assert payload["restarted_from_run_id"] == run_id
         assert payload["status"] == "running"
         assert payload["uploaded_count"] == 3
         assert payload["failed_count"] == 2
@@ -1971,9 +2225,56 @@ def test_workflow_pause_preserves_uploads_and_restart_requeues(monkeypatch) -> N
         restarted = client.post(f"/api/workflow-runs/{run_id}/restart")
         assert restarted.status_code == 200, restarted.text
         payload = restarted.json()
+        assert payload["id"] != run_id
+        assert payload["restarted_from_run_id"] == run_id
         assert payload["status"] == "running"
         assert payload["queued_count"] == 2
         assert {item["status"] for item in payload["items"]} == {"queued"}
+
+
+def test_workflow_restart_can_create_new_run_with_current_workflow_without_copying_documents(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_workflow_run", lambda *args: None)
+
+    with get_client() as client:
+        schema = create_schema(client, name="workflow_restart_target_schema")
+        classifier = create_document_classifier(client, name="workflow_restart_target_classifier")
+        checklist = create_required_field_checklist(client, name="workflow_restart_target_checklist")
+        workflow_one = client.post(
+            "/api/workflows",
+            json={"name": "workflow_one", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        workflow_two = client.post(
+            "/api/workflows",
+            json={"name": "workflow_two", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        assert workflow_one.status_code == 200, workflow_one.text
+        assert workflow_two.status_code == 200, workflow_two.text
+
+        run_response = client.post(
+            f"/api/workflows/{workflow_one.json()['id']}/runs",
+            files=[
+                ("files", ("first.png", ONE_BY_ONE_PNG, "image/png")),
+                ("files", ("second.png", ONE_BY_ONE_PNG, "image/png")),
+            ],
+        )
+        assert run_response.status_code == 200, run_response.text
+        source_run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
+        source_document_ids = [item["document_id"] for item in source_run["items"]]
+
+        restarted = client.post(
+            f"/api/workflow-runs/{source_run['id']}/restart",
+            json={"workflow_id": workflow_two.json()["id"]},
+        )
+        assert restarted.status_code == 200, restarted.text
+        new_run = restarted.json()
+        assert new_run["id"] != source_run["id"]
+        assert new_run["workflow_id"] == workflow_two.json()["id"]
+        assert new_run["workflow_name"] == "workflow_two"
+        assert new_run["restarted_from_run_id"] == source_run["id"]
+        assert [item["document_id"] for item in new_run["items"]] == source_document_ids
+
+        replaced_source = client.get(f"/api/workflow-runs/{source_run['id']}").json()
+        assert replaced_source["status"] == "canceled"
 
 
 def test_workflow_restart_retries_failed_items_without_reupload(monkeypatch) -> None:
@@ -2041,15 +2342,20 @@ def test_workflow_restart_retries_failed_items_without_reupload(monkeypatch) -> 
             monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_success_execute)
             restarted = client.post(f"/api/workflow-runs/{run_id}/restart")
             assert restarted.status_code == 200, restarted.text
-            payload = client.get(f"/api/workflow-runs/{run_id}").json()
+            restarted_id = restarted.json()["id"]
+            assert restarted_id != run_id
+            payload = client.get(f"/api/workflow-runs/{restarted_id}").json()
             assert payload["status"] == "completed"
+            assert payload["restarted_from_run_id"] == run_id
             assert payload["uploaded_count"] == 2
             assert [item["document_id"] for item in payload["items"]] == document_ids
             assert {item["status"] for item in payload["items"]} == {"completed"}
 
-            restarted_completed = client.post(f"/api/workflow-runs/{run_id}/restart")
+            restarted_completed = client.post(f"/api/workflow-runs/{restarted_id}/restart")
             assert restarted_completed.status_code == 200, restarted_completed.text
-            payload = client.get(f"/api/workflow-runs/{run_id}").json()
+            second_restart_id = restarted_completed.json()["id"]
+            assert second_restart_id != restarted_id
+            payload = client.get(f"/api/workflow-runs/{second_restart_id}").json()
             assert payload["status"] == "completed"
             assert [item["document_id"] for item in payload["items"]] == document_ids
             assert {item["status"] for item in payload["items"]} == {"completed"}
@@ -2278,6 +2584,67 @@ def test_workflow_parallel_item_failure_does_not_stop_other_items(monkeypatch) -
             assert statuses["doc_1.png"] == "failed"
             assert statuses["doc_0.png"] == "completed"
             assert statuses["doc_2.png"] == "completed"
+    finally:
+        os.environ.pop("VLM_MAX_CONCURRENT_REQUESTS", None)
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_retry_failed_items_requeues_only_failures(monkeypatch) -> None:
+    attempts: dict[str, int] = {}
+
+    def fake_execute(db, item, graph):
+        attempts[item.filename] = attempts.get(item.filename, 0) + 1
+        if item.filename == "doc_1.png" and attempts[item.filename] == 1:
+            raise RuntimeError("synthetic transient failure")
+        return {
+            "document_id": item.document_id,
+            "filename": item.filename,
+            "status": "completed",
+            "error_message": None,
+            "branch_path": "class:contract",
+            "path_node_ids": ["classifier"],
+            "completed_node_ids": ["classifier"],
+            "current_node_id": None,
+            "current_node_kind": None,
+            "current_node_label": None,
+            "node_results": {},
+            "classification": {"status": "classified", "class_name": "contract"},
+            "kie_values": {},
+            "required_overall_status": None,
+            "required_items": {},
+        }
+
+    monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_execute)
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        os.environ["VLM_MAX_CONCURRENT_REQUESTS"] = "2"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="workflow_retry_schema")
+            classifier = create_document_classifier(client, name="workflow_retry_classifier")
+            checklist = create_required_field_checklist(client, name="workflow_retry_checklist")
+            workflow = client.post(
+                "/api/workflows",
+                json={"name": "retry_failed_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+            )
+            assert workflow.status_code == 200, workflow.text
+            run_response = client.post(
+                f"/api/workflows/{workflow.json()['id']}/runs",
+                files=[("files", (f"doc_{index}.png", ONE_BY_ONE_PNG, "image/png")) for index in range(2)],
+            )
+            assert run_response.status_code == 200, run_response.text
+            run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
+            assert run["status"] == "completed_with_errors"
+            assert run["failed_count"] == 1
+
+            retry = client.post(f"/api/workflow-runs/{run['id']}/retry-failed")
+            assert retry.status_code == 200, retry.text
+            retried = client.get(f"/api/workflow-runs/{run['id']}").json()
+            assert retried["status"] == "completed"
+            assert retried["completed_count"] == 2
+            assert retried["failed_count"] == 0
+            assert attempts == {"doc_0.png": 1, "doc_1.png": 2}
     finally:
         os.environ.pop("VLM_MAX_CONCURRENT_REQUESTS", None)
         os.environ["VLM_PROVIDER"] = "openai"

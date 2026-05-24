@@ -6,6 +6,7 @@ import {
   ChevronUp,
   CircleHelp,
   ClipboardList,
+  Copy,
   Download,
   FileDown,
   FileJson,
@@ -42,6 +43,7 @@ const LEFT_PANE_PERCENT_KEY = "digitize_left_pane_percent_v1";
 const OUTPUT_FORMATS = ["string", "float", "date", "bool"] as const;
 const KIE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const KIE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
+const RAW_FILE_ACCEPT = ".docx,.xlsx,.pptx,.pdf";
 const DEFAULT_UPLOAD_CHUNK_FILES = 10;
 const BATCH_FILE_ROW_HEIGHT = 84;
 const BATCH_FILE_OVERSCAN = 8;
@@ -77,7 +79,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 type AppMode = "home" | "raw" | "key-info" | "classifier" | "required-checker" | "workflow" | "workflow-result";
 type Step = "upload" | "schema" | "review";
-type ReviewFilter = "needs_review" | "all" | "warning" | "null" | "changed" | "low_confidence" | "unreviewed";
+type ReviewFilter = "needs_review" | "all" | "warning" | "null" | "changed" | "low_confidence" | "unreviewed" | "ai_corrected" | "ai_review_failed";
 type HistoryTab = "documents" | "schemas" | "jobs";
 type ZoomMode = "manual" | "fitWidth" | "fitPage";
 
@@ -139,6 +141,7 @@ type FieldDefinition = {
   output_format: OutputFormat;
   region_id?: string | null;
   region?: FieldRegion | null;
+  judgement_enabled?: boolean;
 };
 
 type SchemaField = FieldDefinition & {
@@ -183,6 +186,17 @@ type ExtractionValue = {
   confidence: number | null;
   evidence: string | null;
   warnings: string[];
+  ai_review?: {
+    enabled?: boolean;
+    mode?: "full_page" | "region" | string;
+    judgement_status?: "correct" | "needs_correction" | "failed" | string;
+    judgement_reason?: string | null;
+    judgement_confidence?: number | null;
+    initial_value?: unknown;
+    initial_evidence?: string | null;
+    corrected?: boolean;
+    correction_reason?: string | null;
+  };
 };
 
 type ValidatedOutput = {
@@ -268,6 +282,7 @@ type HomeWorkflowRun = {
   completed_count: number;
   failed_count: number;
   needs_review_count: number;
+  canceled_count?: number;
   uploaded_count?: number;
   preprocessing_count?: number;
   ready_count?: number;
@@ -314,7 +329,10 @@ type HomeMonitorItem = {
   preprocessingCount: number;
   runningCount: number;
   queuedCount: number;
+  needsReviewCount: number;
   failedCount: number;
+  canceledCount: number;
+  pausedCount: number;
   createdAt: string;
 };
 
@@ -645,6 +663,85 @@ async function filesFromEntry(entry: WebkitFileSystemEntry, parentPath = ""): Pr
   return nested.flat();
 }
 
+function useUploadPickerMenu() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      if (event.target instanceof globalThis.Node && ref.current?.contains(event.target)) return;
+      setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  return {
+    open,
+    ref,
+    close: () => setOpen(false),
+    toggle: () => setOpen((current) => !current)
+  };
+}
+
+function UnifiedUploadPicker(props: {
+  accept: string;
+  disabled?: boolean;
+  includeFolder?: boolean;
+  label?: string;
+  multiple?: boolean;
+  selectedCount?: number;
+  align?: "left" | "right";
+  onSelectFiles: (files: FileList | null) => void;
+}) {
+  const menu = useUploadPickerMenu();
+  const includeFolder = props.includeFolder ?? true;
+  const multiple = props.multiple ?? true;
+  const triggerLabel = props.selectedCount ? `${props.selectedCount.toLocaleString()}개 파일 선택됨` : props.label ?? "업로드";
+  const onChange = (event: ChangeEvent<HTMLInputElement>) => {
+    menu.close();
+    props.onSelectFiles(event.target.files);
+    event.currentTarget.value = "";
+  };
+
+  return (
+    <div className="workflow-upload-picker unified-upload-picker" ref={menu.ref}>
+      <button
+        type="button"
+        className="workflow-upload"
+        disabled={props.disabled}
+        aria-haspopup="menu"
+        aria-expanded={menu.open}
+        onClick={menu.toggle}
+      >
+        <UploadCloud size={17} />
+        <span>{triggerLabel}</span>
+      </button>
+      {menu.open && !props.disabled && (
+        <div className={`workflow-upload-menu ${props.align === "right" ? "workflow-upload-menu-right" : ""}`} role="menu">
+          <label className="workflow-upload-menu-item" role="menuitem">
+            파일 선택
+            <input type="file" multiple={multiple} accept={props.accept} onChange={onChange} />
+          </label>
+          {includeFolder && (
+            <label className="workflow-upload-menu-item" role="menuitem">
+              폴더 선택
+              <input
+                type="file"
+                multiple
+                accept={props.accept}
+                onChange={onChange}
+                {...{ webkitdirectory: "", directory: "" }}
+              />
+            </label>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [mode, setMode] = useState<AppMode>(() => modeFromLocation());
   const [step, setStep] = useState<Step>("upload");
@@ -780,6 +877,11 @@ export default function App() {
 
   const schemaPayloadFields = useMemo(() => fields.map(stripLocalId), [fields]);
   const schemaPayloadRegions = useMemo(() => regions.map(normalizeSchemaRegion).filter(Boolean) as SchemaRegion[], [regions]);
+  const assignedSchemaRegions = useMemo(() => {
+    const assignedRegionIds = new Set(schemaPayloadFields.map((field) => field.region_id).filter(Boolean));
+    return schemaPayloadRegions.filter((region) => assignedRegionIds.has(region.id));
+  }, [schemaPayloadFields, schemaPayloadRegions]);
+  const assignedRegionsVisible = regionsVisible && assignedSchemaRegions.length > 0;
   const schemaPreview = useMemo(
     () =>
       JSON.stringify(
@@ -1344,24 +1446,46 @@ export default function App() {
   }
 
   async function recommendSchema() {
-    if (!document) {
-      setError("AI 추천 schema를 사용하려면 먼저 문서를 업로드하세요.");
-      return;
-    }
-    setBusy("AI schema 추천 중");
     setError(null);
     try {
+      let sourceDocument = document;
+      if (!sourceDocument && batchFiles.length) {
+        const sourceFile = batchFiles[draftBatchIndex] ?? batchFiles[0];
+        if (sourceFile) {
+          setBusy("AI schema 추천용 문서 업로드 중");
+          const form = new FormData();
+          form.append("file", sourceFile);
+          sourceDocument = await api<UploadedDocument>("/api/documents", {
+            method: "POST",
+            body: form
+          });
+          setActiveBatchId(null);
+          setActiveBatchItemId(null);
+          applyDocument(sourceDocument);
+          setStep("schema");
+          if (batchFiles.length === 1) {
+            setBatchFiles([]);
+            setDraftBatchIndex(0);
+          }
+          await refreshHistory();
+        }
+      }
+      if (!sourceDocument) {
+        setError("AI 추천 schema를 사용하려면 먼저 문서나 파일을 선택하세요.");
+        return;
+      }
+      setBusy("AI schema 추천 중");
       const recommendation = await api<SchemaRecommendation>("/api/schemas/recommendations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_id: document.document_id })
+        body: JSON.stringify({ document_id: sourceDocument.document_id })
       });
       if (schemaDirty || hasMeaningfulSchema(fields)) {
         setPendingRecommendation(recommendation);
       } else {
         applyRecommendation(recommendation);
       }
-      const updatedDocument = await api<UploadedDocument>(`/api/documents/${document.document_id}`);
+      const updatedDocument = await api<UploadedDocument>(`/api/documents/${sourceDocument.document_id}`);
       setDocument(updatedDocument);
       await refreshHistory();
     } catch (err) {
@@ -1633,6 +1757,26 @@ export default function App() {
     }
   }
 
+  async function duplicateSchema(schemaId: string) {
+    setBusy("Schema 복제 중");
+    setError(null);
+    try {
+      const duplicated = await api<SavedSchema>(`/api/schemas/${schemaId}/duplicate`, { method: "POST" });
+      schemaCacheRef.current.set(duplicated.id, duplicated);
+      setRecentSchemas((current) => [duplicated, ...current.filter((item) => item.id !== duplicated.id)]);
+      applySchema(duplicated);
+      setSchemaDirty(false);
+      setSchemaSaveStatus("saved");
+      setSchemaSaveMessage(null);
+      setStep("schema");
+      await refreshHistory();
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function getCachedDocument(documentId: string, options: { signal?: AbortSignal } = {}) {
     const cached = documentCacheRef.current.get(documentId);
     if (cached) return cached;
@@ -1824,7 +1968,8 @@ export default function App() {
         description: String(field.description ?? "").trim(),
         output_format: field.output_format as OutputFormat,
         region_id: typeof field.region_id === "string" ? field.region_id.trim() || null : null,
-        region: normalizeRegion(field.region)
+        region: normalizeRegion(field.region),
+        judgement_enabled: Boolean(field.judgement_enabled)
       }));
       const regionsFromJson = Array.isArray((parsed as { regions?: unknown }).regions)
         ? ((parsed as { regions?: unknown[] }).regions ?? []).map(normalizeSchemaRegion).filter(Boolean) as SchemaRegion[]
@@ -2316,8 +2461,8 @@ export default function App() {
                 selectedFiles={batchFiles}
                 selectedFileUrl={selectedDraftUrl}
                 selectedFileIndex={draftBatchIndex}
-                regions={regions}
-                showRegions={regionsVisible}
+                regions={assignedSchemaRegions}
+                showRegions={assignedRegionsVisible}
                 message={batchMessage}
                 activeSchemaName={activeSchemaSummary.name}
                 activeSchemaFieldCount={activeSchemaSummary.fieldCount}
@@ -2352,8 +2497,9 @@ export default function App() {
                     document={document}
                     activePage={activePage}
                     activeImageUrl={activeImageUrl}
-                    regions={regions}
-                    showRegions={regionsVisible}
+                    regions={assignedSchemaRegions}
+                    showRegions={assignedRegionsVisible}
+                    hideThumbnailRail={Boolean(activeBatch)}
                     zoom={zoom}
                     zoomMode={zoomMode}
                     rotation={rotation}
@@ -2432,6 +2578,14 @@ export default function App() {
                 }}
                 onSaveTemplate={() => void markSchemaAsTemplate()}
                 onOpenLibrary={() => setSchemaLibraryOpen(true)}
+                canRecommendSchema={Boolean(document || batchFiles.length)}
+                recommendSchemaTitle={
+                  document
+                    ? "AI가 현재 문서를 기준으로 schema를 추천합니다."
+                    : batchFiles.length
+                      ? "선택한 파일을 먼저 업로드한 뒤 AI가 schema를 추천합니다."
+                      : "문서나 파일을 먼저 선택해야 AI schema 추천을 사용할 수 있습니다."
+                }
                 canExtract={Boolean(document)}
               />
             ) : result ? (
@@ -2516,6 +2670,7 @@ export default function App() {
             onLoadSavedSchema={(schemaId) => void loadSchema(schemaId)}
             onNewSchema={startNewSchemaDraft}
             onDeleteSchema={(schemaId) => void deleteSchema(schemaId)}
+            onDuplicateSchema={(schemaId) => void duplicateSchema(schemaId)}
             onSchemaJsonInput={setSchemaJsonInput}
             onImportSchemaJson={importSchemaJson}
             onSaveRegion={saveRegion}
@@ -2822,10 +2977,13 @@ function HomeMonitorPanel(props: {
           {props.items.map((item) => (
             <div
               key={`${item.target}-${item.id}`}
-              className={`home-monitor-row ${isActiveHomeStatus(item.status) ? "active" : ""}`}
+              className={`home-monitor-row ${isActiveHomeStatus(item.status) ? "active" : ""} ${isStoppedHomeStatus(item.status) ? "stopped" : ""}`}
             >
               <div className="home-monitor-main">
-                <span className="home-monitor-module">{item.moduleLabel}</span>
+                <div className="home-monitor-meta">
+                  <span className="home-monitor-module">{item.moduleLabel}</span>
+                  <span className={`home-monitor-status ${item.status}`}>{statusLabel(item.status)}</span>
+                </div>
                 <strong>{item.title}</strong>
                 <small>
                   {item.doneCount.toLocaleString()} / {item.totalCount.toLocaleString()} 처리
@@ -2833,8 +2991,12 @@ function HomeMonitorPanel(props: {
                   {item.preprocessingCount ? ` · ${item.preprocessingCount.toLocaleString()} 전처리` : ""}
                   {item.runningCount ? ` · ${item.runningCount.toLocaleString()} 실행 중` : ""}
                   {item.queuedCount ? ` · ${item.queuedCount.toLocaleString()} 대기` : ""}
+                  {item.pausedCount ? ` · ${item.pausedCount.toLocaleString()} 일시중단` : ""}
+                  {item.needsReviewCount ? ` · ${item.needsReviewCount.toLocaleString()} 검토` : ""}
                   {item.failedCount ? ` · ${item.failedCount.toLocaleString()} 실패` : ""}
+                  {item.canceledCount ? ` · ${item.canceledCount.toLocaleString()} 취소` : ""}
                 </small>
+                {homeMonitorStopReason(item) && <small className="home-monitor-stop-reason">{homeMonitorStopReason(item)}</small>}
                 <div className="home-monitor-progress" aria-label={`${Math.round(item.progress * 100)}%`}>
                   <div>
                     <span style={{ width: `${Math.round(item.progress * 100)}%` }} />
@@ -2861,22 +3023,29 @@ function buildHomeMonitorItems(
   classificationBatches: HomeModuleBatch[],
   requiredBatches: HomeModuleBatch[]
 ) {
-  const workflowItems: HomeMonitorItem[] = workflowRuns.map((run) => ({
-    id: run.id,
-    target: "workflow",
-    moduleLabel: "워크플로우",
-    title: "워크플로우 실행",
-    status: run.status,
-    progress: run.progress ?? progressFromCounts(run.items, run.total_count, run.progress),
-    totalCount: run.total_count,
-    doneCount: Math.min(run.total_count, run.completed_count + run.failed_count),
-    uploadedCount: run.uploaded_count ?? run.items.length,
-    preprocessingCount: run.preprocessing_count ?? run.items.filter((item) => item.status === "preprocessing").length,
-    runningCount: run.running_count ?? run.items.filter((item) => item.status === "running").length,
-    queuedCount: run.queued_count ?? run.items.filter((item) => item.status === "queued").length,
-    failedCount: run.failed_count,
-    createdAt: run.created_at
-  }));
+  const workflowItems: HomeMonitorItem[] = workflowRuns.map((run) => {
+    const pausedCount = run.items.filter((item) => item.status === "paused").length;
+    const canceledCount = run.canceled_count ?? run.items.filter((item) => item.status === "canceled").length;
+    return {
+      id: run.id,
+      target: "workflow",
+      moduleLabel: "워크플로우",
+      title: "워크플로우 실행",
+      status: run.status,
+      progress: run.progress ?? progressFromCounts(run.items, run.total_count, run.progress),
+      totalCount: run.total_count,
+      doneCount: Math.min(run.total_count, run.completed_count + run.failed_count + run.needs_review_count + canceledCount),
+      uploadedCount: run.uploaded_count ?? run.items.length,
+      preprocessingCount: run.preprocessing_count ?? run.items.filter((item) => item.status === "preprocessing").length,
+      runningCount: run.running_count ?? run.items.filter((item) => item.status === "running").length,
+      queuedCount: run.queued_count ?? run.items.filter((item) => item.status === "queued").length,
+      needsReviewCount: run.needs_review_count,
+      failedCount: run.failed_count,
+      canceledCount,
+      pausedCount,
+      createdAt: run.created_at
+    };
+  });
 
   const moduleItems = [
     ...kieBatches.map((batch) => homeBatchToMonitorItem(batch, "key-info", "핵심 정보 추출")),
@@ -2893,7 +3062,9 @@ function buildHomeMonitorItems(
 function homeBatchToMonitorItem(batch: HomeModuleBatch | Batch, target: HomeMonitorTarget, moduleLabel: string): HomeMonitorItem {
   const runningCount = batch.running_count ?? batch.items.filter((item) => item.status === "running").length;
   const queuedCount = batch.queued_count ?? batch.items.filter((item) => item.status === "queued").length;
-  const doneCount = Math.min(batch.total_count, batch.completed_count + batch.failed_count + batch.canceled_count);
+  const needsReviewCount = batch.needs_review_count ?? batch.items.filter((item) => item.status === "needs_review").length;
+  const pausedCount = batch.items.filter((item) => item.status === "paused").length;
+  const doneCount = Math.min(batch.total_count, batch.completed_count + batch.failed_count + batch.canceled_count + needsReviewCount);
   return {
     id: batch.id,
     target,
@@ -2907,7 +3078,10 @@ function homeBatchToMonitorItem(batch: HomeModuleBatch | Batch, target: HomeMoni
     preprocessingCount: batch.preprocessing_count ?? batch.items.filter((item) => item.status === "preprocessing").length,
     runningCount,
     queuedCount,
+    needsReviewCount,
     failedCount: batch.failed_count,
+    canceledCount: batch.canceled_count,
+    pausedCount,
     createdAt: batch.created_at
   };
 }
@@ -2918,6 +3092,19 @@ function hasRunningHomeItems(items: { status: string }[]) {
 
 function isActiveHomeStatus(status: string) {
   return ["uploading", "preprocessing", "queued", "running", "cancel_requested", "canceling"].includes(status);
+}
+
+function isStoppedHomeStatus(status: string) {
+  return ["paused", "interrupted", "failed", "canceled", "completed_with_errors"].includes(status);
+}
+
+function homeMonitorStopReason(item: HomeMonitorItem) {
+  if (item.status === "paused") return "진행 중 아님 · 사용자가 일시중단했습니다.";
+  if (item.status === "interrupted") return "진행 중 아님 · 업로드 또는 실행이 중간에 끊겼습니다.";
+  if (item.status === "canceled") return "진행 중 아님 · 취소 또는 중단·정리된 작업입니다.";
+  if (item.status === "failed") return "진행 중 아님 · 실패로 종료되었습니다.";
+  if (item.status === "completed_with_errors") return "진행 중 아님 · 일부 항목이 실패 또는 취소된 상태로 종료되었습니다.";
+  return null;
 }
 
 function terminalItemCount(items: { status: string }[], totalCount: number) {
@@ -2959,6 +3146,12 @@ function RawWorkspace(props: {
   function onFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (file) props.onUpload(file, props.rawOptions);
+    event.currentTarget.value = "";
+  }
+
+  function onSelectUploadFiles(files: FileList | null) {
+    const file = files?.[0];
+    if (file) props.onUpload(file, props.rawOptions);
   }
 
   return (
@@ -2980,7 +3173,7 @@ function RawWorkspace(props: {
             <UploadCloud size={32} />
             <strong>원문 문서 업로드</strong>
             <span>DOCX, XLSX, PPTX 또는 PDF</span>
-            <input type="file" accept=".docx,.xlsx,.pptx,.pdf" onChange={onFileChange} />
+            <input type="file" accept={RAW_FILE_ACCEPT} onChange={onFileChange} />
           </label>
         )}
       </section>
@@ -3008,11 +3201,13 @@ function RawWorkspace(props: {
               </a>
             )}
           </div>
-          <label className="batch-upload">
-            <UploadCloud size={16} />
-            <span>원문 추출 파일 업로드</span>
-            <input type="file" accept=".docx,.xlsx,.pptx,.pdf" onChange={onFileChange} />
-          </label>
+          <UnifiedUploadPicker
+            accept={RAW_FILE_ACCEPT}
+            includeFolder={false}
+            label="업로드"
+            multiple={false}
+            onSelectFiles={onSelectUploadFiles}
+          />
           <div className="option-list">
             <label>
               <input
@@ -3107,11 +3302,6 @@ function KieUploadPanel(props: {
     props.onSelectFiles(await filesFromDataTransfer(event.dataTransfer));
   }
 
-  function onUnifiedFileChange(event: ChangeEvent<HTMLInputElement>) {
-    props.onSelectFiles(event.target.files);
-    event.currentTarget.value = "";
-  }
-
   function renderSchemaCard() {
     return (
       <div className={props.activeSchemaReady ? "active-schema-card ready" : "active-schema-card warning"}>
@@ -3127,26 +3317,14 @@ function KieUploadPanel(props: {
     );
   }
 
-  function renderFilePickers() {
+  function renderUploadPicker() {
     return (
-      <div className="module-upload-actions">
-        <label className="batch-upload">
-          <FileUp size={16} />
-          <span>파일 선택</span>
-          <input type="file" accept={KIE_FILE_ACCEPT} multiple onChange={onUnifiedFileChange} />
-        </label>
-        <label className="batch-upload">
-          <UploadCloud size={16} />
-          <span>폴더 선택</span>
-          <input
-            type="file"
-            accept={KIE_FILE_ACCEPT}
-            multiple
-            onChange={onUnifiedFileChange}
-            {...{ webkitdirectory: "", directory: "" }}
-          />
-        </label>
-      </div>
+      <UnifiedUploadPicker
+        accept={KIE_FILE_ACCEPT}
+        label="업로드"
+        selectedCount={props.selectedFiles.length}
+        onSelectFiles={props.onSelectFiles}
+      />
     );
   }
 
@@ -3190,27 +3368,17 @@ function KieUploadPanel(props: {
 
       <div className="module-upload-zone kie-module-upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={onUnifiedDrop}>
         {props.selectedFiles.length ? (
-          <div className="module-draft-layout kie-draft-layout">
-            <aside className="module-selected-list">
-              <div className="module-selected-summary">
-                <strong>{props.selectedFiles.length}개 파일</strong>
-                <span>실행 대기</span>
-              </div>
-              {props.selectedFiles.map((file, index) => (
-                <button
-                  key={`${fileDisplayName(file)}_${file.size}_${index}`}
-                  type="button"
-                  className={index === props.selectedFileIndex ? "active" : ""}
-                  onClick={() => props.onSelectFile(index)}
-                >
-                  <span>{fileDisplayName(file)}</span>
-                  <small>{formatFileSize(file.size)}</small>
-                </button>
-              ))}
-              {renderFilePickers()}
-              {renderSchemaCard()}
-              {props.message && <div className="success-card">{props.message}</div>}
-            </aside>
+          <div className={props.selectedFiles.length === 1 ? "module-draft-layout kie-draft-layout single-file" : "module-draft-layout kie-draft-layout"}>
+            {props.selectedFiles.length > 1 && (
+              <aside className="draft-file-rail kie-selected-list">
+                <div className="module-selected-summary">
+                  <strong>{props.selectedFiles.length}개 파일</strong>
+                  <span>실행 대기</span>
+                </div>
+                <VirtualDraftFileList files={props.selectedFiles} selectedIndex={props.selectedFileIndex} onSelectFile={props.onSelectFile} />
+                {props.message && <div className="success-card">{props.message}</div>}
+              </aside>
+            )}
             <KieDraftPreview file={selectedFile} previewUrl={selectedUrl} regions={props.regions} showRegions={props.showRegions} />
           </div>
         ) : (
@@ -3221,7 +3389,7 @@ function KieUploadPanel(props: {
               <strong>파일 또는 폴더를 업로드하세요</strong>
               <span>PDF, 이미지, DOCX, PPTX를 업로드할 수 있습니다.</span>
             </div>
-            {renderFilePickers()}
+            {renderUploadPicker()}
             <div className="kie-upload-schema-inline">{renderSchemaCard()}</div>
             {props.message && <div className="success-card">{props.message}</div>}
           </>
@@ -3541,6 +3709,21 @@ function RegionOverlay({ regions, page }: { regions: SchemaRegion[]; page: numbe
   );
 }
 
+function SettingsField(props: {
+  label: string;
+  help?: string;
+  wide?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <label className={props.wide ? "settings-field wide-field" : "settings-field"}>
+      <span className="settings-field-label">{props.label}</span>
+      {props.children}
+      {props.help && <small className="settings-help">{props.help}</small>}
+    </label>
+  );
+}
+
 function SettingsDialog(props: {
   vlmSettings: VlmSettings | null;
   vlmApiKey: string;
@@ -3583,8 +3766,7 @@ function SettingsDialog(props: {
           </button>
         </div>
         <div className="settings-grid">
-          <label>
-            <span>API key</span>
+          <SettingsField label="API key">
             <input
               type="password"
               value={props.vlmApiKey}
@@ -3592,27 +3774,24 @@ function SettingsDialog(props: {
               disabled={!settingsWritable}
               onChange={(event) => props.onVlmApiKey(event.target.value)}
             />
-          </label>
-          <label>
-            <span>Model name</span>
+          </SettingsField>
+          <SettingsField label="Model name">
             <input
               value={props.vlmModelName}
               placeholder="gpt-4.1-mini"
               disabled={!settingsWritable}
               onChange={(event) => props.onVlmModelName(event.target.value)}
             />
-          </label>
-          <label className="wide-field">
-            <span>LibreOffice path</span>
+          </SettingsField>
+          <SettingsField label="LibreOffice path" wide>
             <input
               value={props.libreOfficePath}
               placeholder="/Applications/LibreOffice.app/Contents/MacOS/soffice"
               disabled={!settingsWritable}
               onChange={(event) => props.onLibreOfficePath(event.target.value)}
             />
-          </label>
-          <label>
-            <span>Reasoning effort</span>
+          </SettingsField>
+          <SettingsField label="Reasoning effort">
             <select value={props.reasoningEffort} disabled={!settingsWritable} onChange={(event) => props.onReasoningEffort(event.target.value)}>
               <option value="">기본값</option>
               <option value="minimal">minimal</option>
@@ -3620,18 +3799,16 @@ function SettingsDialog(props: {
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
-          </label>
-          <label>
-            <span>Verbosity</span>
+          </SettingsField>
+          <SettingsField label="Verbosity">
             <select value={props.verbosity} disabled={!settingsWritable} onChange={(event) => props.onVerbosity(event.target.value)}>
               <option value="">기본값</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
-          </label>
-          <label>
-            <span>Max tokens</span>
+          </SettingsField>
+          <SettingsField label="Max tokens">
             <input
               inputMode="numeric"
               value={props.maxCompletionTokens}
@@ -3639,17 +3816,17 @@ function SettingsDialog(props: {
               disabled={!settingsWritable}
               onChange={(event) => props.onMaxCompletionTokens(event.target.value)}
             />
-          </label>
-          <label>
-            <span>Top P</span>
+          </SettingsField>
+          <SettingsField label="Top P">
             <input value={props.topP} placeholder="비워두기" disabled={!settingsWritable} onChange={(event) => props.onTopP(event.target.value)} />
-          </label>
-          <label>
-            <span>Service tier</span>
+          </SettingsField>
+          <SettingsField label="Service tier">
             <input value={props.serviceTier} placeholder="비워두기" disabled={!settingsWritable} onChange={(event) => props.onServiceTier(event.target.value)} />
-          </label>
-          <label>
-            <span>VLM 동시 요청 수</span>
+          </SettingsField>
+          <SettingsField
+            label="VLM 동시 요청 수"
+            help="높이면 처리량은 늘 수 있지만 DB connection과 VLM rate limit 부담도 같이 증가합니다. 대량 실행 중에는 8부터 단계적으로 올리세요."
+          >
             <input
               inputMode="numeric"
               value={props.vlmMaxConcurrentRequests}
@@ -3657,9 +3834,8 @@ function SettingsDialog(props: {
               disabled={!settingsWritable}
               onChange={(event) => props.onVlmMaxConcurrentRequests(event.target.value)}
             />
-          </label>
-          <label>
-            <span>KIE field group 크기</span>
+          </SettingsField>
+          <SettingsField label="KIE field group 크기">
             <input
               inputMode="numeric"
               value={props.kieFieldGroupSize}
@@ -3667,14 +3843,16 @@ function SettingsDialog(props: {
               disabled={!settingsWritable}
               onChange={(event) => props.onKieFieldGroupSize(event.target.value)}
             />
-          </label>
-          <button type="button" className="primary compact" disabled={Boolean(props.busy) || !settingsWritable} onClick={props.onSave}>
-            <Save size={16} />
-            저장
-          </button>
-          <button type="button" className="secondary compact" disabled={Boolean(props.busy)} onClick={props.onClose}>
-            닫기
-          </button>
+          </SettingsField>
+          <div className="settings-actions">
+            <button type="button" className="secondary compact" disabled={Boolean(props.busy)} onClick={props.onClose}>
+              닫기
+            </button>
+            <button type="button" className="primary compact" disabled={Boolean(props.busy) || !settingsWritable} onClick={props.onSave}>
+              <Save size={16} />
+              저장
+            </button>
+          </div>
         </div>
         <div className="danger-zone">
           <div>
@@ -3703,6 +3881,7 @@ function DocumentViewer(props: {
   activeImageUrl: string | null;
   regions: SchemaRegion[];
   showRegions: boolean;
+  hideThumbnailRail?: boolean;
   zoom: number;
   zoomMode: ZoomMode;
   rotation: number;
@@ -3806,25 +3985,27 @@ function DocumentViewer(props: {
           </button>
         </div>
       </div>
-      <div className="viewer-body">
-        <div className="thumbnail-rail" aria-label="페이지 썸네일">
-          {props.document.pages.map((page, index) => (
-            <button
-              key={page.id}
-              className={index === props.activePage ? "active-thumb" : ""}
-              title={`${page.page}페이지`}
-              onClick={() => props.onPage(index)}
-            >
-              <img
-                src={documentPageThumbnailSrc(props.document.document_id, page.page, 96)}
-                alt={`${page.page}페이지`}
-                loading="lazy"
-                decoding="async"
-              />
-              <span>{page.page}</span>
-            </button>
-          ))}
-        </div>
+      <div className={props.hideThumbnailRail ? "viewer-body no-thumbnail-rail" : "viewer-body"}>
+        {!props.hideThumbnailRail && (
+          <div className="thumbnail-rail" aria-label="페이지 썸네일">
+            {props.document.pages.map((page, index) => (
+              <button
+                key={page.id}
+                className={index === props.activePage ? "active-thumb" : ""}
+                title={`${page.page}페이지`}
+                onClick={() => props.onPage(index)}
+              >
+                <img
+                  src={documentPageThumbnailSrc(props.document.document_id, page.page, 96)}
+                  alt={`${page.page}페이지`}
+                  loading="lazy"
+                  decoding="async"
+                />
+                <span>{page.page}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="image-stage">
           {props.activeImageUrl && (
             <div className={`document-image-wrap ${props.zoomMode}`} style={imageStyle}>
@@ -4016,29 +4197,13 @@ function BatchPanel(props: {
           {props.activeSchemaMessage && <small>{props.activeSchemaMessage}</small>}
         </div>
 
-        <div className="file-picker-grid">
-          <label className="batch-upload">
-            <FileUp size={16} />
-            <span>파일 선택</span>
-            <input
-              type="file"
-              accept={KIE_FILE_ACCEPT}
-              multiple
-              onChange={(event) => props.onSelectFiles(event.target.files)}
-            />
-          </label>
-          <label className="batch-upload">
-            <UploadCloud size={16} />
-            <span>폴더 선택</span>
-            <input
-              type="file"
-              accept={KIE_FILE_ACCEPT}
-              multiple
-              onChange={(event) => props.onSelectFiles(event.target.files)}
-              {...{ webkitdirectory: "", directory: "" }}
-            />
-          </label>
-        </div>
+        {!props.selectedFiles.length && (
+          <UnifiedUploadPicker
+            accept={KIE_FILE_ACCEPT}
+            label="업로드"
+            onSelectFiles={props.onSelectFiles}
+          />
+        )}
 
         {props.selectedFiles.length > 0 && (
           <div className="selected-files">
@@ -4204,6 +4369,8 @@ function SchemaBuilder(props: {
   onLoadTemplate: (schema: SavedSchema) => void;
   onSaveTemplate: () => void;
   onOpenLibrary: () => void;
+  canRecommendSchema: boolean;
+  recommendSchemaTitle: string;
   canExtract: boolean;
 }) {
   const [regionsOpen, setRegionsOpen] = useState(false);
@@ -4229,8 +4396,8 @@ function SchemaBuilder(props: {
           <button
             type="button"
             className="primary compact"
-            disabled={!props.document}
-            title={props.document ? "AI가 현재 문서를 기준으로 schema를 추천합니다." : "서버에 업로드된 문서가 있어야 AI schema 추천을 사용할 수 있습니다."}
+            disabled={!props.canRecommendSchema}
+            title={props.recommendSchemaTitle}
             onClick={() => void props.onRecommendSchema()}
           >
             <Sparkles size={14} />
@@ -4256,6 +4423,7 @@ function SchemaBuilder(props: {
               <span>설명</span>
               <span>타입</span>
               <span>영역</span>
+              <span>AI 검수</span>
               <span />
             </div>
           {props.fields.map((field, index) => (
@@ -4295,6 +4463,14 @@ function SchemaBuilder(props: {
                   </option>
                 ))}
               </select>
+              <label className="schema-judgement-toggle" title="1차 추출 후 AI가 한 번 더 판단하고 필요할 때만 보정합니다.">
+                <input
+                  type="checkbox"
+                  checked={Boolean(field.judgement_enabled)}
+                  onChange={(event) => props.onUpdateField(index, { judgement_enabled: event.target.checked })}
+                />
+                <span>{field.judgement_enabled ? "사용" : "미사용"}</span>
+              </label>
               <button className="ghost danger icon-only" title="필드 삭제" onClick={() => props.onRemoveField(index)}>
                 <Trash2 size={16} />
               </button>
@@ -4361,6 +4537,7 @@ function SchemaLibraryPanel(props: {
   onLoadSavedSchema: (schemaId: string) => void;
   onNewSchema: () => void;
   onDeleteSchema: (schemaId: string) => void;
+  onDuplicateSchema: (schemaId: string) => void;
   onSchemaJsonInput: (value: string) => void;
   onImportSchemaJson: () => void;
   onSaveRegion: (region: SchemaRegion) => void;
@@ -4443,6 +4620,18 @@ function SchemaLibraryPanel(props: {
                   <span className="schema-card-meta">
                     {savedSchema.fields.length}개 필드 · {savedSchema.regions.length}개 영역 · {formatDate(savedSchema.updated_at)}
                   </span>
+                </button>
+                <button
+                  type="button"
+                  className="icon-only secondary schema-card-action"
+                  title={`${savedSchema.display_name || savedSchema.name} 복제`}
+                  aria-label={`${savedSchema.display_name || savedSchema.name} 복제`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    props.onDuplicateSchema(savedSchema.id);
+                  }}
+                >
+                  <Copy size={14} />
                 </button>
               </div>
             ))
@@ -4870,6 +5059,8 @@ function ReviewPanel(props: {
     if (props.filter === "changed") return props.editedKeys.includes(field.key_name);
     if (props.filter === "low_confidence") return (value?.confidence ?? 1) < 0.75;
     if (props.filter === "unreviewed") return !props.reviewedFields.includes(field.key_name);
+    if (props.filter === "ai_corrected") return Boolean(value?.ai_review?.corrected);
+    if (props.filter === "ai_review_failed") return value?.ai_review?.judgement_status === "failed" || Boolean(value?.warnings?.some((warning) => warning === "ai_review_failed" || warning === "ai_correction_failed"));
     return true;
   });
   const reviewedCount = props.fields.filter((field) => props.reviewedFields.includes(field.key_name)).length;
@@ -4891,7 +5082,7 @@ function ReviewPanel(props: {
 
       <div className="filter-row">
         <Filter size={16} />
-        {(["needs_review", "all", "warning", "null", "low_confidence", "unreviewed", "changed"] as ReviewFilter[]).map((filter) => (
+        {(["needs_review", "all", "warning", "null", "low_confidence", "unreviewed", "changed", "ai_corrected", "ai_review_failed"] as ReviewFilter[]).map((filter) => (
           <button key={filter} className={props.filter === filter ? "active" : ""} onClick={() => props.onFilter(filter)}>
             {reviewFilterLabel(filter)}
           </button>
@@ -4904,6 +5095,7 @@ function ReviewPanel(props: {
           <span>값</span>
           <span>페이지</span>
           <span>신뢰도</span>
+          <span>AI 검수</span>
           <span>경고</span>
           <span>검수</span>
         </div>
@@ -4926,6 +5118,9 @@ function ReviewPanel(props: {
                 {value?.page ?? "-"}
               </button>
               <span>{formatConfidence(value?.confidence)}</span>
+              <span className={aiReviewClassName(value)} title={aiReviewTitle(value)}>
+                {aiReviewLabel(value)}
+              </span>
               <span className={value?.warnings?.length ? "warn-text" : "muted"}>
                 {value?.warnings?.length ? value.warnings.join(", ") : "정상"}
               </span>
@@ -5160,9 +5355,36 @@ function reviewFilterLabel(filter: ReviewFilter) {
     null: "누락값",
     changed: "수정됨",
     low_confidence: "낮은 신뢰도",
-    unreviewed: "미검수"
+    unreviewed: "미검수",
+    ai_corrected: "AI 보정됨",
+    ai_review_failed: "AI 검수 실패"
   };
   return labels[filter];
+}
+
+function aiReviewLabel(value?: ExtractionValue) {
+  const review = value?.ai_review;
+  if (!review?.enabled) return "검수 안함";
+  if (review.judgement_status === "failed") return "검수 실패";
+  if (review.corrected) return "AI 보정";
+  if (review.judgement_status === "correct") return "정상 판단";
+  if (review.judgement_status === "needs_correction") return "보정 필요";
+  return "검수 안함";
+}
+
+function aiReviewClassName(value?: ExtractionValue) {
+  const review = value?.ai_review;
+  if (!review?.enabled) return "muted";
+  if (review.judgement_status === "failed") return "warn-text";
+  if (review.corrected) return "ai-review-corrected";
+  if (review.judgement_status === "correct") return "ai-review-ok";
+  return "warn-text";
+}
+
+function aiReviewTitle(value?: ExtractionValue) {
+  const review = value?.ai_review;
+  if (!review?.enabled) return "AI 검수를 적용하지 않은 필드입니다.";
+  return [review.judgement_reason, review.correction_reason].filter(Boolean).join(" / ") || aiReviewLabel(value);
 }
 
 function statusLabel(status: string | null | undefined) {
@@ -5172,6 +5394,8 @@ function statusLabel(status: string | null | undefined) {
     preprocessing: "전처리 중",
     queued: "대기 중",
     running: "실행 중",
+    paused: "일시중단",
+    interrupted: "중단됨",
     completed: "완료",
     completed_with_errors: "일부 실패",
     failed: "실패",
@@ -5249,7 +5473,8 @@ function stripLocalId(field: SchemaField): FieldDefinition {
   const payload: FieldDefinition = {
     key_name: field.key_name,
     description: field.description,
-    output_format: field.output_format
+    output_format: field.output_format,
+    judgement_enabled: Boolean(field.judgement_enabled)
   };
   if (field.region_id) payload.region_id = field.region_id;
   return payload;
@@ -5260,6 +5485,7 @@ function toSchemaFields(items: FieldDefinition[]): SchemaField[] {
     ...field,
     region_id: field.region_id ?? null,
     region: null,
+    judgement_enabled: Boolean(field.judgement_enabled),
     local_id: `${createLocalId()}_${index}`
   }));
 }
@@ -5289,7 +5515,8 @@ function normalizeSchemaFieldsAndRegions(
       key_name: field.key_name,
       description: field.description,
       output_format: field.output_format,
-      region_id: regionId
+      region_id: regionId,
+      judgement_enabled: Boolean(field.judgement_enabled)
     });
   });
 

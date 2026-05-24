@@ -56,6 +56,7 @@ docker compose -f docker-compose.hosting.example.yml up -d backend
 | `SESSION_COOKIE_SAMESITE` | 같은 site의 app/api면 `lax`, 완전 cross-site면 `none` + HTTPS 필수 |
 | `CORS_ALLOWED_ORIGINS` | 정확한 frontend origin. 예: `https://app.example.com` |
 | `DATABASE_URL` | `postgresql+psycopg://...` |
+| `DATABASE_POOL_SIZE`, `DATABASE_MAX_OVERFLOW`, `DATABASE_POOL_TIMEOUT_SECONDS` | DB connection pool. 대량 workflow 실행 기본값은 최대 64 connection |
 | `STORAGE_BACKEND` | 지금은 `local` |
 | `DOCUMENT_STORAGE_DIR`, `RAW_STORAGE_DIR`, `PROCESSING_TMP_DIR` | persistent volume 하위 경로 |
 | `UPLOAD_RETENTION_HOURS` | 외부 베타 기본 `24` |

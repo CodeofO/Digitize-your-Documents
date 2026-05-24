@@ -7,50 +7,42 @@ import time
 from typing import Any
 
 from app.config import get_settings
+from app.prompts.classifier import (
+    DOCUMENT_CLASSIFIER_PROMPT,
+    build_classification_output_schema as _classification_output_schema,
+    build_classification_prompt as _build_classification_prompt,
+)
+from app.prompts.common import image_inputs_from_paths as _image_inputs_from_paths
+from app.prompts.kie import (
+    KIE_SYSTEM_PROMPT,
+    build_correction_output_schema as _kie_correction_output_schema,
+    build_correction_prompt as _build_kie_correction_prompt,
+    build_extraction_prompt as _build_user_prompt,
+    build_judgement_output_schema as _kie_judgement_output_schema,
+    build_judgement_prompt as _build_kie_judgement_prompt,
+    build_structured_output_schema,
+)
+from app.prompts.required_checker import (
+    REQUIRED_FIELD_CHECKER_PROMPT,
+    build_required_field_output_schema as _required_field_output_schema,
+    build_required_field_prompt as _build_required_field_prompt,
+)
+from app.prompts.schema_recommendation import (
+    REQUIRED_FIELD_CHECKLIST_RECOMMENDATION_PROMPT,
+    SCHEMA_DESCRIPTION_PROMPT,
+    SCHEMA_RECOMMENDATION_PROMPT,
+    build_required_field_checklist_recommendation_output_schema as _required_field_checklist_recommendation_output_schema,
+    build_required_field_checklist_recommendation_prompt as _build_required_field_checklist_recommendation_prompt,
+    build_schema_description_output_schema as _schema_description_output_schema,
+    build_schema_description_prompt as _build_schema_description_prompt,
+    build_schema_recommendation_output_schema as _schema_recommendation_output_schema,
+    build_schema_recommendation_prompt as _build_schema_recommendation_prompt,
+)
 from app.schemas import ClassCandidate, FieldDefinition, RequiredFieldItem, SchemaRegion
 from app.storage import read_storage_bytes, storage_ref_name
 
 
-SYSTEM_PROMPT = """You are a key information extraction engine.
-Extract only the fields defined by the schema.
-Do not return keys that are not in the schema.
-If a value is not visible or uncertain, return null.
-Preserve the document's original wording when possible.
-Return data that matches the requested structured output schema."""
-
-SCHEMA_RECOMMENDATION_PROMPT = """You are a document schema design assistant.
-Look at the uploaded document images and recommend practical key information fields for extraction.
-Return concise key names in the document's primary language.
-For Korean documents, key_name values should be natural Korean labels such as 성명, 계급, 군번, 소집기간, 훈련장소.
-For English documents, key_name values should be concise English snake_case labels.
-Do not add a separate field display label; key_name is what users will see in the UI and exports.
-Each field description must explain where or how to find the value in the document.
-Use only these output formats: string, float, date, bool."""
-
-SCHEMA_DESCRIPTION_PROMPT = """You are a document schema description editor.
-Look only at the user's current extraction fields.
-Write a concise schema-level description that explains what this schema extracts.
-Do not invent fields. Do not rewrite field-level descriptions. Do not say it is an invoice unless the fields clearly indicate that.
-Use the document's primary language. One or two sentences are enough."""
-
-DOCUMENT_CLASSIFIER_PROMPT = """You are a document classification engine.
-Choose only from the user-defined candidate classes.
-If none of the classes fit, or the document is ambiguous, return status unknown with class_name null.
-Use visual evidence and visible text only.
-Return data that matches the requested structured output schema."""
-
-REQUIRED_FIELD_CHECKER_PROMPT = """You are a required field presence checker.
-Check whether each user-defined item is visibly present, missing, uncertain, or not applicable.
-Do not validate whether a value is correct. Only decide whether the required mark, handwriting, text, signature, stamp, checkbox, or visual evidence exists.
-Use optional region crops only for their matching items.
-Return data that matches the requested structured output schema."""
-
-REQUIRED_FIELD_CHECKLIST_RECOMMENDATION_PROMPT = """You are a required field checklist design assistant.
-Look at the uploaded document images and recommend practical presence-check items.
-This is not a key-value extraction schema. Each item should ask whether required text, handwriting, signature, stamp, checkbox, or another visible mark exists.
-Use the document's primary language for item_name and descriptions.
-For Korean documents, item_name values should be natural Korean labels such as 성명, 작성일, 서명/날인, 동의 체크.
-Recommend optional regions only when a repeated area is visually clear and likely useful."""
+SYSTEM_PROMPT = KIE_SYSTEM_PROMPT
 
 
 class VlmRuntimeError(RuntimeError):
@@ -157,23 +149,6 @@ def format_vlm_exception(exc: Exception) -> str:
     return str(exc)
 
 
-def build_structured_output_schema(fields: list[FieldDefinition]) -> dict[str, Any]:
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-    for field in fields:
-        properties[field.key_name] = _json_schema_for_field(field)
-        required.append(field.key_name)
-
-    return {
-        "title": "KeyInformationExtraction",
-        "description": "Structured extraction result containing only user-defined schema fields.",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": properties,
-        "required": required,
-    }
-
-
 def extract_with_vlm(
     fields: list[FieldDefinition],
     image_paths: list[str] | None = None,
@@ -199,11 +174,7 @@ def recommend_schema_with_vlm(image_paths: list[str]) -> dict[str, Any]:
 
     _ensure_vlm_credentials(settings)
 
-    prompt = (
-        "Recommend 5 to 8 fields that a user is likely to want from this document. "
-        "Prefer visible business-critical fields over generic metadata. "
-        "Choose key_name values in the document's primary language."
-    )
+    prompt = _build_schema_recommendation_prompt()
     return _invoke_vlm_with_limit(
         SCHEMA_RECOMMENDATION_PROMPT,
         prompt,
@@ -281,6 +252,51 @@ def check_required_fields_with_vlm(
     )
 
 
+def judge_extraction_with_vlm(
+    field: FieldDefinition,
+    initial_value: Any,
+    initial_evidence: str | None,
+    image_inputs: list[dict[str, str]],
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_extraction_judgement(field)
+
+    _ensure_vlm_credentials(settings)
+    prompt = _build_kie_judgement_prompt(field, initial_value, initial_evidence)
+    return _invoke_vlm_with_limit(
+        SYSTEM_PROMPT,
+        prompt,
+        image_inputs,
+        _kie_judgement_output_schema(),
+        api_style,
+    )
+
+
+def correct_extraction_with_vlm(
+    field: FieldDefinition,
+    initial_value: Any,
+    initial_evidence: str | None,
+    judgement_reason: str | None,
+    image_inputs: list[dict[str, str]],
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_extraction_correction(field, initial_value, initial_evidence)
+
+    _ensure_vlm_credentials(settings)
+    prompt = _build_kie_correction_prompt(field, initial_value, initial_evidence, judgement_reason)
+    return _invoke_vlm_with_limit(
+        SYSTEM_PROMPT,
+        prompt,
+        image_inputs,
+        _kie_correction_output_schema(field),
+        api_style,
+    )
+
+
 def recommend_required_field_checklist_with_vlm(image_paths: list[str]) -> dict[str, Any]:
     settings = get_settings()
     api_style = resolve_vlm_api_style(settings)
@@ -288,11 +304,7 @@ def recommend_required_field_checklist_with_vlm(image_paths: list[str]) -> dict[
         return _mock_required_field_checklist_recommendation()
 
     _ensure_vlm_credentials(settings)
-    prompt = (
-        "Recommend 4 to 8 checklist items that a user would verify before accepting this document. "
-        "Prefer visible required fields and signatures over values that require external validation. "
-        "Use concise item_name values in the document's primary language."
-    )
+    prompt = _build_required_field_checklist_recommendation_prompt()
     return _invoke_vlm_with_limit(
         REQUIRED_FIELD_CHECKLIST_RECOMMENDATION_PROMPT,
         prompt,
@@ -561,246 +573,6 @@ def _mime_type_for_ref(ref: str) -> str:
     return mimetypes.guess_type(storage_ref_name(ref))[0] or "image/png"
 
 
-def _json_schema_for_field(field: FieldDefinition) -> dict[str, Any]:
-    json_type = {
-        "string": "string",
-        "date": "string",
-        "float": "number",
-        "bool": "boolean",
-    }[field.output_format]
-    return {
-        "type": "object",
-        "description": field.description,
-        "additionalProperties": False,
-        "properties": {
-            "value": {"anyOf": [{"type": json_type}, {"type": "null"}]},
-            "page": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
-            "evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-            "confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
-        },
-        "required": ["value", "page", "evidence", "confidence"],
-    }
-
-
-def _schema_recommendation_output_schema() -> dict[str, Any]:
-    field_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "key_name": {
-                "type": "string",
-                "description": "User-facing key for the extracted value, written in the document's primary language.",
-            },
-            "description": {"type": "string", "description": "Field-level instruction for locating the value."},
-            "output_format": {"type": "string", "enum": ["string", "float", "date", "bool"]},
-        },
-        "required": ["key_name", "description", "output_format"],
-    }
-    return {
-        "title": "KeyInformationSchemaRecommendation",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "name": {"type": "string"},
-            "display_name": {"type": "string"},
-            "description": {"type": "string"},
-            "document_type": {"type": "string"},
-            "language": {"type": "string"},
-            "reasoning": {"type": "string"},
-            "fields": {"type": "array", "minItems": 1, "maxItems": 12, "items": field_schema},
-        },
-        "required": ["name", "display_name", "description", "document_type", "language", "reasoning", "fields"],
-    }
-
-
-def _schema_description_output_schema() -> dict[str, Any]:
-    return {
-        "title": "KeyInformationSchemaDescriptionRecommendation",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "description": {
-                "type": "string",
-                "description": "Concise schema-level description aligned with the current fields.",
-            },
-            "reasoning": {
-                "type": "string",
-                "description": "Brief reason for the description update.",
-            },
-        },
-        "required": ["description", "reasoning"],
-    }
-
-
-def _classification_output_schema(classes: list[ClassCandidate], allow_unknown: bool) -> dict[str, Any]:
-    class_names = [item.class_name for item in classes]
-    class_schema: dict[str, Any] = {"anyOf": [{"type": "string", "enum": class_names}, {"type": "null"}]}
-    return {
-        "title": "DocumentClassificationResult",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "status": {"type": "string", "enum": ["classified", "unknown"]},
-            "class_name": class_schema,
-            "confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
-            "reason": {"type": "string"},
-            "evidence": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["status", "class_name", "confidence", "reason", "evidence"],
-    }
-
-
-def _required_field_output_schema(items: list[RequiredFieldItem]) -> dict[str, Any]:
-    return {
-        "title": "RequiredFieldCheckResult",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "overall_status": {"type": "string", "enum": ["complete", "incomplete", "needs_review"]},
-            "items": {
-                "type": "array",
-                "minItems": len(items),
-                "maxItems": len(items),
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "item_name": {"type": "string", "enum": [item.item_name for item in items]},
-                        "status": {"type": "string", "enum": ["present", "missing", "uncertain", "not_applicable"]},
-                        "confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
-                        "evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                        "page": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
-                    },
-                    "required": ["item_name", "status", "confidence", "evidence", "page"],
-                },
-            },
-        },
-        "required": ["overall_status", "items"],
-    }
-
-
-def _required_field_checklist_recommendation_output_schema() -> dict[str, Any]:
-    region_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "id": {"type": "string"},
-            "name": {"type": "string"},
-            "page": {"type": "integer", "minimum": 1},
-            "x": {"type": "number", "minimum": 0, "maximum": 1},
-            "y": {"type": "number", "minimum": 0, "maximum": 1},
-            "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-            "height": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-        },
-        "required": ["id", "name", "page", "x", "y", "width", "height"],
-    }
-    item_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "item_name": {"type": "string"},
-            "description": {"type": "string"},
-            "evidence_type": {
-                "type": "string",
-                "enum": ["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"],
-            },
-            "required": {"type": "boolean"},
-            "region_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-        },
-        "required": ["item_name", "description", "evidence_type", "required", "region_id"],
-    }
-    return {
-        "title": "RequiredFieldChecklistRecommendation",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "name": {"type": "string"},
-            "description": {"type": "string"},
-            "reasoning": {"type": "string"},
-            "regions": {"type": "array", "maxItems": 8, "items": region_schema},
-            "items": {"type": "array", "minItems": 1, "maxItems": 12, "items": item_schema},
-        },
-        "required": ["name", "description", "reasoning", "regions", "items"],
-    }
-
-
-def _build_classification_prompt(classes: list[ClassCandidate], allow_unknown: bool) -> str:
-    lines = [
-        "Classify the document into one of these user-defined classes:",
-    ]
-    for item in classes:
-        signals = ", ".join(item.signals) if item.signals else "(no explicit signals)"
-        lines.append(f"- {item.class_name}: {item.description}. Signals: {signals}")
-    lines.append("Return classified only when visible evidence supports one candidate class.")
-    lines.append("Return unknown when no candidate class is clearly supported.")
-    return "\n".join(lines)
-
-
-def _build_required_field_prompt(items: list[RequiredFieldItem], regions: list[SchemaRegion]) -> str:
-    region_names = {region.id: region.name for region in regions}
-    lines = ["Check whether these required field items are visibly present:"]
-    for item in items:
-        region_text = f", region_id={item.region_id} ({region_names.get(item.region_id, 'unknown region')})" if item.region_id else ""
-        required_text = "required" if item.required else "optional"
-        lines.append(
-            f"- {item.item_name} ({item.evidence_type}, {required_text}{region_text}): {item.description}"
-        )
-    lines.append(
-        "Only judge presence. Do not validate date validity, amount correctness, ID format, external database match, or signer identity."
-    )
-    return "\n".join(lines)
-
-
-def _build_schema_description_prompt(
-    schema_name: str,
-    current_description: str | None,
-    fields: list[FieldDefinition],
-) -> str:
-    lines = [
-        f"Schema name: {schema_name}",
-        f"Current schema description: {current_description or '(empty)'}",
-        "Current fields:",
-    ]
-    for field in fields:
-        region = f", region_id={field.region_id}" if field.region_id else ""
-        lines.append(f"- {field.key_name} ({field.output_format}{region}): {field.description}")
-    lines.append(
-        "Return a schema description that matches only these fields. "
-        "The description should help the user understand the extraction purpose at schema level."
-    )
-    return "\n".join(lines)
-
-
-def _build_user_prompt(fields: list[FieldDefinition]) -> str:
-    has_regions = any(field.region_id or field.region is not None for field in fields)
-    lines = ["Extract these fields from the document images:"]
-    for field in fields:
-        if field.region_id:
-            lines.append(
-                f"- {field.key_name} ({field.output_format}): {field.description}. "
-                f"Use the full page context, masked full page context, and enlarged cropped extraction region for region_id '{field.region_id}'. "
-                "Location words in the description refer to the original page position shown by the masked context. "
-                "Use the full page only for layout context, read the value from the crop, and do not use unrelated region crops for this field."
-            )
-        elif field.region:
-            region = field.region
-            lines.append(
-                f"- {field.key_name} ({field.output_format}): {field.description}. "
-                f"Use the full page context, masked full page context, and enlarged extraction region crop for this field on page {region.page}; "
-                "location words in the description refer to the original page position."
-            )
-        else:
-            lines.append(f"- {field.key_name} ({field.output_format}): {field.description}. Use the full document pages.")
-    if has_regions:
-        lines.append(
-            "Images are labeled. For region fields, use the full page image for document context, then use the masked full page image "
-            "to understand where the region sits in the original page, then use the matching enlarged crop to read the value. "
-            "Region images should only affect their matching fields."
-        )
-    lines.append("Return null for fields that are not visible.")
-    return "\n".join(lines)
-
-
 def _build_multimodal_content(prompt: str, image_inputs: list[dict[str, str]]) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for image_input in image_inputs:
@@ -814,10 +586,6 @@ def _build_multimodal_content(prompt: str, image_inputs: list[dict[str, str]]) -
             }
         )
     return content
-
-
-def _image_inputs_from_paths(image_paths: list[str]) -> list[dict[str, str]]:
-    return [{"path": image_path, "label": f"Full document page {index + 1}"} for index, image_path in enumerate(image_paths)]
 
 
 def _image_to_data_url(ref: str) -> str:
@@ -844,6 +612,25 @@ def _mock_extraction(fields: list[FieldDefinition]) -> dict[str, Any]:
             "confidence": 0.86,
         }
     return values
+
+
+def _mock_extraction_judgement(field: FieldDefinition) -> dict[str, Any]:
+    return {
+        "judgement_status": "correct",
+        "reason": f"Mock judgement accepted the first-stage value for {field.key_name}.",
+        "confidence": 0.9,
+        "evidence": f"Mock judgement evidence for {field.key_name}",
+    }
+
+
+def _mock_extraction_correction(field: FieldDefinition, initial_value: Any, initial_evidence: str | None) -> dict[str, Any]:
+    return {
+        "value": initial_value,
+        "page": field.region.page if field.region else 1,
+        "evidence": initial_evidence or f"Mock correction evidence for {field.key_name}",
+        "confidence": 0.86,
+        "correction_reason": f"Mock correction preserved the first-stage value for {field.key_name}.",
+    }
 
 
 def _mock_schema_recommendation() -> dict[str, Any]:
@@ -915,7 +702,8 @@ def _mock_required_field_check(items: list[RequiredFieldItem]) -> dict[str, Any]
     checked_items = []
     missing_required = False
     for index, item in enumerate(items):
-        status = "present" if index % 3 != 2 else "uncertain"
+        name = item.item_name.lower()
+        status = "uncertain" if item.evidence_type == "checkbox" or "체크" in name or "checkbox" in name else "present"
         if item.required and status != "present":
             missing_required = True
         checked_items.append(

@@ -19,6 +19,7 @@ from app.models import (
     RequiredFieldCheckResult,
     RequiredFieldChecklist,
 )
+from app.prompts.required_checker import cropped_required_region_label, full_page_required_label, masked_required_region_label
 from app.schemas import ClassCandidate, RequiredFieldItem, SchemaRegion
 from app.storage import scratch_dir_for_ref
 from app.vlm import classify_document_with_vlm, check_required_fields_with_vlm, format_vlm_exception
@@ -67,11 +68,7 @@ def run_required_field_check_job(job_id: str) -> None:
         context = _prepare_required_field_job(job_id)
         if not context:
             return
-        raw_values = check_required_fields_with_vlm(
-            context.items,
-            context.regions,
-            image_inputs=_required_field_image_inputs(context.document, context.items, context.regions, job_id),
-        )
+        raw_values = _check_required_fields_grouped(context, job_id)
         _save_required_field_result(job_id, context, raw_values)
     except Exception as exc:
         _mark_required_field_job_failed(job_id, format_vlm_exception(exc))
@@ -256,6 +253,113 @@ def _save_required_field_result(job_id: str, context: RequiredFieldContext, raw_
         db.close()
 
 
+def _check_required_fields_grouped(context: RequiredFieldContext, job_id: str) -> dict[str, Any]:
+    requests = _build_required_field_requests(context.document, context.items, context.regions, job_id)
+    if not requests:
+        return {"overall_status": "complete", "items": []}
+    if len(requests) == 1:
+        request = requests[0]
+        return check_required_fields_with_vlm(request["items"], request["regions"], image_inputs=request["image_inputs"])
+
+    settings = get_settings()
+    max_workers = max(1, min(settings.vlm_max_concurrent_requests, len(requests)))
+    results: list[dict[str, Any] | None] = [None] * len(requests)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                check_required_fields_with_vlm,
+                request["items"],
+                request["regions"],
+                None,
+                request["image_inputs"],
+            ): index
+            for index, request in enumerate(requests)
+        }
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+
+    merged_items: list[dict[str, Any]] = []
+    for result in results:
+        if not result:
+            continue
+        result_items = result.get("items") if isinstance(result.get("items"), list) else []
+        merged_items.extend(item for item in result_items if isinstance(item, dict))
+    return {"overall_status": _required_overall_from_items(merged_items, context.items), "items": merged_items}
+
+
+def _build_required_field_requests(
+    document: DocumentSnapshot,
+    items: list[RequiredFieldItem],
+    regions: list[SchemaRegion],
+    job_id: str,
+) -> list[dict[str, Any]]:
+    region_map = {region.id: region for region in regions}
+    full_page_items = [item for item in items if not item.region_id]
+    region_items = [item for item in items if item.region_id]
+    requests: list[dict[str, Any]] = []
+
+    if full_page_items:
+        requests.append(
+            {
+                "items": full_page_items,
+                "regions": [],
+                "image_inputs": [
+                    {"path": page.image_path, "label": full_page_required_label(page.page_number)}
+                    for page in document.pages
+                ],
+            }
+        )
+
+    if not region_items:
+        return requests
+
+    page_map = {page.page_number: page for page in document.pages}
+    crop_dir = scratch_dir_for_ref(document.storage_path, "required_regions", job_id)
+    grouped: dict[str, list[RequiredFieldItem]] = {}
+    for item in region_items:
+        if item.region_id:
+            grouped.setdefault(item.region_id, []).append(item)
+
+    for index, (region_id, grouped_items) in enumerate(grouped.items(), start=1):
+        region = region_map.get(region_id)
+        if not region:
+            raise RuntimeError(f"Required field region {region_id} does not exist")
+        page = page_map.get(region.page)
+        if not page:
+            raise RuntimeError(f"Region page {region.page} does not exist for required field region {region.id}")
+        masked_path = _mask_region_image(page, region, crop_dir / f"region_{index}_masked.png")
+        crop_path = _crop_region_image(page, region, crop_dir / f"region_{index}_crop.png")
+        item_names = [item.item_name for item in grouped_items]
+        requests.append(
+            {
+                "items": grouped_items,
+                "regions": [region],
+                "image_inputs": [
+                    {"path": str(masked_path), "label": masked_required_region_label(region, item_names)},
+                    {"path": str(crop_path), "label": cropped_required_region_label(region, item_names)},
+                ],
+            }
+        )
+
+    return requests
+
+
+def _required_overall_from_items(raw_items: list[dict[str, Any]], configured_items: list[RequiredFieldItem]) -> str:
+    raw_by_name = {item.get("item_name"): item for item in raw_items if isinstance(item, dict)}
+    needs_review = False
+    incomplete = False
+    for configured in configured_items:
+        raw_item = raw_by_name.get(configured.item_name, {})
+        status = raw_item.get("status")
+        if status not in {"present", "missing", "uncertain", "not_applicable"}:
+            status = "uncertain"
+        if configured.required and status == "missing":
+            incomplete = True
+        if configured.required and status == "uncertain":
+            needs_review = True
+    return "needs_review" if needs_review else "incomplete" if incomplete else "complete"
+
+
 def _validate_classification_output(raw_values: dict[str, Any], context: ClassificationContext) -> dict[str, Any]:
     class_names = {item.class_name for item in context.classes}
     status = raw_values.get("status") if raw_values.get("status") in {"classified", "unknown"} else "unknown"
@@ -378,40 +482,3 @@ def _finalize_module_batch(model, batch_id: str) -> None:
         db.commit()
     finally:
         db.close()
-
-
-def _required_field_image_inputs(
-    document: DocumentSnapshot,
-    items: list[RequiredFieldItem],
-    regions: list[SchemaRegion],
-    job_id: str,
-) -> list[dict[str, str]]:
-    inputs = [
-        {"path": page.image_path, "label": f"Full document page {page.page_number} for required field checking."}
-        for page in document.pages
-    ]
-    region_ids = {item.region_id for item in items if item.region_id}
-    if not region_ids:
-        return inputs
-    page_map = {page.page_number: page for page in document.pages}
-    crop_dir = scratch_dir_for_ref(document.storage_path, "required_regions", job_id)
-    for index, region in enumerate([region for region in regions if region.id in region_ids]):
-        page = page_map.get(region.page)
-        if not page:
-            raise RuntimeError(f"Region page {region.page} does not exist for required field region {region.id}")
-        masked_path = _mask_region_image(page, region, crop_dir / f"region_{index + 1}_masked.png")
-        crop_path = _crop_region_image(page, region, crop_dir / f"region_{index + 1}_crop.png")
-        item_names = [item.item_name for item in items if item.region_id == region.id]
-        inputs.extend(
-            [
-                {
-                    "path": str(masked_path),
-                    "label": f"Masked context for required field region '{region.name}' on page {region.page}. Use for: {', '.join(item_names)}.",
-                },
-                {
-                    "path": str(crop_path),
-                    "label": f"Cropped required field region '{region.name}' on page {region.page}. Use as primary visual evidence for: {', '.join(item_names)}.",
-                },
-            ]
-        )
-    return inputs

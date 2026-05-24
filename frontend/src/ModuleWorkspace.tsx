@@ -2,6 +2,7 @@ import {
   CheckSquare,
   ChevronLeft,
   ChevronRight,
+  Copy,
   FileJson,
   FileSpreadsheet,
   FileUp,
@@ -259,6 +260,74 @@ function useVirtualRows(count: number, activeIndex: number) {
   return { containerRef, onScroll, start, end, spacerStyle, windowStyle };
 }
 
+function useModuleUploadMenu() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      if (event.target instanceof globalThis.Node && ref.current?.contains(event.target)) return;
+      setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  return {
+    open,
+    ref,
+    close: () => setOpen(false),
+    toggle: () => setOpen((current) => !current)
+  };
+}
+
+function ModuleUploadPicker(props: {
+  selectedCount?: number;
+  onSelectFiles: (files: FileList | null) => void;
+}) {
+  const menu = useModuleUploadMenu();
+  const triggerLabel = props.selectedCount ? `${props.selectedCount.toLocaleString()}개 파일 선택됨` : "업로드";
+  const onChange = (event: ChangeEvent<HTMLInputElement>) => {
+    menu.close();
+    props.onSelectFiles(event.target.files);
+    event.currentTarget.value = "";
+  };
+
+  return (
+    <div className="workflow-upload-picker unified-upload-picker" ref={menu.ref}>
+      <button
+        type="button"
+        className="workflow-upload"
+        aria-haspopup="menu"
+        aria-expanded={menu.open}
+        onClick={menu.toggle}
+      >
+        <UploadCloud size={17} />
+        <span>{triggerLabel}</span>
+      </button>
+      {menu.open && (
+        <div className="workflow-upload-menu" role="menu">
+          <label className="workflow-upload-menu-item" role="menuitem">
+            파일 선택
+            <input type="file" accept={MODULE_FILE_ACCEPT} multiple onChange={onChange} />
+          </label>
+          <label className="workflow-upload-menu-item" role="menuitem">
+            폴더 선택
+            <input
+              type="file"
+              accept={MODULE_FILE_ACCEPT}
+              multiple
+              onChange={onChange}
+              {...{ webkitdirectory: "", directory: "" }}
+            />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, uploadChunkFiles, onResize }: ModuleWorkspaceProps) {
   const isClassifier = kind === "classifier";
   const title = isClassifier ? "문서 분류" : "필수 항목 확인";
@@ -407,6 +476,28 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
       }
     } catch (err) {
       setError(errorMessage(err));
+    }
+  }
+
+  async function duplicateConfig(id: string) {
+    try {
+      setBusy(`${configLabel} 복제 중`);
+      setError(null);
+      if (isClassifier) {
+        const duplicated = await api<DocumentClassifier>(`/api/document-classifiers/${id}/duplicate`, { method: "POST" });
+        setClassifiers((items) => [duplicated, ...items.filter((item) => item.id !== duplicated.id)]);
+        loadClassifier(duplicated);
+        setMessage(`복제한 ${configLabel}을 불러왔습니다.`);
+      } else {
+        const duplicated = await api<RequiredFieldChecklist>(`/api/required-field-checklists/${id}/duplicate`, { method: "POST" });
+        setChecklists((items) => [duplicated, ...items.filter((item) => item.id !== duplicated.id)]);
+        loadChecklist(duplicated);
+        setMessage(`복제한 ${configLabel}을 불러왔습니다.`);
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -781,6 +872,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
             else loadChecklist(config as RequiredFieldChecklist);
           }}
           onDelete={(id) => void deleteConfig(id)}
+          onDuplicate={(id) => void duplicateConfig(id)}
           onClose={() => setLibraryOpen(false)}
         />
       )}
@@ -825,25 +917,23 @@ function ModuleUploadDropzone(props: {
   onSelectIndex: (index: number) => void;
   onDrop: (event: DragEvent<HTMLElement>) => void;
 }) {
-  function onFileChange(event: ChangeEvent<HTMLInputElement>) {
-    props.onSelectFiles(event.target.files);
-    event.currentTarget.value = "";
-  }
   return (
     <div className="module-upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={props.onDrop}>
       {props.selectedFiles.length ? (
-        <div className="module-draft-layout">
-          <aside className="module-selected-list">
-            <div className="module-selected-summary">
-              <strong>{props.selectedFiles.length}개 파일</strong>
-              <span>실행 대기</span>
-            </div>
-            <ModuleSelectedFileList
-              files={props.selectedFiles}
-              selectedFileIndex={props.selectedFileIndex}
-              onSelectIndex={props.onSelectIndex}
-            />
-          </aside>
+        <div className={props.selectedFiles.length === 1 ? "module-draft-layout single-file" : "module-draft-layout"}>
+          {props.selectedFiles.length > 1 && (
+            <aside className="module-selected-list">
+              <div className="module-selected-summary">
+                <strong>{props.selectedFiles.length}개 파일</strong>
+                <span>실행 대기</span>
+              </div>
+              <ModuleSelectedFileList
+                files={props.selectedFiles}
+                selectedFileIndex={props.selectedFileIndex}
+                onSelectIndex={props.onSelectIndex}
+              />
+            </aside>
+          )}
           <ModuleDraftPreview file={props.selectedFile} previewUrl={props.selectedPreviewUrl} />
         </div>
       ) : (
@@ -854,18 +944,7 @@ function ModuleUploadDropzone(props: {
             <strong>파일 또는 폴더를 업로드하세요</strong>
             <span>PDF, 이미지, DOCX, PPTX를 업로드할 수 있습니다.</span>
           </div>
-          <div className="module-upload-actions">
-            <label className="batch-upload">
-              <FileUp size={16} />
-              <span>파일 선택</span>
-              <input type="file" accept={MODULE_FILE_ACCEPT} multiple onChange={onFileChange} />
-            </label>
-            <label className="batch-upload">
-              <UploadCloud size={16} />
-              <span>폴더 선택</span>
-              <input type="file" accept={MODULE_FILE_ACCEPT} multiple onChange={onFileChange} {...{ webkitdirectory: "", directory: "" }} />
-            </label>
-          </div>
+          <ModuleUploadPicker onSelectFiles={props.onSelectFiles} />
         </>
       )}
     </div>
@@ -1356,6 +1435,7 @@ function ModuleLibraryPanel(props: {
   onNew: () => void;
   onLoad: (config: DocumentClassifier | RequiredFieldChecklist) => void;
   onDelete: (id: string) => void;
+  onDuplicate: (id: string) => void;
   onClose: () => void;
 }) {
   return (
@@ -1388,6 +1468,9 @@ function ModuleLibraryPanel(props: {
             <button type="button" onClick={() => props.onLoad(config)}>
               <strong>{config.name}</strong>
               <span>{configSummary(config)}</span>
+            </button>
+            <button type="button" className="icon-only secondary" title={`${config.name} 복제`} aria-label={`${config.name} 복제`} onClick={() => props.onDuplicate(config.id)}>
+              <Copy size={15} />
             </button>
             <button type="button" className="icon-only danger-plain" onClick={() => props.onDelete(config.id)}>
               <Trash2 size={15} />

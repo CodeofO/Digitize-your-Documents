@@ -408,6 +408,9 @@ class WorkflowRun(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("workflow_run"))
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow_definitions.id"), nullable=False)
+    workflow_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    workflow_definition_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    restarted_from_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
     total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

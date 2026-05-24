@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     libreoffice_path: str | None = None
     cors_allowed_origins: str | None = None
     cors_allow_origin_regex: str | None = None
+    database_pool_size: int = 64
+    database_max_overflow: int = 0
+    database_pool_timeout_seconds: int = 60
     allow_runtime_settings: bool = False
     serve_frontend: bool = False
     frontend_dist_dir: str | None = None

@@ -13,7 +13,12 @@ class Base(DeclarativeBase):
 settings = get_settings()
 is_sqlite = settings.resolved_database_url.startswith("sqlite")
 connect_args = {"check_same_thread": False, "timeout": 30} if is_sqlite else {}
-engine = create_engine(settings.resolved_database_url, connect_args=connect_args, pool_pre_ping=True)
+pool_args = {
+    "pool_size": settings.database_pool_size,
+    "max_overflow": settings.database_max_overflow,
+    "pool_timeout": settings.database_pool_timeout_seconds,
+}
+engine = create_engine(settings.resolved_database_url, connect_args=connect_args, pool_pre_ping=True, **pool_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -70,6 +75,9 @@ def _run_lightweight_migrations() -> None:
             ("upload_index", "INTEGER"),
         ],
         "workflow_runs": [
+            ("workflow_name", "VARCHAR"),
+            ("workflow_definition_json", "TEXT"),
+            ("restarted_from_run_id", "VARCHAR"),
             ("upload_duration_ms", "INTEGER"),
             ("inference_duration_ms", "INTEGER"),
             ("inference_started_at", "DATETIME"),
