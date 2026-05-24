@@ -48,7 +48,8 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 - `업로드` 버튼 하나로 파일과 폴더 업로드를 모두 지원하고, 파일명과 상대 경로 기준으로 안정적으로 정렬합니다.
 - 업로드는 chunk 단위로 등록하고, 업로드가 끝난 뒤 workflow 실행을 시작합니다.
 - 새로고침이나 네트워크 끊김 후에는 `이어가기`로 같은 원본을 다시 선택해 남은 항목만 업로드할 수 있습니다.
-- 실행 중에는 `계속 처리`, `일시중단`, `이어가기`, `재시작`, `중단·정리`로 상태를 제어합니다.
+- 실행 중에는 `계속 처리`, `일시중단`, `이어가기`, `재시작`, `대기열 추가`, `중단·정리`로 상태를 제어합니다.
+- `대기열 추가`는 업로드된 원본 문서를 복사하지 않고 다음 workflow run을 `waiting` 상태로 등록하며, 앞선 run이 끝나면 자동으로 시작합니다.
 - 진행 상태는 `업로드됨`, `전처리`, `실행 중`, `대기`, `완료/검토/실패` counter로 분리해 표시합니다.
 - 결과 화면은 문서 목록 스크롤 위치를 유지하고, 상세 결과에서 문서 이미지와 module output을 함께 검수합니다.
 - 결과 CSV/JSON에는 문서별 `upload_duration_ms`, `inference_duration_ms`가 포함됩니다.
@@ -65,7 +66,7 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | `start` | 전체 업로드가 끝난 run/batch만 실행합니다. ready item만 queue로 넘깁니다. |
 | `summary` | polling은 summary endpoint로 counter만 가져오고, 상세 화면에서만 item page를 조회합니다. |
 
-공통 상태는 `uploading`, `preprocessing`, `running`, `paused`, `completed`, `needs_review`, `completed_with_errors`, `failed`, `canceled`를 사용합니다.
+공통 상태는 `uploading`, `preprocessing`, `waiting`, `running`, `paused`, `completed`, `needs_review`, `completed_with_errors`, `failed`, `canceled`를 사용합니다.
 
 ## Recovery Controls
 
@@ -76,6 +77,8 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | `이어가기` | 새로고침 등으로 끊긴 업로드에서 같은 원본을 재선택해 누락 파일만 등록합니다. |
 | `일시중단` | 업로드된 문서는 보존하고, 새 item 실행을 멈춥니다. 진행 중인 VLM 호출은 현재 item까지만 마무리합니다. |
 | `재시작` | 업로드된 원본은 유지하고 기존 추론 결과와 문서별 추론 시간을 초기화한 뒤 처음부터 다시 추론합니다. |
+| `대기열 추가` | 업로드된 원본은 공유하고 새 workflow snapshot을 `waiting` run으로 추가합니다. 이전 run이 `completed`, `needs_review`, `completed_with_errors`가 되면 다음 대기 run을 자동 시작합니다. |
+| `대기 취소` | 아직 시작하지 않은 `waiting` run만 취소하며 공유 문서는 삭제하지 않습니다. |
 | `실패 재시도` | 결과 상세 화면에서 실패한 문서만 다시 queue에 넣고, 성공한 문서는 그대로 보존합니다. |
 
 ## Input / Output
@@ -101,6 +104,7 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | System status | `GET /api/system/status` |
 | Workflow upload | `POST /api/workflows/{workflow_id}/runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
 | Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart`, `POST /api/workflow-runs/{run_id}/retry-failed` |
+| Workflow queue | `POST /api/workflow-runs/{run_id}/enqueue`, `POST /api/workflow-runs/{run_id}/cancel-waiting`, `POST /api/workflow-runs/{run_id}/start` |
 | Batch upload | `POST /api/batches/init`, `POST /api/batches/{batch_id}/items`, `POST /api/batches/{batch_id}/start` |
 | Classification batch | `POST /api/classification-batches/init`, `POST /api/classification-batches/{batch_id}/items`, `POST /api/classification-batches/{batch_id}/start` |
 | Required check batch | `POST /api/required-field-check-batches/init`, `POST /api/required-field-check-batches/{batch_id}/items`, `POST /api/required-field-check-batches/{batch_id}/start` |

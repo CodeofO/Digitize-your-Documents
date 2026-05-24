@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,7 @@ from app.models import (
 
 WORKFLOW_NODE_KINDS = {"input", "classifier", "branch", "kie", "required-checker", "merge", "export"}
 WORKFLOW_TERMINAL_STATUSES = {"completed", "needs_review", "failed", "canceled"}
+WORKFLOW_QUEUE_ADVANCE_STATUSES = {"completed", "completed_with_errors", "needs_review"}
 
 
 class WorkflowPaused(RuntimeError):
@@ -96,6 +98,9 @@ def workflow_run_to_read(run: WorkflowRun, *, include_items: bool = True) -> dic
         "workflow_id": run.workflow_id,
         "workflow_name": _workflow_run_name(run),
         "restarted_from_run_id": run.restarted_from_run_id,
+        "workflow_run_group_id": run.workflow_run_group_id,
+        "queued_from_run_id": run.queued_from_run_id,
+        "queue_order": run.queue_order,
         "status": counters["status"],
         "total_count": run.total_count,
         "completed_count": len(completed),
@@ -158,6 +163,8 @@ def run_workflow_run(run_id: str, execution_generation: int | None = None) -> No
     try:
         run = db.get(WorkflowRun, run_id)
         if not run:
+            return
+        if run.status == "waiting":
             return
         generation = run.execution_generation if execution_generation is None else execution_generation
         if run.execution_generation != generation:
@@ -683,6 +690,7 @@ def _execute_required_node(db: Session, document_id: str, node: dict[str, Any]) 
 
 
 def _finalize_workflow_run(run_id: str, execution_generation: int | None = None) -> None:
+    dispatch_next: tuple[str, int] | None = None
     db = SessionLocal()
     try:
         run = db.get(WorkflowRun, run_id)
@@ -724,9 +732,65 @@ def _finalize_workflow_run(run_id: str, execution_generation: int | None = None)
             message=f"Workflow run finished with status {run.status}",
             metadata={"total_count": run.total_count},
         )
+        if run.status in WORKFLOW_QUEUE_ADVANCE_STATUSES:
+            dispatch_next = _activate_next_waiting_workflow_run(db, run, now)
         db.commit()
     finally:
         db.close()
+    if dispatch_next:
+        _dispatch_workflow_run_async(*dispatch_next)
+
+
+def _activate_next_waiting_workflow_run(db: Session, completed_run: WorkflowRun, now: datetime) -> tuple[str, int] | None:
+    group_id = completed_run.workflow_run_group_id or completed_run.id
+    next_run = (
+        db.query(WorkflowRun)
+        .filter(WorkflowRun.workflow_run_group_id == group_id, WorkflowRun.status == "waiting")
+        .order_by(WorkflowRun.queue_order.asc(), WorkflowRun.created_at.asc(), WorkflowRun.id.asc())
+        .first()
+    )
+    if not next_run:
+        return None
+
+    queued_count = 0
+    next_run.execution_generation = (next_run.execution_generation or 0) + 1
+    next_run.status = "running"
+    next_run.completed_at = None
+    next_run.error_message = None
+    next_run.inference_started_at = now
+    for item in next_run.items:
+        if item.status == "queued":
+            item.error_message = None
+            item.completed_at = None
+            item.execution_generation = next_run.execution_generation
+            queued_count += 1
+
+    if not queued_count:
+        next_run.status = "completed_with_errors"
+        next_run.completed_at = now
+        next_run.inference_started_at = None
+        return None
+
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=next_run.id,
+        action="queue_started",
+        message=f"Started waiting workflow run after {completed_run.id}",
+        metadata={
+            "workflow_id": next_run.workflow_id,
+            "queue_group_id": group_id,
+            "previous_run_id": completed_run.id,
+            "queue_order": next_run.queue_order,
+            "queued_count": queued_count,
+        },
+    )
+    return next_run.id, next_run.execution_generation
+
+
+def _dispatch_workflow_run_async(run_id: str, execution_generation: int) -> None:
+    thread = threading.Thread(target=run_workflow_run, args=(run_id, execution_generation), daemon=True)
+    thread.start()
 
 
 def _fail_run(db: Session, run: WorkflowRun, message: str) -> None:
@@ -1026,6 +1090,8 @@ def _workflow_summary(node_results: dict[str, Any], branch_path: str | None) -> 
 def _workflow_run_status(run: WorkflowRun, items: list[WorkflowRunItem]) -> str:
     if run.status in WORKFLOW_TERMINAL_STATUSES or run.status in {"completed_with_errors", "failed"}:
         return run.status
+    if run.status == "waiting":
+        return "waiting"
     if run.status == "paused":
         return "paused"
     statuses = [item.status for item in items]
@@ -1065,7 +1131,9 @@ def _workflow_run_counters(run: WorkflowRun, items: list[WorkflowRunItem]) -> di
     canceled_count = sum(1 for status in statuses if status == "canceled")
     paused_count = sum(1 for status in statuses if status == "paused")
     status = _workflow_run_status(run, items)
-    if status == "paused" or paused_count:
+    if status == "waiting":
+        progress_phase = "waiting"
+    elif status == "paused" or paused_count:
         progress_phase = "paused"
     elif len(statuses) < run.total_count:
         progress_phase = "uploading"

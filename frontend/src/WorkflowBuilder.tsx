@@ -143,6 +143,9 @@ type WorkflowRun = {
   workflow_id: string;
   workflow_name?: string | null;
   restarted_from_run_id?: string | null;
+  workflow_run_group_id?: string | null;
+  queued_from_run_id?: string | null;
+  queue_order?: number | null;
   status: string;
   total_count: number;
   completed_count: number;
@@ -270,7 +273,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     [nodes, edges, schemas, classifiers, checklists]
   );
   const validation = useMemo(() => validateWorkflow(nodes, edges), [nodes, edges]);
-  const isRunningRun = Boolean(activeRun && !TERMINAL_RUN_STATUSES.includes(activeRun.status));
+  const isRunningRun = Boolean(activeRun && !TERMINAL_RUN_STATUSES.includes(activeRun.status) && activeRun.status !== "waiting");
   const shouldAnimateCanvasEdges = isRunningRun || isStartingRun;
   const canvasEdges = useMemo(
     () =>
@@ -641,6 +644,52 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     }
   }
 
+  async function enqueueRun(runId: string) {
+    setError(null);
+    setIsSaving(true);
+    try {
+      const saved = await persistWorkflow();
+      const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/enqueue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workflow_id: saved.id })
+      });
+      upsertRun(run);
+      setActiveRunId(run.id);
+      setMessage("업로드된 문서를 재사용하는 워크플로우 실행을 대기열에 추가했습니다.");
+      void refreshRun(run.id);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "워크플로우 실행을 대기열에 추가하지 못했습니다.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function startWaitingRun(runId: string) {
+    setError(null);
+    try {
+      const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/start`, { method: "POST" });
+      upsertRun(run);
+      setActiveRunId(run.id);
+      setMessage("대기 중인 워크플로우 실행을 바로 시작했습니다.");
+      void refreshRun(run.id);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "대기 중인 워크플로우 실행을 시작하지 못했습니다.");
+    }
+  }
+
+  async function cancelWaitingRun(runId: string) {
+    setError(null);
+    try {
+      const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/cancel-waiting`, { method: "POST" });
+      upsertRun(run);
+      setActiveRunId(run.id);
+      setMessage("워크플로우 실행 대기를 취소했습니다. 공유 문서는 보존됩니다.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "대기 중인 워크플로우 실행을 취소하지 못했습니다.");
+    }
+  }
+
   function requestResumeUpload(runId: string) {
     workflowResumeRunIdRef.current = runId;
     setError(null);
@@ -882,6 +931,9 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                 onResume={() => void resumeRun(activeRun.id)}
                 onPause={() => void pauseRun(activeRun.id)}
                 onRestart={() => void restartRun(activeRun.id)}
+                onEnqueue={() => void enqueueRun(activeRun.id)}
+                onStartWaiting={() => void startWaitingRun(activeRun.id)}
+                onCancelWaiting={() => void cancelWaitingRun(activeRun.id)}
                 onResumeUpload={(source) => source === "folder" ? requestResumeFolderUpload(activeRun.id) : requestResumeUpload(activeRun.id)}
                 onDiscard={() => void discardRun(activeRun.id)}
               />
@@ -1048,6 +1100,44 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
     }
   }
 
+  async function enqueueRun() {
+    try {
+      const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/enqueue`, { method: "POST" });
+      setRun(nextRun);
+      setSelectedItemId((current) => current ?? nextRun.items[0]?.id ?? null);
+      setError(null);
+      if (nextRun.id !== runId) {
+        openWorkflowResultScreen(nextRun.id);
+      } else {
+        void refreshRun();
+      }
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "워크플로우 실행을 대기열에 추가하지 못했습니다.");
+    }
+  }
+
+  async function startWaitingRun() {
+    try {
+      const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/start`, { method: "POST" });
+      setRun(nextRun);
+      setSelectedItemId((current) => current ?? nextRun.items[0]?.id ?? null);
+      setError(null);
+      void refreshRun();
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "대기 중인 워크플로우 실행을 시작하지 못했습니다.");
+    }
+  }
+
+  async function cancelWaitingRun() {
+    try {
+      const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/cancel-waiting`, { method: "POST" });
+      setRun(nextRun);
+      setError(null);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "대기 중인 워크플로우 실행을 취소하지 못했습니다.");
+    }
+  }
+
   async function retryFailedRun() {
     try {
       const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/retry-failed`, { method: "POST" });
@@ -1092,6 +1182,9 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
           onResume={() => void resumeRun()}
           onPause={() => void pauseRun()}
           onRestart={() => void restartRun()}
+          onEnqueue={() => void enqueueRun()}
+          onStartWaiting={() => void startWaitingRun()}
+          onCancelWaiting={() => void cancelWaitingRun()}
           onRetryFailed={() => void retryFailedRun()}
           onDiscard={() => void discardRun()}
           onClose={closeWindow}
@@ -1279,6 +1372,9 @@ function WorkflowRunProgressDock(props: {
   onResume: () => void;
   onPause: () => void;
   onRestart: () => void;
+  onEnqueue: () => void;
+  onStartWaiting: () => void;
+  onCancelWaiting: () => void;
   onResumeUpload: (source: WorkflowUploadSource) => void;
   onDiscard: () => void;
 }) {
@@ -1324,6 +1420,21 @@ function WorkflowRunProgressDock(props: {
           {workflowRunCanRestart(props.run) && (
             <button type="button" className="secondary" onClick={props.onRestart}>
               <Play size={15} /> 재시작
+            </button>
+          )}
+          {workflowRunCanEnqueue(props.run) && (
+            <button type="button" className="secondary" onClick={props.onEnqueue}>
+              <Plus size={15} /> 대기열 추가
+            </button>
+          )}
+          {workflowRunCanStartWaiting(props.run) && (
+            <button type="button" className="secondary" onClick={props.onStartWaiting}>
+              <Play size={15} /> 바로 실행
+            </button>
+          )}
+          {workflowRunCanCancelWaiting(props.run) && (
+            <button type="button" className="secondary danger-outline" onClick={props.onCancelWaiting}>
+              <X size={15} /> 대기 취소
             </button>
           )}
           {workflowRunCanDiscard(props.run) && (
@@ -1402,6 +1513,8 @@ function WorkflowRunHistory(props: {
                   <small>
                     {formatWorkflowRunDate(run.created_at)} · {run.id} · {finishedCount.toLocaleString()} / {run.total_count.toLocaleString()} 처리
                     {run.restarted_from_run_id ? ` · 재시작 원본 ${run.restarted_from_run_id}` : ""}
+                    {run.queued_from_run_id ? ` · 대기 원본 ${run.queued_from_run_id}` : ""}
+                    {run.queue_order ? ` · 대기열 #${run.queue_order}` : ""}
                     {run.failed_count ? ` · ${run.failed_count.toLocaleString()} 실패` : ""}
                     {run.needs_review_count ? ` · ${run.needs_review_count.toLocaleString()} 검토` : ""}
                   </small>
@@ -1447,6 +1560,9 @@ function WorkflowRunResults(props: {
   onResume?: () => void;
   onPause?: () => void;
   onRestart?: () => void;
+  onEnqueue?: () => void;
+  onStartWaiting?: () => void;
+  onCancelWaiting?: () => void;
   onRetryFailed?: () => void;
   onDiscard?: () => void;
   onClose: () => void;
@@ -1539,6 +1655,21 @@ function WorkflowRunResults(props: {
           {props.onRestart && workflowRunCanRestart(props.run) && (
             <button type="button" className="secondary" onClick={props.onRestart}>
               <Play size={15} /> 재시작
+            </button>
+          )}
+          {props.onEnqueue && workflowRunCanEnqueue(props.run) && (
+            <button type="button" className="secondary" onClick={props.onEnqueue}>
+              <Plus size={15} /> 대기열 추가
+            </button>
+          )}
+          {props.onStartWaiting && workflowRunCanStartWaiting(props.run) && (
+            <button type="button" className="secondary" onClick={props.onStartWaiting}>
+              <Play size={15} /> 바로 실행
+            </button>
+          )}
+          {props.onCancelWaiting && workflowRunCanCancelWaiting(props.run) && (
+            <button type="button" className="secondary danger-outline" onClick={props.onCancelWaiting}>
+              <X size={15} /> 대기 취소
             </button>
           )}
           {props.onRetryFailed && workflowRunCanRetryFailed(props.run) && (
@@ -1655,6 +1786,7 @@ function workflowRunCanResume(run: WorkflowRun) {
 }
 
 function workflowRunCanPause(run: WorkflowRun) {
+  if (run.status === "waiting") return false;
   const uploadedCount = run.uploaded_count ?? run.items.length;
   const preprocessingCount = run.preprocessing_count ?? run.items.filter((item) => item.status === "preprocessing").length;
   const queuedCount = run.queued_count ?? run.items.filter((item) => item.status === "queued").length;
@@ -1663,26 +1795,41 @@ function workflowRunCanPause(run: WorkflowRun) {
 }
 
 function workflowRunCanRestart(run: WorkflowRun) {
+  if (run.status === "waiting") return false;
   const uploadedCount = run.uploaded_count ?? run.items.length;
   return run.status !== "canceled" && run.items.length > 0 && (uploadedCount === run.total_count || run.status === "paused");
 }
 
 function workflowRunCanRetryFailed(run: WorkflowRun) {
-  if (run.status === "canceled" || run.failed_count <= 0) return false;
+  if (run.status === "canceled" || run.status === "waiting" || run.failed_count <= 0) return false;
   const activeCount = run.items.filter((item) => ["uploading", "preprocessing", "queued", "running", "paused"].includes(item.status)).length;
   return activeCount === 0;
 }
 
 function workflowRunCanResumeUpload(run: WorkflowRun) {
   const uploadedCount = run.uploaded_count ?? run.items.length;
-  return !TERMINAL_RUN_STATUSES.includes(run.status) && run.total_count > 0 && uploadedCount < run.total_count;
+  return run.status !== "waiting" && !TERMINAL_RUN_STATUSES.includes(run.status) && run.total_count > 0 && uploadedCount < run.total_count;
+}
+
+function workflowRunCanEnqueue(run: WorkflowRun) {
+  const uploadedCount = run.uploaded_count ?? run.items.length;
+  return run.status !== "canceled" && run.items.length > 0 && uploadedCount === run.total_count;
+}
+
+function workflowRunCanStartWaiting(run: WorkflowRun) {
+  return run.status === "waiting";
+}
+
+function workflowRunCanCancelWaiting(run: WorkflowRun) {
+  return run.status === "waiting";
 }
 
 function workflowRunCanDiscard(run: WorkflowRun) {
-  return !["completed", "completed_with_errors", "needs_review", "canceled"].includes(run.status);
+  return run.status !== "waiting" && !["completed", "completed_with_errors", "needs_review", "canceled"].includes(run.status);
 }
 
 function workflowRunHeadline(run: WorkflowRun) {
+  if (run.status === "waiting" || run.progress_phase === "waiting") return "실행 대기";
   if (run.status === "paused" || run.progress_phase === "paused") return "일시중단";
   if (workflowRunCanResumeUpload(run) || run.progress_phase === "uploading") return "문서 업로드 중";
   if (run.progress_phase === "preprocessing") return "문서 전처리 중";
@@ -1694,6 +1841,7 @@ function workflowRunStatusLabel(run: WorkflowRun) {
   if (run.status === "uploading") return "업로드 중";
   if (run.status === "preprocessing") return "전처리 중";
   if (run.status === "paused") return "일시중단";
+  if (run.status === "waiting") return "실행 대기";
   if (run.status === "running") return "실행 중";
   if (run.status === "queued") return "대기";
   if (run.status === "failed") return "실패";

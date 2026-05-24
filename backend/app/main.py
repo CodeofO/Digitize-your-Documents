@@ -124,6 +124,7 @@ from app.schemas import (
     SystemStatusRead,
     VlmSettingsRead,
     VlmSettingsUpdate,
+    WorkflowRunEnqueueRequest,
     WorkflowDefinitionCreate,
     WorkflowDefinitionRead,
     WorkflowDefinitionUpdate,
@@ -1670,7 +1671,7 @@ def start_workflow_run(
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
-    if run.status not in {"uploading", "queued"}:
+    if run.status not in {"uploading", "queued", "waiting"}:
         return WorkflowRunRead(**workflow_run_to_read(run))
     _validate_owner_can_start(run, run.items)
     now = datetime.utcnow()
@@ -1699,16 +1700,80 @@ def start_workflow_run(
     return response
 
 
+@app.post("/api/workflow-runs/{run_id}/enqueue", response_model=WorkflowRunRead)
+def enqueue_workflow_run(
+    run_id: str,
+    payload: WorkflowRunEnqueueRequest | None = Body(default=None),
+    db: Session = Depends(get_db),
+) -> WorkflowRunRead:
+    source_run = db.get(WorkflowRun, run_id)
+    if not source_run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if not source_run.items:
+        raise HTTPException(status_code=422, detail="No uploaded workflow items are available to enqueue")
+    workflow_id = payload.workflow_id if payload and payload.workflow_id else source_run.workflow_id
+    workflow = db.get(WorkflowDefinition, workflow_id)
+    if not workflow or workflow.archived:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    try:
+        validate_workflow_definition(json.loads(workflow.definition_json), db)
+    except WorkflowDefinitionError as exc:
+        raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
+
+    _validate_owner_can_start(source_run, source_run.items)
+    now = datetime.utcnow()
+    new_run, queued_count = _create_waiting_workflow_run(source_run, workflow, now, db)
+    if not queued_count:
+        new_run.status = "completed_with_errors"
+        new_run.completed_at = now
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=new_run.id,
+        action="queued",
+        message=f"Queued workflow run after {source_run.id}",
+        metadata={
+            "workflow_id": new_run.workflow_id,
+            "source_run_id": source_run.id,
+            "queue_group_id": new_run.workflow_run_group_id,
+            "queue_order": new_run.queue_order,
+            "queued_count": queued_count,
+        },
+    )
+    db.commit()
+    db.refresh(new_run)
+    return WorkflowRunRead(**workflow_run_to_read(new_run))
+
+
+@app.post("/api/workflow-runs/{run_id}/cancel-waiting", response_model=WorkflowRunRead)
+def cancel_waiting_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if run.status != "waiting":
+        raise HTTPException(status_code=409, detail="Workflow run is not waiting in the queue")
+    _cancel_waiting_workflow_run(run, db)
+    db.commit()
+    db.refresh(run)
+    return WorkflowRunRead(**workflow_run_to_read(run))
+
+
 @app.post("/api/workflow-runs/{run_id}/discard", response_model=WorkflowRunRead)
 def discard_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
     document_ids = [item.document_id for item in run.items]
+    if run.status == "waiting":
+        _cancel_waiting_workflow_run(run, db)
+        db.commit()
+        db.refresh(run)
+        return WorkflowRunRead(**workflow_run_to_read(run))
     item_count = len(run.items)
+    deletable_document_ids = _unshared_workflow_document_ids(run, document_ids, db)
     for item in list(run.items):
         db.delete(item)
-    _delete_document_payloads(document_ids, db)
+    _delete_document_payloads(deletable_document_ids, db)
     run.status = "canceled"
     run.error_message = "Stopped and discarded uploaded payloads"
     run.completed_at = datetime.utcnow()
@@ -3617,6 +3682,122 @@ def _create_restarted_workflow_run(
         if ready:
             queued_count += 1
     return new_run, queued_count
+
+
+def _create_waiting_workflow_run(
+    source_run: WorkflowRun,
+    workflow: WorkflowDefinition,
+    now: datetime,
+    db: Session,
+) -> tuple[WorkflowRun, int]:
+    group_id = _ensure_workflow_queue_group(source_run, db)
+    queue_order = _next_workflow_queue_order(db, group_id)
+    new_run = WorkflowRun(
+        workflow_id=workflow.id,
+        workflow_name=workflow.name,
+        workflow_definition_json=workflow.definition_json,
+        workflow_run_group_id=group_id,
+        queued_from_run_id=source_run.id,
+        queue_order=queue_order,
+        status="waiting",
+        total_count=source_run.total_count,
+        upload_duration_ms=source_run.upload_duration_ms or _workflow_upload_duration_ms(source_run),
+        execution_generation=0,
+    )
+    db.add(new_run)
+    db.flush()
+
+    queued_count = 0
+    for source_item in _sorted_workflow_items(source_run.items):
+        document = source_item.document or db.get(Document, source_item.document_id)
+        ready = bool(document and document.status == "ready" and document.pages)
+        status = "queued" if ready else "failed"
+        message = None if ready else (document.error_message if document else source_item.error_message or "Document preprocessing was interrupted")
+        result_json = (
+            _initial_workflow_item_payload(document)
+            if ready and document
+            else json.dumps(
+                {
+                    "document_id": source_item.document_id,
+                    "filename": source_item.filename,
+                    "node_results": {},
+                    "error_message": message,
+                },
+                ensure_ascii=False,
+            )
+        )
+        db.add(
+            WorkflowRunItem(
+                run_id=new_run.id,
+                document_id=source_item.document_id,
+                filename=source_item.filename,
+                upload_index=source_item.upload_index,
+                status=status,
+                error_message=message,
+                client_file_id=source_item.client_file_id,
+                upload_duration_ms=source_item.upload_duration_ms,
+                execution_generation=new_run.execution_generation,
+                result_json=result_json,
+                completed_at=None if ready else now,
+            )
+        )
+        if ready:
+            queued_count += 1
+    return new_run, queued_count
+
+
+def _ensure_workflow_queue_group(run: WorkflowRun, db: Session) -> str:
+    group_id = run.workflow_run_group_id or run.id
+    run.workflow_run_group_id = group_id
+    if run.queue_order is None:
+        run.queue_order = 1 if run.id == group_id else _next_workflow_queue_order(db, group_id)
+    db.flush()
+    return group_id
+
+
+def _next_workflow_queue_order(db: Session, group_id: str) -> int:
+    orders = [
+        order
+        for (order,) in db.query(WorkflowRun.queue_order).filter(WorkflowRun.workflow_run_group_id == group_id).all()
+        if order is not None
+    ]
+    return max(orders, default=0) + 1
+
+
+def _cancel_waiting_workflow_run(run: WorkflowRun, db: Session) -> None:
+    now = datetime.utcnow()
+    canceled_count = 0
+    for item in run.items:
+        if item.status in {"queued", "preprocessing", "running", "paused"}:
+            item.status = "canceled"
+            item.error_message = "Removed from workflow run queue"
+            item.completed_at = now
+            canceled_count += 1
+    run.status = "canceled"
+    run.error_message = "Removed from workflow run queue"
+    run.completed_at = now
+    run.inference_started_at = None
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="queue_canceled",
+        message=f"Canceled waiting workflow run with {canceled_count} queued item(s)",
+        metadata={"workflow_id": run.workflow_id, "queue_group_id": run.workflow_run_group_id, "queue_order": run.queue_order},
+    )
+
+
+def _unshared_workflow_document_ids(run: WorkflowRun, document_ids: list[str], db: Session) -> list[str]:
+    unique_document_ids = sorted({document_id for document_id in document_ids if document_id})
+    if not unique_document_ids:
+        return []
+    shared_document_ids = {
+        document_id
+        for (document_id,) in db.query(WorkflowRunItem.document_id)
+        .filter(WorkflowRunItem.run_id != run.id, WorkflowRunItem.document_id.in_(unique_document_ids))
+        .all()
+    }
+    return [document_id for document_id in unique_document_ids if document_id not in shared_document_ids]
 
 
 def _prepare_workflow_run_retry_failed(run: WorkflowRun) -> int:

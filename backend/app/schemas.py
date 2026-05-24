@@ -793,6 +793,9 @@ class WorkflowRunRead(BaseModel):
     workflow_id: str
     workflow_name: str | None = None
     restarted_from_run_id: str | None = None
+    workflow_run_group_id: str | None = None
+    queued_from_run_id: str | None = None
+    queue_order: int | None = None
     status: str
     total_count: int
     completed_count: int
@@ -819,6 +822,10 @@ class WorkflowRunInitRequest(BaseModel):
 
 
 class WorkflowRunRestartRequest(BaseModel):
+    workflow_id: str | None = None
+
+
+class WorkflowRunEnqueueRequest(BaseModel):
     workflow_id: str | None = None
 
 
