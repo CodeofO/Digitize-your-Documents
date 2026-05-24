@@ -657,9 +657,8 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
         body: JSON.stringify({ workflow_id: saved.id })
       });
       upsertRun(run);
-      setActiveRunId(run.id);
       setMessage("업로드된 문서를 재사용하는 워크플로우 실행을 예약했습니다.");
-      void refreshRun(run.id);
+      void refreshRun(runId);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 실행을 예약하지 못했습니다.");
     } finally {
@@ -903,6 +902,66 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
             </span>
           </div>
 
+          <div className="workflow-run-bar">
+            <WorkflowUploadButton
+              disabled={isStartingRun || isRunningRun}
+              selectedCount={files.length}
+              onChange={onFileInput}
+            />
+            <input
+              ref={workflowResumeFileInputRef}
+              type="file"
+              multiple
+              accept={WORKFLOW_FILE_ACCEPT}
+              className="visually-hidden"
+              onChange={onResumeUploadInput}
+            />
+            <input
+              ref={workflowResumeFolderInputRef}
+              type="file"
+              multiple
+              accept={WORKFLOW_FILE_ACCEPT}
+              className="visually-hidden"
+              onChange={onResumeUploadInput}
+              {...{ webkitdirectory: "", directory: "" }}
+            />
+            <button
+              type="button"
+              className="primary workflow-run-primary-button"
+              onClick={() => void runWorkflow()}
+              disabled={isStartingRun || isRunningRun || !files.length}
+              title={runButtonTitle}
+            >
+              {isStartingRun || isRunningRun ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
+              {isStartingRun ? "시작 중" : isRunningRun ? "실행 중" : "실행"}
+            </button>
+            {activeRun && workflowRunCanEnqueue(activeRun) && (
+              <button
+                type="button"
+                className="secondary workflow-run-reserve-button"
+                onClick={() => void enqueueRun(activeRun.id)}
+                disabled={isStartingRun || isSaving || validation.errors.length > 0}
+                title={
+                  validation.errors.length
+                    ? `예약할 수 없습니다: ${validation.errors[0]}`
+                    : "현재 문서 묶음을 재사용해 캔버스의 워크플로우를 다음 실행으로 예약합니다."
+                }
+              >
+                <Plus size={15} /> 현재 문서로 실행 예약
+              </button>
+            )}
+            {activeRun && (
+              <>
+                <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${activeRun.id}/export?format=csv`}>
+                  <Download size={15} /> CSV
+                </a>
+                <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${activeRun.id}/export?format=json`}>
+                  <FileJson size={15} /> JSON
+                </a>
+              </>
+            )}
+          </div>
+
           <div className="workflow-canvas">
             <ReactFlow
               nodes={canvasNodes}
@@ -965,66 +1024,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
               />
             </aside>
           )}
-
-          <div className="workflow-run-bar">
-            <WorkflowUploadButton
-              disabled={isStartingRun || isRunningRun}
-              selectedCount={files.length}
-              onChange={onFileInput}
-            />
-            <input
-              ref={workflowResumeFileInputRef}
-              type="file"
-              multiple
-              accept={WORKFLOW_FILE_ACCEPT}
-              className="visually-hidden"
-              onChange={onResumeUploadInput}
-            />
-            <input
-              ref={workflowResumeFolderInputRef}
-              type="file"
-              multiple
-              accept={WORKFLOW_FILE_ACCEPT}
-              className="visually-hidden"
-              onChange={onResumeUploadInput}
-              {...{ webkitdirectory: "", directory: "" }}
-            />
-            <button
-              type="button"
-              className="primary workflow-run-primary-button"
-              onClick={() => void runWorkflow()}
-              disabled={isStartingRun || isRunningRun || !files.length}
-              title={runButtonTitle}
-            >
-              {isStartingRun || isRunningRun ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
-              {isStartingRun ? "시작 중" : isRunningRun ? "실행 중" : "실행"}
-            </button>
-            {activeRun && workflowRunCanEnqueue(activeRun) && (
-              <button
-                type="button"
-                className="secondary workflow-run-reserve-button"
-                onClick={() => void enqueueRun(activeRun.id)}
-                disabled={isStartingRun || isSaving || validation.errors.length > 0}
-                title={
-                  validation.errors.length
-                    ? `예약할 수 없습니다: ${validation.errors[0]}`
-                    : "현재 문서 묶음을 재사용해 캔버스의 워크플로우를 다음 실행으로 예약합니다."
-                }
-              >
-                <Plus size={15} /> 현재 문서로 실행 예약
-              </button>
-            )}
-            {activeRun && (
-              <>
-                <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${activeRun.id}/export?format=csv`}>
-                  <Download size={15} /> CSV
-                </a>
-                <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${activeRun.id}/export?format=json`}>
-                  <FileJson size={15} /> JSON
-                </a>
-              </>
-            )}
-          </div>
 
           {(error || message || validation.errors.length > 0 || validation.warnings.length > 0) && (
             <div className="workflow-validation">
@@ -1304,7 +1303,7 @@ function WorkflowUploadButton(props: {
         <span>{triggerLabel}</span>
       </button>
       {menu.open && !props.disabled && (
-        <div className="workflow-upload-menu workflow-upload-menu-up" role="menu">
+        <div className="workflow-upload-menu" role="menu">
           <label className="workflow-upload-menu-item" role="menuitem">
             파일 선택
             <input type="file" multiple accept={WORKFLOW_FILE_ACCEPT} onChange={onChange} />
