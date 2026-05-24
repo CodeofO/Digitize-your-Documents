@@ -2,6 +2,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,8 @@ from app.vlm import correct_extraction_with_vlm, extract_with_vlm, format_vlm_ex
 
 
 TERMINAL_JOB_STATUSES = {"completed", "needs_review", "failed", "canceled"}
+MIN_AI_CORRECTION_CONFIDENCE = 0.85
+MIN_HANGUL_CORRECTION_SIMILARITY = 0.65
 
 
 @dataclass(frozen=True)
@@ -227,6 +230,13 @@ def _apply_ai_judgement(
                 correction = correct_extraction_with_vlm(field, initial_value, initial_evidence, ai_review["judgement_reason"], image_inputs)
                 corrected_values, correction_warnings = validate_extracted_values({field.key_name: correction}, [field])
                 corrected_entry = dict(corrected_values[field.key_name])
+                rejection_warning = _correction_rejection_warning(initial_value, corrected_entry)
+                if rejection_warning:
+                    ai_review["correction_reason"] = _correction_rejection_reason(rejection_warning, correction)
+                    _append_field_warning(current, next_warnings, field.key_name, rejection_warning)
+                    current["ai_review"] = ai_review
+                    next_values[field.key_name] = current
+                    continue
                 corrected_entry["ai_review"] = {
                     **ai_review,
                     "corrected": True,
@@ -249,6 +259,55 @@ def _apply_ai_judgement(
         next_values[field.key_name] = current
 
     return next_values, next_warnings
+
+
+def _correction_rejection_warning(initial_value: Any, corrected_entry: dict[str, Any]) -> str | None:
+    corrected_value = corrected_entry.get("value")
+    confidence = corrected_entry.get("confidence")
+    if _has_value(initial_value) and corrected_value is None:
+        return "ai_correction_discarded_null"
+    if isinstance(confidence, (int, float)) and confidence < MIN_AI_CORRECTION_CONFIDENCE:
+        return "ai_correction_low_confidence"
+    if _hangul_correction_changed_too_much(initial_value, corrected_value):
+        return "ai_correction_large_change"
+    return None
+
+
+def _correction_rejection_reason(warning: str, correction: dict[str, Any]) -> str:
+    reason = str(correction.get("correction_reason") or "").strip() if isinstance(correction, dict) else ""
+    labels = {
+        "ai_correction_discarded_null": "Discarded correction because it would replace a non-empty first-stage value with null.",
+        "ai_correction_low_confidence": "Discarded correction because its confidence was below the automatic-apply threshold.",
+        "ai_correction_large_change": "Discarded correction because it changed a short Hangul value too aggressively.",
+    }
+    return f"{labels.get(warning, 'Discarded correction.')} {reason}".strip()
+
+
+def _has_value(value: Any) -> bool:
+    return value is not None and (not isinstance(value, str) or bool(value.strip()))
+
+
+def _hangul_correction_changed_too_much(initial_value: Any, corrected_value: Any) -> bool:
+    if not isinstance(initial_value, str) or not isinstance(corrected_value, str):
+        return False
+    initial = _compact_value(initial_value)
+    corrected = _compact_value(corrected_value)
+    if not initial or not corrected or initial == corrected:
+        return False
+    if not (_contains_hangul(initial) or _contains_hangul(corrected)):
+        return False
+    if max(len(initial), len(corrected)) > 8:
+        return False
+    similarity = SequenceMatcher(None, initial, corrected).ratio()
+    return similarity < MIN_HANGUL_CORRECTION_SIMILARITY
+
+
+def _compact_value(value: str) -> str:
+    return "".join(value.split())
+
+
+def _contains_hangul(value: str) -> bool:
+    return any("\uac00" <= character <= "\ud7a3" or "\u3131" <= character <= "\u318e" for character in value)
 
 
 def _append_field_warning(entry: dict[str, Any], warnings: list[str], field_name: str, warning: str) -> None:

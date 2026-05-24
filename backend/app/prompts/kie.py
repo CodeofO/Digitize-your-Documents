@@ -109,10 +109,16 @@ def build_full_page_judgement_prompt(field: FieldDefinition, initial_value: Any,
         [
             "You are in the second-stage KIE judgement step.",
             "Decide whether the first-stage extraction for this field is already correct by looking at the full page image.",
+            "This is a verification step, not a re-extraction step. Do not search for a better alternative value.",
+            "The default decision is judgement_status=correct unless the image clearly contradicts the first-stage value.",
+            "If handwriting is ambiguous, stylized, or could reasonably be read in multiple ways, keep the first-stage value and return correct.",
+            "Be very conservative when judging placeholders or labels.",
+            "Only treat text as a placeholder/label when it is printed form text and the actual input area has no handwritten value.",
+            "If text such as 성명, 서명, 법정, or similar Korean words is handwritten inside the target input area, do not delete it as a placeholder.",
             "Do not extract a new value in this judgement step.",
             _field_review_context(field, initial_value, initial_evidence),
             "Return judgement_status=correct when the first-stage value matches the image.",
-            "Return judgement_status=needs_correction only when the image shows that the first-stage value is wrong, incomplete, or unsupported.",
+            "Return judgement_status=needs_correction only when there is high-confidence visual evidence that the first-stage value is wrong, incomplete, or unsupported.",
         ]
     )
 
@@ -124,10 +130,16 @@ def build_region_judgement_prompt(field: FieldDefinition, initial_value: Any, in
             "The crop image is already the target region selected from the original full page. Treat the crop as the primary evidence.",
             "Use the full page only to understand the crop's original page context.",
             "Do not reapply location words from the field description inside the crop coordinate system.",
+            "This is a verification step, not a re-extraction step. Do not search for a better alternative value.",
+            "The default decision is judgement_status=correct unless the crop clearly contradicts the first-stage value.",
+            "If handwriting is ambiguous, stylized, or could reasonably be read in multiple ways, keep the first-stage value and return correct.",
+            "Be very conservative when judging placeholders or labels.",
+            "Only treat text as a placeholder/label when it is printed form text and the actual input area has no handwritten value.",
+            "If text such as 성명, 서명, 법정, or similar Korean words is handwritten inside the target crop, do not delete it as a placeholder.",
             "Do not extract a new value in this judgement step.",
             _field_review_context(field, initial_value, initial_evidence),
             "Return judgement_status=correct when the first-stage value matches the crop evidence.",
-            "Return judgement_status=needs_correction only when the crop evidence shows that the first-stage value is wrong, incomplete, or unsupported.",
+            "Return judgement_status=needs_correction only when there is high-confidence crop evidence that the first-stage value is wrong, incomplete, or unsupported.",
         ]
     )
 
@@ -143,7 +155,11 @@ def build_full_page_correction_prompt(field: FieldDefinition, initial_value: Any
         [
             "You are in the second-stage KIE correction step.",
             "A prior judgement step decided that the first-stage extraction needs correction.",
-            "Extract the correct value for this single field from the full page image.",
+            "Correct only this single field, and only when the visual evidence is explicit.",
+            "Do not invent a new value. If the correction is uncertain, return the first-stage value unchanged.",
+            "Do not change a non-empty handwritten Korean value to null merely because it looks like a label or placeholder.",
+            "Return null only when the target input area is visibly empty or the first-stage value came from printed form text outside the user input area.",
+            "Preserve the document's original wording and spacing when possible.",
             _field_review_context(field, initial_value, initial_evidence),
             f"Judgement reason: {judgement_reason or '(not provided)'}",
             "Return the corrected value, page, evidence, confidence, and correction_reason.",
@@ -159,6 +175,11 @@ def build_region_correction_prompt(field: FieldDefinition, initial_value: Any, i
             "The crop image is already the target region selected from the original full page. Treat the crop as the primary evidence.",
             "Use the full page only for original page context.",
             "Do not reapply location words from the field description inside the crop coordinate system.",
+            "Correct only this single field, and only when the crop evidence is explicit.",
+            "Do not invent a new value. If the correction is uncertain, return the first-stage value unchanged.",
+            "Do not change a non-empty handwritten Korean value to null merely because it looks like a label or placeholder.",
+            "Return null only when the target crop is visibly empty or the first-stage value came from printed form text outside the user input area.",
+            "Preserve the document's original wording and spacing when possible.",
             _field_review_context(field, initial_value, initial_evidence),
             f"Judgement reason: {judgement_reason or '(not provided)'}",
             "Return the corrected value, page, evidence, confidence, and correction_reason.",
@@ -184,4 +205,3 @@ def _render_value(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False)
-

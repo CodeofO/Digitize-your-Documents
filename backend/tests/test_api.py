@@ -1271,20 +1271,23 @@ def test_extraction_uses_schema_regions_for_cropped_inputs(monkeypatch) -> None:
 
 
 def test_kie_prompts_are_split_by_region_presence() -> None:
-    from app.prompts.kie import build_extraction_prompt
+    from app.prompts.kie import build_extraction_prompt, build_region_judgement_prompt
     from app.schemas import FieldDefinition
 
     full_prompt = build_extraction_prompt([
         FieldDefinition(key_name="document_date", description="Date visible on the document.", output_format="date")
     ])
-    region_prompt = build_extraction_prompt([
-        FieldDefinition(key_name="signature", description="Signature in the lower right area.", output_format="string", region_id="region_1")
-    ])
+    region_field = FieldDefinition(key_name="signature", description="Signature in the lower right area.", output_format="string", region_id="region_1")
+    region_prompt = build_extraction_prompt([region_field])
+    judgement_prompt = build_region_judgement_prompt(region_field, "서명", "first-stage evidence")
 
     assert "full document page images" in full_prompt
     assert "user-designated extraction region" not in full_prompt
     assert "labeled extraction region images" in region_prompt
     assert "crop image is already the user-designated extraction region" in region_prompt
+    assert "verification step, not a re-extraction step" in judgement_prompt
+    assert "default decision is judgement_status=correct" in judgement_prompt
+    assert "If text such as 성명, 서명, 법정" in judgement_prompt
 
 
 def test_kie_ai_judgement_corrects_enabled_field(monkeypatch) -> None:
@@ -1416,6 +1419,83 @@ def test_kie_ai_judgement_failure_needs_review_without_failing_job(monkeypatch) 
     assert value["value"] == "INV-1"
     assert "ai_review_failed" in value["warnings"]
     assert value["ai_review"]["judgement_status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("initial_value", "corrected_value", "expected_warning"),
+    [
+        ("성명", None, "ai_correction_discarded_null"),
+        ("문어", "문이", "ai_correction_large_change"),
+    ],
+)
+def test_kie_ai_correction_preserves_risky_korean_values(
+    monkeypatch,
+    initial_value: str,
+    corrected_value: str | None,
+    expected_warning: str,
+) -> None:
+    def fake_extract(fields, image_paths=None, image_inputs=None):
+        return {
+            field.key_name: {
+                "value": initial_value,
+                "page": 1,
+                "evidence": f"first evidence {initial_value}",
+                "confidence": 0.91,
+            }
+            for field in fields
+        }
+
+    def fake_judge(field, initial_value, initial_evidence, image_inputs):
+        return {
+            "judgement_status": "needs_correction",
+            "reason": "Synthetic judgement requested a risky correction.",
+            "confidence": 0.98,
+            "evidence": "Synthetic evidence",
+        }
+
+    def fake_correct(field, initial_value, initial_evidence, judgement_reason, image_inputs):
+        return {
+            "value": corrected_value,
+            "page": 1,
+            "evidence": "Synthetic correction evidence",
+            "confidence": 0.99,
+            "correction_reason": "Synthetic risky correction.",
+        }
+
+    monkeypatch.setattr("app.extraction.extract_with_vlm", fake_extract)
+    monkeypatch.setattr("app.extraction.judge_extraction_with_vlm", fake_judge)
+    monkeypatch.setattr("app.extraction.correct_extraction_with_vlm", fake_correct)
+
+    with get_client() as client:
+        document = upload_png(client)
+        schema = client.post(
+            "/api/schemas",
+            json={
+                "name": f"judgement_risky_{expected_warning}",
+                "fields": [
+                    {
+                        "key_name": "법정대리인성명",
+                        "description": "Legal representative name in the handwritten field.",
+                        "output_format": "string",
+                        "judgement_enabled": True,
+                    }
+                ],
+            },
+        )
+        assert schema.status_code == 200, schema.text
+        job_response = client.post(
+            "/api/extraction-jobs",
+            json={"document_id": document["document_id"], "schema_id": schema.json()["id"]},
+        )
+        assert job_response.status_code == 200, job_response.text
+        job = client.get(f"/api/extraction-jobs/{job_response.json()['job_id']}").json()
+
+    assert job["status"] == "needs_review"
+    value = job["result"]["validated_output"]["values"]["법정대리인성명"]
+    assert value["value"] == initial_value
+    assert expected_warning in value["warnings"]
+    assert value["ai_review"]["judgement_status"] == "needs_correction"
+    assert value["ai_review"]["corrected"] is False
 
 
 def test_batch_cancel_marks_queued_jobs_canceled(monkeypatch) -> None:
