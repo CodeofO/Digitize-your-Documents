@@ -746,6 +746,10 @@ textarea {
   color: #ffffff;
 }
 
+.workflow-run-reserve-button {
+  white-space: nowrap;
+}
+
 .workflow-upload {
   align-items: center;
   background: #f8faf8;

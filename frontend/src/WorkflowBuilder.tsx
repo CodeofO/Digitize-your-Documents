@@ -944,7 +944,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                 onResume={() => void resumeRun(activeRun.id)}
                 onPause={() => void pauseRun(activeRun.id)}
                 onRestart={() => void restartRun(activeRun.id)}
-                onEnqueue={() => void enqueueRun(activeRun.id)}
                 onStartWaiting={() => void startWaitingRun(activeRun.id)}
                 onCancelWaiting={() => void cancelWaitingRun(activeRun.id)}
                 onResumeUpload={(source) => source === "folder" ? requestResumeFolderUpload(activeRun.id) : requestResumeUpload(activeRun.id)}
@@ -961,7 +960,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                 activeRunId={activeRunId}
                 onOpen={(runId) => openWorkflowResultScreen(runId)}
                 onRefresh={() => void refreshAll()}
-                onEnqueue={(runId) => void enqueueRun(runId)}
                 onStartWaiting={(runId) => void startWaitingRun(runId)}
                 onCancelWaiting={(runId) => void cancelWaitingRun(runId)}
               />
@@ -1001,6 +999,21 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
               {isStartingRun || isRunningRun ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
               {isStartingRun ? "시작 중" : isRunningRun ? "실행 중" : "실행"}
             </button>
+            {activeRun && workflowRunCanEnqueue(activeRun) && (
+              <button
+                type="button"
+                className="secondary workflow-run-reserve-button"
+                onClick={() => void enqueueRun(activeRun.id)}
+                disabled={isStartingRun || isSaving || validation.errors.length > 0}
+                title={
+                  validation.errors.length
+                    ? `예약할 수 없습니다: ${validation.errors[0]}`
+                    : "현재 문서 묶음을 재사용해 캔버스의 워크플로우를 다음 실행으로 예약합니다."
+                }
+              >
+                <Plus size={15} /> 현재 문서로 실행 예약
+              </button>
+            )}
             {activeRun && (
               <>
                 <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${activeRun.id}/export?format=csv`}>
@@ -1120,22 +1133,6 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
     }
   }
 
-  async function enqueueRun() {
-    try {
-      const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/enqueue`, { method: "POST" });
-      setRun(nextRun);
-      setSelectedItemId((current) => current ?? nextRun.items[0]?.id ?? null);
-      setError(null);
-      if (nextRun.id !== runId) {
-        openWorkflowResultScreen(nextRun.id);
-      } else {
-        void refreshRun();
-      }
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "워크플로우 실행을 예약하지 못했습니다.");
-    }
-  }
-
   async function startWaitingRun() {
     try {
       const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/start`, { method: "POST" });
@@ -1202,7 +1199,6 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
           onResume={() => void resumeRun()}
           onPause={() => void pauseRun()}
           onRestart={() => void restartRun()}
-          onEnqueue={() => void enqueueRun()}
           onStartWaiting={() => void startWaitingRun()}
           onCancelWaiting={() => void cancelWaitingRun()}
           onRetryFailed={() => void retryFailedRun()}
@@ -1393,7 +1389,6 @@ function WorkflowRunProgressDock(props: {
   onResume: () => void;
   onPause: () => void;
   onRestart: () => void;
-  onEnqueue: () => void;
   onStartWaiting: () => void;
   onCancelWaiting: () => void;
   onResumeUpload: (source: WorkflowUploadSource) => void;
@@ -1441,11 +1436,6 @@ function WorkflowRunProgressDock(props: {
           {workflowRunCanRestart(props.run) && (
             <button type="button" className="secondary" onClick={props.onRestart}>
               <Play size={15} /> 재시작
-            </button>
-          )}
-          {workflowRunCanEnqueue(props.run) && (
-            <button type="button" className="secondary" onClick={props.onEnqueue}>
-              <Plus size={15} /> 실행 예약
             </button>
           )}
           {workflowRunCanStartWaiting(props.run) && props.canStartWaiting !== false && (
@@ -1508,7 +1498,6 @@ function WorkflowRunHistory(props: {
   activeRunId: string;
   onOpen: (runId: string) => void;
   onRefresh: () => void;
-  onEnqueue: (runId: string) => void;
   onStartWaiting: (runId: string) => void;
   onCancelWaiting: (runId: string) => void;
 }) {
@@ -1548,11 +1537,6 @@ function WorkflowRunHistory(props: {
                   </div>
                 </div>
                 <div className="workflow-run-history-actions">
-                  {workflowRunCanEnqueue(run) && (
-                    <button type="button" className="secondary" onClick={() => props.onEnqueue(run.id)}>
-                      <Plus size={14} /> 실행 예약
-                    </button>
-                  )}
                   {workflowRunCanStartWaiting(run, props.runs) && (
                     <button type="button" className="secondary" onClick={() => props.onStartWaiting(run.id)}>
                       <Play size={14} /> 바로 실행
@@ -1599,7 +1583,6 @@ function WorkflowRunResults(props: {
   onResume?: () => void;
   onPause?: () => void;
   onRestart?: () => void;
-  onEnqueue?: () => void;
   onStartWaiting?: () => void;
   onCancelWaiting?: () => void;
   onRetryFailed?: () => void;
@@ -1694,11 +1677,6 @@ function WorkflowRunResults(props: {
           {props.onRestart && workflowRunCanRestart(props.run) && (
             <button type="button" className="secondary" onClick={props.onRestart}>
               <Play size={15} /> 재시작
-            </button>
-          )}
-          {props.onEnqueue && workflowRunCanEnqueue(props.run) && (
-            <button type="button" className="secondary" onClick={props.onEnqueue}>
-              <Plus size={15} /> 실행 예약
             </button>
           )}
           {props.onStartWaiting && workflowRunCanStartWaiting(props.run) && (
