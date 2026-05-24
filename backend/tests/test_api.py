@@ -25,6 +25,13 @@ ONE_BY_ONE_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
 SCHEMA_COUNTER = 0
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def assert_xlsx_response(response) -> None:
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == XLSX_MIME
+    assert response.content.startswith(b"PK")
 
 
 def test_health() -> None:
@@ -1065,6 +1072,9 @@ def test_extraction_mock_mode_returns_evidence_and_normalized_values() -> None:
             assert "charset=utf-8" in csv_export.headers["content-type"]
             assert "evidence" in csv_export.text.splitlines()[0]
 
+            xlsx_export = client.get(f"/api/extraction-results/{job['result_id']}/export?format=xlsx")
+            assert_xlsx_response(xlsx_export)
+
             corrected_output = job["result"]["validated_output"]
             corrected_output["values"]["invoice_number"]["value"] = "INV-EDITED"
             patch = client.patch(
@@ -1612,6 +1622,9 @@ def test_batch_export_csv_and_json_mock_mode() -> None:
             assert len(payload["rows"]) == 2
             assert [row["filename"] for row in payload["rows"]] == ["a_first.png", "z_last.png"]
             assert payload["rows"][0]["invoice_number"] == "Sample invoice_number"
+
+            xlsx_response = client.get(f"/api/batches/{batch['id']}/export?format=xlsx")
+            assert_xlsx_response(xlsx_response)
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
@@ -1796,6 +1809,9 @@ def test_document_classifier_batch_cancel_and_export(monkeypatch) -> None:
             rows = json_response.json()["rows"]
             assert [row["filename"] for row in rows] == ["a_first.png", "z_last.png"]
             assert rows[0]["class_name"] == "contract"
+
+            xlsx_response = client.get(f"/api/classification-batches/{batch['id']}/export?format=xlsx")
+            assert_xlsx_response(xlsx_response)
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
@@ -1974,6 +1990,9 @@ def test_required_field_check_batch_export_mock_mode() -> None:
             assert json_response.status_code == 200
             rows = json_response.json()["rows"]
             assert rows[0]["성명_status"] == "present"
+
+            xlsx_response = client.get(f"/api/required-field-check-batches/{batch['id']}/export?format=xlsx")
+            assert_xlsx_response(xlsx_response)
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
@@ -2084,6 +2103,9 @@ def test_workflow_definition_validation_and_branch_run_mock_mode() -> None:
             assert all(isinstance(item["inference_duration_ms"], int) for item in run["items"])
             assert json_response.json()["rows"][0]["upload_duration_ms"] is not None
             assert json_response.json()["rows"][0]["class_name"] == "contract"
+
+            xlsx_response = client.get(f"/api/workflow-runs/{run['id']}/export?format=xlsx")
+            assert_xlsx_response(xlsx_response)
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()

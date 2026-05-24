@@ -20,7 +20,6 @@ import {
   PanelLeft,
   Play,
   Plus,
-  RefreshCw,
   RotateCw,
   Save,
   Settings,
@@ -78,6 +77,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 type AppMode = "home" | "raw" | "key-info" | "classifier" | "required-checker" | "workflow" | "workflow-result";
+type ExportFormat = "json" | "csv" | "xlsx";
 type Step = "upload" | "schema" | "review";
 type ReviewFilter = "needs_review" | "all" | "warning" | "null" | "changed" | "low_confidence" | "unreviewed" | "ai_corrected" | "ai_review_failed";
 type HistoryTab = "documents" | "schemas" | "jobs";
@@ -742,6 +742,42 @@ function UnifiedUploadPicker(props: {
   );
 }
 
+function ExportMenuButton(props: {
+  options: { format: ExportFormat; href: string; label?: string }[];
+  compact?: boolean;
+  align?: "left" | "right";
+}) {
+  const menu = useUploadPickerMenu();
+  const iconSize = props.compact ? 14 : 16;
+  const buttonClass = props.compact ? "secondary compact" : "secondary";
+
+  return (
+    <div className="workflow-upload-picker unified-upload-picker" ref={menu.ref}>
+      <button type="button" className={buttonClass} aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle}>
+        <Download size={iconSize} />
+        Export
+      </button>
+      {menu.open && (
+        <div className={`workflow-upload-menu ${props.align === "right" ? "workflow-upload-menu-right" : ""}`} role="menu">
+          {props.options.map((option) => (
+            <a
+              key={option.format}
+              className="workflow-upload-menu-item"
+              role="menuitem"
+              href={option.href}
+              target="_blank"
+              rel="noreferrer"
+              onClick={menu.close}
+            >
+              {exportFormatIcon(option.format, iconSize)} {option.label ?? option.format.toUpperCase()}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [mode, setMode] = useState<AppMode>(() => modeFromLocation());
   const [step, setStep] = useState<Step>("upload");
@@ -1061,6 +1097,14 @@ export default function App() {
     }, 1000);
     return () => window.clearInterval(intervalId);
   }, [batchPollingActive, shouldPollActiveBatch, activeBatchId, activeBatchItemId, job?.job_id, job?.result_id]);
+
+  useEffect(() => {
+    if (mode !== "key-info" || batchPollingActive) return;
+    const intervalId = window.setInterval(() => {
+      void refreshBatches();
+    }, 5000);
+    return () => window.clearInterval(intervalId);
+  }, [mode, batchPollingActive]);
 
   useEffect(() => {
     if (mode !== "home") return;
@@ -2357,10 +2401,6 @@ export default function App() {
               <StepPill label="검수" active={step === "review"} done={Boolean(result)} />
             </>
           )}
-          <button type="button" className="secondary compact" onClick={() => void refreshAll()} title="작업 화면 새로고침">
-            <RefreshCw size={16} />
-            새로고침
-          </button>
           {mode === "home" && (
             <button
               type="button"
@@ -2405,10 +2445,6 @@ export default function App() {
           onClassifier={() => navigateMode("classifier")}
           onRequiredChecker={() => navigateMode("required-checker")}
           onWorkflow={() => navigateMode("workflow")}
-          onRefreshMonitor={() => {
-            void refreshHomeMonitor();
-            void refreshBatches();
-          }}
           systemStatus={systemStatus}
           vlmSettings={vlmSettings}
           workflowRuns={homeWorkflowRuns}
@@ -2489,7 +2525,6 @@ export default function App() {
                     onOpenItem={(itemId) => void openBatchItem(activeBatch.id, itemId)}
                     onDiscardBatch={(batchId) => void discardBatch(batchId)}
                     onResumeBatch={(batchId) => void resumeBatch(batchId)}
-                    onRefresh={() => void refreshBatches()}
                   />
                 )}
                 <div className="document-viewer-panel">
@@ -2611,7 +2646,6 @@ export default function App() {
               <BatchItemStatusPanel
                 batch={activeBatch}
                 item={activeBatchItem}
-                onRefresh={() => void refreshBatches()}
                 onDiscardBatch={(batchId) => void discardBatch(batchId)}
                 onResumeBatch={(batchId) => void resumeBatch(batchId)}
               />
@@ -2755,7 +2789,6 @@ export default function App() {
             onRunBatch={() => void runBatchUpload()}
             onDiscardBatch={(batchId) => void discardBatch(batchId)}
             onResumeBatch={(batchId) => void resumeBatch(batchId)}
-            onRefresh={() => void refreshBatches()}
             onOpenItem={(batchId, itemId) => {
               setBatchOpen(false);
               void openBatchItem(batchId, itemId);
@@ -2845,7 +2878,6 @@ function HomeScreen(props: {
   onClassifier: () => void;
   onRequiredChecker: () => void;
   onWorkflow: () => void;
-  onRefreshMonitor: () => void;
   systemStatus: SystemStatus | null;
   vlmSettings: VlmSettings | null;
   workflowRuns: HomeWorkflowRun[];
@@ -2888,14 +2920,13 @@ function HomeScreen(props: {
             <div className="home-value-card">
               <span>03</span>
               <strong>검수 결과 export</strong>
-              <p>문서 이미지와 결과 table을 검수한 뒤 CSV/JSON으로 내보냅니다.</p>
+              <p>문서 이미지와 결과 table을 검수한 뒤 CSV, JSON, XLSX로 내보냅니다.</p>
             </div>
           </div>
         </div>
         <HomeMonitorPanel
           activeCount={activeMonitorCount}
           items={monitorItems}
-          onRefresh={props.onRefreshMonitor}
         />
       </section>
       <div className="home-section-title">
@@ -2959,7 +2990,6 @@ function HomeScreen(props: {
 function HomeMonitorPanel(props: {
   activeCount: number;
   items: HomeMonitorItem[];
-  onRefresh: () => void;
 }) {
   return (
     <section className="home-monitor-panel" aria-label="진행 현황">
@@ -2968,9 +2998,6 @@ function HomeMonitorPanel(props: {
           <p className="eyebrow">진행 현황</p>
           <h3>{props.activeCount ? `진행 중인 작업 ${props.activeCount}개` : "최근 작업"}</h3>
         </div>
-        <button type="button" className="secondary compact" onClick={props.onRefresh}>
-          <RefreshCw size={14} /> 갱신
-        </button>
       </div>
       {props.items.length ? (
         <div className="home-monitor-list">
@@ -3455,7 +3482,6 @@ function BatchFileRail(props: {
   onOpenItem: (itemId: string) => void;
   onDiscardBatch: (batchId: string) => void;
   onResumeBatch: (batchId: string) => void;
-  onRefresh: () => void;
 }) {
   const uploadedCount = props.batch.uploaded_count ?? props.batch.items.length;
   const preprocessingCount = props.batch.preprocessing_count ?? props.batch.items.filter((item) => item.status === "preprocessing").length;
@@ -3469,18 +3495,10 @@ function BatchFileRail(props: {
           <strong>{props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count} / {props.batch.total_count}</strong>
           <span>{uploadedCount} / {props.batch.total_count} 업로드됨 · {preprocessingCount} 전처리 · {runningCount} 실행 · {queuedCount} 대기</span>
         </div>
-        <button type="button" className="icon-only secondary compact" title="배치 새로고침" onClick={props.onRefresh}>
-          <RefreshCw size={14} />
-        </button>
       </div>
       <progress max={1} value={props.batch.progress} />
       <div className="batch-rail-actions">
-        <a className="secondary compact link-button" href={batchExportHref(props.batch.id, "csv")} target="_blank">
-          CSV
-        </a>
-        <a className="secondary compact link-button" href={batchExportHref(props.batch.id, "json")} target="_blank">
-          JSON
-        </a>
+        <ExportMenuButton options={batchExportOptions(props.batch.id)} compact align="right" />
         {batchCanResume(props.batch) && (
           <button type="button" className="secondary compact" onClick={() => props.onResumeBatch(props.batch.id)}>
             계속 처리
@@ -3630,7 +3648,6 @@ const BatchFileButton = memo(
 function BatchItemStatusPanel(props: {
   batch: Batch;
   item: BatchItem;
-  onRefresh: () => void;
   onDiscardBatch: (batchId: string) => void;
   onResumeBatch: (batchId: string) => void;
 }) {
@@ -3657,18 +3674,7 @@ function BatchItemStatusPanel(props: {
       </div>
 
       <div className="action-row">
-        <button type="button" className="secondary" onClick={props.onRefresh}>
-          <RefreshCw size={16} />
-          새로고침
-        </button>
-        <a className="secondary link-button" href={batchExportHref(props.batch.id, "csv")} target="_blank">
-          <FileSpreadsheet size={16} />
-          배치 CSV
-        </a>
-        <a className="secondary link-button" href={batchExportHref(props.batch.id, "json")} target="_blank">
-          <FileJson size={16} />
-          배치 JSON
-        </a>
+        <ExportMenuButton options={batchExportOptions(props.batch.id)} />
         {batchCanResume(props.batch) && (
           <button type="button" className="secondary" onClick={() => props.onResumeBatch(props.batch.id)}>
             <Play size={16} />
@@ -4175,7 +4181,6 @@ function BatchPanel(props: {
   onRunBatch: () => void;
   onDiscardBatch: (batchId: string) => void;
   onResumeBatch: (batchId: string) => void;
-  onRefresh: () => void;
   onOpenItem: (batchId: string, itemId: string) => void;
 }) {
   return (
@@ -4236,10 +4241,6 @@ function BatchPanel(props: {
             <FileSpreadsheet size={16} />
             최근 배치 결과
           </div>
-          <button className="secondary compact" onClick={props.onRefresh}>
-            <RefreshCw size={14} />
-            새로고침
-          </button>
         </div>
         <div className="mini-list">
           {props.batches.length ? (
@@ -4249,12 +4250,7 @@ function BatchPanel(props: {
                   <strong>{statusLabel(batch.status)}</strong>
                   <div className="batch-actions">
                     <span>{Math.round(batch.progress * 100)}%</span>
-                    <a className="secondary compact link-button" href={batchExportHref(batch.id, "csv")} target="_blank">
-                      CSV
-                    </a>
-                    <a className="secondary compact link-button" href={batchExportHref(batch.id, "json")} target="_blank">
-                      JSON
-                    </a>
+                    <ExportMenuButton options={batchExportOptions(batch.id)} compact align="right" />
                   </div>
                 </div>
                 <progress max={1} value={batch.progress} />
@@ -5153,14 +5149,7 @@ function ReviewPanel(props: {
           <Save size={16} />
           Preset 저장
         </button>
-        <a className="secondary link-button" href={exportHref(props.result.id, "json", props.selectedPresetId)} target="_blank">
-          <Download size={16} />
-          JSON
-        </a>
-        <a className="secondary link-button" href={exportHref(props.result.id, "csv", props.selectedPresetId)} target="_blank">
-          <FileSpreadsheet size={16} />
-          CSV
-        </a>
+        <ExportMenuButton options={resultExportOptions(props.result.id, props.selectedPresetId)} />
       </div>
 
       <AuditPanel events={props.auditEvents} />
@@ -5424,7 +5413,14 @@ function schemaValidationHint(message: string | null) {
   return hints[message] ?? message;
 }
 
-function exportHref(resultId: string, format: "json" | "csv", presetId: string) {
+function resultExportOptions(resultId: string, presetId: string) {
+  return (["csv", "json", "xlsx"] as ExportFormat[]).map((format) => ({
+    format,
+    href: exportHref(resultId, format, presetId),
+  }));
+}
+
+function exportHref(resultId: string, format: ExportFormat, presetId: string) {
   const params = new URLSearchParams({ format });
   if (presetId) params.set("preset_id", presetId);
   return `${API_BASE}/api/extraction-results/${resultId}/export?${params.toString()}`;
@@ -5445,9 +5441,22 @@ function resolveImageUrl(url: string) {
   return `${API_BASE}${url}`;
 }
 
-function batchExportHref(batchId: string, format: "json" | "csv") {
+function batchExportOptions(batchId: string) {
+  return (["csv", "json", "xlsx"] as ExportFormat[]).map((format) => ({
+    format,
+    href: batchExportHref(batchId, format),
+  }));
+}
+
+function batchExportHref(batchId: string, format: ExportFormat) {
   const params = new URLSearchParams({ format });
   return `${API_BASE}/api/batches/${batchId}/export?${params.toString()}`;
+}
+
+function exportFormatIcon(format: ExportFormat, size: number) {
+  if (format === "json") return <FileJson size={size} />;
+  if (format === "xlsx") return <FileSpreadsheet size={size} />;
+  return <Download size={size} />;
 }
 
 function parseEditedValue(value: string, format: OutputFormat): unknown {

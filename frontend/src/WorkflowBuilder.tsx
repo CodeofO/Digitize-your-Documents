@@ -22,11 +22,11 @@ import {
   Download,
   FileInput,
   FileJson,
+  FileSpreadsheet,
   GitBranch,
   GitMerge,
   GripVertical,
   History,
-  Library,
   Loader2,
   Maximize2,
   Pause,
@@ -57,6 +57,7 @@ const WORKFLOW_RESULT_SPLITTER_WIDTH = 12;
 
 type WorkflowNodeKind = "input" | "classifier" | "branch" | "kie" | "required-checker" | "merge" | "export";
 type WorkflowResultFilter = "all" | "success" | "failed" | "waiting" | "running" | "review";
+type ExportFormat = "csv" | "json" | "xlsx";
 type WorkflowClassFilterOption = {
   value: string;
   label: string;
@@ -194,7 +195,6 @@ type WorkflowBuilderProps = {
 type WorkflowDraft = {
   activeWorkflowId: string;
   workflowName: string;
-  workflowDescription: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   selectedNodeId: string | null;
@@ -211,7 +211,7 @@ const nodePalette: { kind: WorkflowNodeKind; label: string; description: string 
   { kind: "kie", label: "핵심 정보 추출", description: "저장된 schema로 값을 추출합니다." },
   { kind: "required-checker", label: "필수 항목 확인", description: "저장된 checklist를 확인합니다." },
   { kind: "merge", label: "결과 병합", description: "실행된 branch 결과를 합칩니다." },
-  { kind: "export", label: "Export", description: "통합 CSV/JSON 결과를 만듭니다." }
+  { kind: "export", label: "Export", description: "통합 결과 파일을 만듭니다." }
 ];
 
 const defaultNodes: WorkflowNode[] = [
@@ -242,7 +242,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
   const [activeWorkflowId, setActiveWorkflowId] = useState(initialDraft?.activeWorkflowId ?? "");
   const [workflowName, setWorkflowName] = useState(initialDraft?.workflowName ?? "문서 자동화 워크플로우");
-  const [workflowDescription, setWorkflowDescription] = useState(initialDraft?.workflowDescription ?? "");
   const [nodes, setNodes] = useState<WorkflowNode[]>(() => initialDraft?.nodes ?? defaultNodes);
   const [edges, setEdges] = useState<WorkflowEdge[]>(() => normalizeWorkflowEdges(initialDraft?.edges ?? defaultEdges));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(initialDraft?.selectedNodeId ?? defaultNodes[1]?.id ?? null);
@@ -303,11 +302,15 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
   }, [activeRun?.id, activeRun?.status]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => void refreshRunsList(), 3000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     const timer = window.setTimeout(() => {
       writeWorkflowDraft({
         activeWorkflowId,
         workflowName,
-        workflowDescription,
         nodes,
         edges,
         selectedNodeId
@@ -315,7 +318,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
       setDraftSavedAt(new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [activeWorkflowId, workflowName, workflowDescription, nodes, edges, selectedNodeId]);
+  }, [activeWorkflowId, workflowName, nodes, edges, selectedNodeId]);
 
   const onNodesChange = useCallback((changes: NodeChange<WorkflowNode>[]) => {
     setNodes((current) => applyNodeChanges(changes, current));
@@ -382,10 +385,24 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     }
   }
 
+  async function refreshRunsList() {
+    try {
+      const loadedRuns = await api<WorkflowRun[]>(`/api/workflow-runs?limit=${WORKFLOW_RUN_HISTORY_LIMIT}`);
+      setRuns((current) => {
+        const currentById = new Map(current.map((run) => [run.id, run]));
+        return loadedRuns.map((run) => {
+          const existing = currentById.get(run.id);
+          return run.items.length || !existing ? run : { ...run, items: existing.items };
+        });
+      });
+    } catch {
+      // Background polling should not interrupt the current editing flow.
+    }
+  }
+
   function loadWorkflowIntoCanvas(workflow: WorkflowDefinition) {
     setActiveWorkflowId(workflow.id);
     setWorkflowName(workflow.name);
-    setWorkflowDescription(workflow.description ?? "");
     setNodes((workflow.definition.nodes?.length ? workflow.definition.nodes : defaultNodes).map(normalizeWorkflowNode));
     setEdges(normalizeWorkflowEdges(workflow.definition.edges?.length ? workflow.definition.edges : defaultEdges));
     setSelectedNodeId(workflow.definition.nodes?.[0]?.id ?? defaultNodes[0].id);
@@ -395,7 +412,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
   function resetWorkflowDraft() {
     setActiveWorkflowId("");
     setWorkflowName("문서 자동화 워크플로우");
-    setWorkflowDescription("");
     setNodes(defaultNodes.map(normalizeWorkflowNode));
     setEdges(normalizeWorkflowEdges(defaultEdges));
     setSelectedNodeId(defaultNodes[1]?.id ?? defaultNodes[0]?.id ?? null);
@@ -408,7 +424,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     }
     const payload = {
       name: workflowName.trim() || "문서 자동화 워크플로우",
-      description: workflowDescription || null,
+      description: null,
       definition: serializeDefinition(nodes, edges)
     };
     const saved = await api<WorkflowDefinition>(activeWorkflowId ? `/api/workflows/${activeWorkflowId}` : "/api/workflows", {
@@ -851,12 +867,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
           <div className="workflow-toolbar">
             <div className="workflow-title-fields">
               <input value={workflowName} onChange={(event) => setWorkflowName(event.target.value)} aria-label="워크플로우 이름" />
-              <input
-                value={workflowDescription}
-                onChange={(event) => setWorkflowDescription(event.target.value)}
-                placeholder="설명"
-                aria-label="워크플로우 설명"
-              />
             </div>
             <select value={activeWorkflowId} onChange={(event) => {
               const workflow = workflows.find((item) => item.id === event.target.value);
@@ -873,9 +883,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                 </option>
               ))}
             </select>
-            <button type="button" className="secondary" onClick={() => void refreshAll()}>
-              <Library size={16} /> 갱신
-            </button>
             <button type="button" onClick={() => void saveWorkflow()} disabled={isSaving || validation.errors.length > 0}>
               {isSaving ? <Loader2 size={16} className="spin" /> : <Save size={16} />} 저장
             </button>
@@ -889,6 +896,56 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
               {runSidebarOpen ? <ChevronRight size={16} /> : <ClipboardList size={16} />}
               실행 현황
             </button>
+            <div className="workflow-run-toolbar-actions">
+              <WorkflowUploadButton
+                disabled={isStartingRun || isRunningRun}
+                selectedCount={files.length}
+                onChange={onFileInput}
+              />
+              <input
+                ref={workflowResumeFileInputRef}
+                type="file"
+                multiple
+                accept={WORKFLOW_FILE_ACCEPT}
+                className="visually-hidden"
+                onChange={onResumeUploadInput}
+              />
+              <input
+                ref={workflowResumeFolderInputRef}
+                type="file"
+                multiple
+                accept={WORKFLOW_FILE_ACCEPT}
+                className="visually-hidden"
+                onChange={onResumeUploadInput}
+                {...{ webkitdirectory: "", directory: "" }}
+              />
+              <button
+                type="button"
+                className="primary workflow-run-primary-button"
+                onClick={() => void runWorkflow()}
+                disabled={isStartingRun || isRunningRun || !files.length}
+                title={runButtonTitle}
+              >
+                {isStartingRun || isRunningRun ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
+                {isStartingRun ? "시작 중" : isRunningRun ? "실행 중" : "실행"}
+              </button>
+              {activeRun && workflowRunCanEnqueue(activeRun) && (
+                <button
+                  type="button"
+                  className="secondary workflow-run-reserve-button"
+                  onClick={() => void enqueueRun(activeRun.id)}
+                  disabled={isStartingRun || isSaving || validation.errors.length > 0}
+                  title={
+                    validation.errors.length
+                      ? `예약할 수 없습니다: ${validation.errors[0]}`
+                      : "현재 문서 묶음을 재사용해 캔버스의 워크플로우를 다음 실행으로 예약합니다."
+                  }
+                >
+                  <Plus size={15} /> 현재 문서로 실행 예약
+                </button>
+              )}
+              {activeRun && <WorkflowRunExportButton runId={activeRun.id} />}
+            </div>
             {selectedEdge && (
               <div className="workflow-edge-actions">
                 <span>{edgeLabel(selectedEdge, nodes)}</span>
@@ -900,66 +957,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
             <span className="workflow-autosave">
               자동 저장 {draftSavedAt ?? "대기"}
             </span>
-          </div>
-
-          <div className="workflow-run-bar">
-            <WorkflowUploadButton
-              disabled={isStartingRun || isRunningRun}
-              selectedCount={files.length}
-              onChange={onFileInput}
-            />
-            <input
-              ref={workflowResumeFileInputRef}
-              type="file"
-              multiple
-              accept={WORKFLOW_FILE_ACCEPT}
-              className="visually-hidden"
-              onChange={onResumeUploadInput}
-            />
-            <input
-              ref={workflowResumeFolderInputRef}
-              type="file"
-              multiple
-              accept={WORKFLOW_FILE_ACCEPT}
-              className="visually-hidden"
-              onChange={onResumeUploadInput}
-              {...{ webkitdirectory: "", directory: "" }}
-            />
-            <button
-              type="button"
-              className="primary workflow-run-primary-button"
-              onClick={() => void runWorkflow()}
-              disabled={isStartingRun || isRunningRun || !files.length}
-              title={runButtonTitle}
-            >
-              {isStartingRun || isRunningRun ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
-              {isStartingRun ? "시작 중" : isRunningRun ? "실행 중" : "실행"}
-            </button>
-            {activeRun && workflowRunCanEnqueue(activeRun) && (
-              <button
-                type="button"
-                className="secondary workflow-run-reserve-button"
-                onClick={() => void enqueueRun(activeRun.id)}
-                disabled={isStartingRun || isSaving || validation.errors.length > 0}
-                title={
-                  validation.errors.length
-                    ? `예약할 수 없습니다: ${validation.errors[0]}`
-                    : "현재 문서 묶음을 재사용해 캔버스의 워크플로우를 다음 실행으로 예약합니다."
-                }
-              >
-                <Plus size={15} /> 현재 문서로 실행 예약
-              </button>
-            )}
-            {activeRun && (
-              <>
-                <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${activeRun.id}/export?format=csv`}>
-                  <Download size={15} /> CSV
-                </a>
-                <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${activeRun.id}/export?format=json`}>
-                  <FileJson size={15} /> JSON
-                </a>
-              </>
-            )}
           </div>
 
           <div className="workflow-canvas">
@@ -999,7 +996,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                 run={activeRun}
                 canStartWaiting={workflowRunCanStartWaiting(activeRun, runs)}
                 onOpen={() => openWorkflowResultScreen(activeRun.id)}
-                onRefresh={() => void refreshRun(activeRun.id)}
                 onResume={() => void resumeRun(activeRun.id)}
                 onPause={() => void pauseRun(activeRun.id)}
                 onRestart={() => void restartRun(activeRun.id)}
@@ -1018,7 +1014,6 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                 runs={runs}
                 activeRunId={activeRunId}
                 onOpen={(runId) => openWorkflowResultScreen(runId)}
-                onRefresh={() => void refreshAll()}
                 onStartWaiting={(runId) => void startWaitingRun(runId)}
                 onCancelWaiting={(runId) => void cancelWaitingRun(runId)}
               />
@@ -1194,7 +1189,6 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
           activePage={activeDocumentPage}
           onSelectItem={(itemId) => setSelectedItemId(itemId)}
           onPage={setActiveDocumentPage}
-          onRefresh={() => void refreshRun()}
           onResume={() => void resumeRun()}
           onPause={() => void pauseRun()}
           onRestart={() => void restartRun()}
@@ -1358,6 +1352,43 @@ function WorkflowResumeUploadButton(props: {
   );
 }
 
+function WorkflowRunExportButton(props: {
+  runId: string;
+  compact?: boolean;
+}) {
+  const menu = useWorkflowUploadMenu();
+  const buttonClass = props.compact ? "secondary compact" : "secondary";
+  const iconSize = props.compact ? 14 : 15;
+  const formats: { format: ExportFormat; label: string }[] = [
+    { format: "csv", label: "CSV" },
+    { format: "json", label: "JSON" },
+    { format: "xlsx", label: "XLSX" }
+  ];
+
+  return (
+    <div className="workflow-upload-picker" ref={menu.ref}>
+      <button type="button" className={buttonClass} aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle}>
+        <Download size={iconSize} /> Export
+      </button>
+      {menu.open && (
+        <div className="workflow-upload-menu workflow-upload-menu-right" role="menu">
+          {formats.map((item) => (
+            <a
+              key={item.format}
+              className="workflow-upload-menu-item"
+              role="menuitem"
+              href={`${API_BASE}/api/workflow-runs/${props.runId}/export?format=${item.format}`}
+              onClick={menu.close}
+            >
+              {exportFormatIcon(item.format, iconSize)} {item.label}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function useWorkflowUploadMenu() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -1380,11 +1411,16 @@ function useWorkflowUploadMenu() {
   };
 }
 
+function exportFormatIcon(format: ExportFormat, size: number) {
+  if (format === "json") return <FileJson size={size} />;
+  if (format === "xlsx") return <FileSpreadsheet size={size} />;
+  return <Download size={size} />;
+}
+
 function WorkflowRunProgressDock(props: {
   run: WorkflowRun;
   canStartWaiting?: boolean;
   onOpen: () => void;
-  onRefresh: () => void;
   onResume: () => void;
   onPause: () => void;
   onRestart: () => void;
@@ -1452,7 +1488,6 @@ function WorkflowRunProgressDock(props: {
               <X size={15} /> 중단·정리
             </button>
           )}
-          <button type="button" className="secondary" onClick={props.onRefresh}>갱신</button>
         </div>
       </div>
       <progress className="workflow-run-progress" value={props.run.progress} max={1} />
@@ -1496,7 +1531,6 @@ function WorkflowRunHistory(props: {
   runs: WorkflowRun[];
   activeRunId: string;
   onOpen: (runId: string) => void;
-  onRefresh: () => void;
   onStartWaiting: (runId: string) => void;
   onCancelWaiting: (runId: string) => void;
 }) {
@@ -1507,9 +1541,6 @@ function WorkflowRunHistory(props: {
           <p className="eyebrow">현황</p>
           <h3>실행 현황</h3>
         </div>
-        <button type="button" className="secondary compact" onClick={props.onRefresh}>
-          <Library size={14} /> 새로고침
-        </button>
       </div>
       {props.runs.length ? (
         <div className="workflow-run-history-list">
@@ -1549,12 +1580,7 @@ function WorkflowRunHistory(props: {
                   <button type="button" className="secondary" onClick={() => props.onOpen(run.id)}>
                     <Maximize2 size={14} /> 결과 보기
                   </button>
-                  <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${run.id}/export?format=csv`}>
-                    <Download size={14} /> CSV
-                  </a>
-                  <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${run.id}/export?format=json`}>
-                    <FileJson size={14} /> JSON
-                  </a>
+                  <WorkflowRunExportButton runId={run.id} compact />
                 </div>
               </article>
             );
@@ -1578,7 +1604,6 @@ function WorkflowRunResults(props: {
   activePage: number;
   onSelectItem: (itemId: string) => void;
   onPage: (page: number) => void;
-  onRefresh: () => void;
   onResume?: () => void;
   onPause?: () => void;
   onRestart?: () => void;
@@ -1654,12 +1679,7 @@ function WorkflowRunResults(props: {
           <span><strong>{formatDurationMs(props.run.inference_duration_ms)}</strong> 추론</span>
         </div>
         <div className="workflow-results-actions">
-          <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${props.run.id}/export?format=csv`}>
-            <Download size={15} /> CSV
-          </a>
-          <a className="link-button secondary" href={`${API_BASE}/api/workflow-runs/${props.run.id}/export?format=json`}>
-            <FileJson size={15} /> JSON
-          </a>
+          <WorkflowRunExportButton runId={props.run.id} />
           <button type="button" className="secondary" onClick={props.onClose}>
             <X size={15} /> 닫기
           </button>
@@ -1698,7 +1718,6 @@ function WorkflowRunResults(props: {
               <X size={15} /> 중단·정리
             </button>
           )}
-          <button type="button" className="secondary" onClick={props.onRefresh}>갱신</button>
         </div>
       </div>
       <progress className="workflow-run-progress" value={props.run.progress} max={1} />
@@ -2448,7 +2467,6 @@ function readWorkflowDraft(): WorkflowDraft | null {
     return {
       activeWorkflowId: typeof parsed.activeWorkflowId === "string" ? parsed.activeWorkflowId : "",
       workflowName: typeof parsed.workflowName === "string" && parsed.workflowName.trim() ? parsed.workflowName : "문서 자동화 워크플로우",
-      workflowDescription: typeof parsed.workflowDescription === "string" ? parsed.workflowDescription : "",
       nodes: parsed.nodes.map(normalizeWorkflowNode),
       edges: normalizeWorkflowEdges(parsed.edges as WorkflowEdge[]),
       selectedNodeId: typeof parsed.selectedNodeId === "string" ? parsed.selectedNodeId : parsed.nodes[0]?.id ?? null

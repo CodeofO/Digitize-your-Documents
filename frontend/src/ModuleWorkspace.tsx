@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
+  Download,
   FileJson,
   FileSpreadsheet,
   FileUp,
@@ -27,6 +28,7 @@ const MODULE_VIRTUAL_ROW_HEIGHT = 58;
 const MODULE_VIRTUAL_OVERSCAN = 8;
 
 type ModuleKind = "classifier" | "required-checker";
+type ModuleExportFormat = "csv" | "json" | "xlsx";
 type EvidenceType = string;
 
 type DocumentPage = {
@@ -328,6 +330,44 @@ function ModuleUploadPicker(props: {
   );
 }
 
+function ModuleBatchExportButton(props: {
+  onExport: (format: ModuleExportFormat) => void;
+}) {
+  const menu = useModuleUploadMenu();
+  const formats: { format: ModuleExportFormat; label: string }[] = [
+    { format: "csv", label: "CSV" },
+    { format: "json", label: "JSON" },
+    { format: "xlsx", label: "XLSX" }
+  ];
+
+  return (
+    <div className="workflow-upload-picker unified-upload-picker" ref={menu.ref}>
+      <button type="button" className="secondary compact" aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle}>
+        <Download size={14} />
+        Export
+      </button>
+      {menu.open && (
+        <div className="workflow-upload-menu workflow-upload-menu-right" role="menu">
+          {formats.map((item) => (
+            <button
+              key={item.format}
+              type="button"
+              className="workflow-upload-menu-item"
+              role="menuitem"
+              onClick={() => {
+                menu.close();
+                props.onExport(item.format);
+              }}
+            >
+              {moduleExportFormatIcon(item.format, 14)} {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, uploadChunkFiles, onResize }: ModuleWorkspaceProps) {
   const isClassifier = kind === "classifier";
   const title = isClassifier ? "문서 분류" : "필수 항목 확인";
@@ -372,6 +412,11 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
   }, [activeBatchId, terminalBatch, kind]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => void refreshModule({ silent: true }), 5000);
+    return () => window.clearInterval(timer);
+  }, [kind, activeConfigId]);
+
+  useEffect(() => {
     if (!activeBatchItem) return;
     void openBatchItem(activeBatchItem);
   }, [activeBatchItem?.id]);
@@ -386,8 +431,8 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
     return () => URL.revokeObjectURL(url);
   }, [selectedFile]);
 
-  async function refreshModule() {
-    setError(null);
+  async function refreshModule(options: { silent?: boolean } = {}) {
+    if (!options.silent) setError(null);
     try {
       if (isClassifier) {
         const [configs, recentBatches] = await Promise.all([
@@ -411,7 +456,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
         }
       }
     } catch (err) {
-      setError(errorMessage(err));
+      if (!options.silent) setError(errorMessage(err));
     }
   }
 
@@ -1075,7 +1120,7 @@ function ModuleBatchRail(props: {
   onOpen: (item: ModuleBatchItem) => void;
   onDiscard: () => void;
   onResume: () => void;
-  onExport: (format: "csv" | "json") => void;
+  onExport: (format: ModuleExportFormat) => void;
 }) {
   const finishedCount = props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count;
   const uploadedCount = props.batch.uploaded_count ?? props.batch.items.length;
@@ -1105,14 +1150,7 @@ function ModuleBatchRail(props: {
       </div>
       <progress value={props.batch.progress} max={1} />
       <div className="module-batch-actions">
-        <button type="button" className="secondary compact" onClick={() => props.onExport("csv")}>
-          <FileSpreadsheet size={14} />
-          CSV
-        </button>
-        <button type="button" className="secondary compact" onClick={() => props.onExport("json")}>
-          <FileJson size={14} />
-          JSON
-        </button>
+        <ModuleBatchExportButton onExport={props.onExport} />
       </div>
       <ModuleBatchItemList batch={props.batch} activeItemId={props.activeItemId} onOpen={props.onOpen} />
     </aside>
@@ -1532,11 +1570,17 @@ async function pollJob<T>(path: string): Promise<ModuleJob<T>> {
   return api<ModuleJob<T>>(path);
 }
 
-function openModuleBatchExport(kind: ModuleKind, batchId: string, format: "csv" | "json") {
+function openModuleBatchExport(kind: ModuleKind, batchId: string, format: ModuleExportFormat) {
   const path = kind === "classifier"
     ? `/api/classification-batches/${batchId}/export?format=${format}`
     : `/api/required-field-check-batches/${batchId}/export?format=${format}`;
   window.open(`${API_BASE}${path}`, "_blank", "noopener,noreferrer");
+}
+
+function moduleExportFormatIcon(format: ModuleExportFormat, size: number) {
+  if (format === "json") return <FileJson size={size} />;
+  if (format === "xlsx") return <FileSpreadsheet size={size} />;
+  return <Download size={size} />;
 }
 
 function defaultClassifier(): DocumentClassifier {

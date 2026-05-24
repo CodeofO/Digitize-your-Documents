@@ -363,18 +363,21 @@ textarea {
 .workflow-toolbar {
   background: rgba(255, 255, 255, 0.94);
   border-bottom: 1px solid var(--tds-gray-200);
+  flex-wrap: nowrap;
+  overflow-x: auto;
   padding: 10px 12px;
 }
 
 .workflow-title-fields {
   display: grid;
-  flex: 1;
+  flex: 0 1 300px;
   gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  min-width: 280px;
+  grid-template-columns: minmax(180px, 1fr);
+  min-width: 220px;
 }
 
 .workflow-toolbar select {
+  flex: 0 0 220px;
   max-width: 220px;
 }
 
@@ -567,6 +570,14 @@ textarea {
   padding: 10px 12px;
 }
 
+.workflow-run-toolbar-actions {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  white-space: nowrap;
+}
+
 .workflow-run-history {
   background: #ffffff;
   border-top: 1px solid var(--tds-gray-200);
@@ -584,7 +595,7 @@ textarea {
   max-width: calc(100% - 28px);
   position: absolute;
   right: 14px;
-  top: 130px;
+  top: 74px;
   width: 560px;
   z-index: 8;
 }
@@ -814,13 +825,16 @@ textarea {
   color: #111827;
   cursor: pointer;
   display: flex;
+  gap: 8px;
   font: inherit;
   font-weight: 700;
   justify-content: flex-start;
   padding: 8px 10px;
   position: relative;
   text-align: left;
+  text-decoration: none;
   white-space: nowrap;
+  width: 100%;
 }
 
 .workflow-upload-menu-item:hover,
@@ -2957,7 +2971,7 @@ textarea {
 .module-batch-actions {
   display: grid;
   gap: 6px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .module-batch-list {

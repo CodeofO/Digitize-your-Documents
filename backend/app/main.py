@@ -16,6 +16,7 @@ from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPExc
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from openpyxl import Workbook
 from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
@@ -1278,7 +1279,7 @@ def patch_extraction_result(
 @app.get("/api/extraction-results/{result_id}/export")
 def export_extraction_result(
     result_id: str,
-    format: str = Query(default="json", pattern="^(json|csv)$"),
+    format: str = Query(default="json", pattern="^(json|csv|xlsx)$"),
     preset_id: str | None = None,
     db: Session = Depends(get_db),
 ) -> Response:
@@ -1309,31 +1310,27 @@ def export_extraction_result(
     if format == "json":
         return JSONResponse(export_payload, headers=_download_headers(filename))
 
-    output = io.StringIO()
-    writer = csv.DictWriter(
-        output,
-        fieldnames=[
-            "key_name",
-            "value",
-            "normalized_value",
-            "page",
-            "confidence",
-            "evidence",
-            "warnings",
-            "original_value",
-            "changed",
-            "reviewed",
-            "ai_review_enabled",
-            "ai_review_status",
-            "ai_corrected",
-            "ai_review_reason",
-            "ai_review_confidence",
-            "ai_initial_value",
-            "ai_initial_evidence",
-            "ai_correction_reason",
-        ],
-    )
-    writer.writeheader()
+    fieldnames = [
+        "key_name",
+        "value",
+        "normalized_value",
+        "page",
+        "confidence",
+        "evidence",
+        "warnings",
+        "original_value",
+        "changed",
+        "reviewed",
+        "ai_review_enabled",
+        "ai_review_status",
+        "ai_corrected",
+        "ai_review_reason",
+        "ai_review_confidence",
+        "ai_initial_value",
+        "ai_initial_evidence",
+        "ai_correction_reason",
+    ]
+    rows: list[dict[str, Any]] = []
     original_values = original_export_payload.get("values", {}) if isinstance(original_export_payload.get("values"), dict) else {}
     for key, value in export_payload.get("values", {}).items():
         value_dict = value if isinstance(value, dict) else {}
@@ -1341,7 +1338,7 @@ def export_extraction_result(
         ai_review = value_dict.get("ai_review") if isinstance(value_dict.get("ai_review"), dict) else {}
         current_cell = _extract_kie_cell_value(value)
         original_cell = _extract_kie_cell_value(original_value) if original_value is not None else current_cell
-        writer.writerow(
+        rows.append(
             {
                 "key_name": key,
                 "value": current_cell,
@@ -1363,6 +1360,14 @@ def export_extraction_result(
                 "ai_correction_reason": ai_review.get("correction_reason"),
             }
         )
+    if format == "xlsx":
+        return _xlsx_download_response(rows, fieldnames, filename)
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
     return _csv_download_response(output.getvalue(), filename)
 
 
@@ -2011,7 +2016,7 @@ def get_workflow_run_summary(run_id: str, db: Session = Depends(get_db)) -> Work
 @app.get("/api/workflow-runs/{run_id}/export")
 def export_workflow_run(
     run_id: str,
-    format: str = Query(default="csv", pattern="^(json|csv)$"),
+    format: str = Query(default="csv", pattern="^(json|csv|xlsx)$"),
     db: Session = Depends(get_db),
 ) -> Response:
     run = db.get(WorkflowRun, run_id)
@@ -2031,6 +2036,9 @@ def export_workflow_run(
     filename = _export_filename("workflow", workflow_name, run.id, format)
     if format == "json":
         return JSONResponse(payload, headers=_download_headers(filename))
+    if format == "xlsx":
+        rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+        return _xlsx_download_response(rows, _table_fieldnames(rows), filename)
     return _csv_download_response(workflow_run_export_csv(run), filename)
 
 
@@ -2262,7 +2270,7 @@ def cancel_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
 @app.get("/api/batches/{batch_id}/export")
 def export_batch(
     batch_id: str,
-    format: str = Query(default="csv", pattern="^(json|csv)$"),
+    format: str = Query(default="csv", pattern="^(json|csv|xlsx)$"),
     db: Session = Depends(get_db),
 ) -> Response:
     batch = db.get(Batch, batch_id)
@@ -2312,6 +2320,9 @@ def export_batch(
         *field_columns,
         "warnings",
     ]
+    if format == "xlsx":
+        return _xlsx_download_response(rows, fieldnames, filename)
+
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     for row in rows:
@@ -2524,7 +2535,7 @@ def cancel_classification_batch(batch_id: str, db: Session = Depends(get_db)) ->
 @app.get("/api/classification-batches/{batch_id}/export")
 def export_classification_batch(
     batch_id: str,
-    format: str = Query(default="csv", pattern="^(json|csv)$"),
+    format: str = Query(default="csv", pattern="^(json|csv|xlsx)$"),
     db: Session = Depends(get_db),
 ) -> Response:
     batch = db.get(ClassificationBatch, batch_id)
@@ -2568,6 +2579,9 @@ def export_classification_batch(
         "reason",
         "evidence",
     ]
+    if format == "xlsx":
+        return _xlsx_download_response(rows, fieldnames, filename)
+
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     for row in rows:
@@ -2790,7 +2804,7 @@ def cancel_required_field_check_batch(batch_id: str, db: Session = Depends(get_d
 @app.get("/api/required-field-check-batches/{batch_id}/export")
 def export_required_field_check_batch(
     batch_id: str,
-    format: str = Query(default="csv", pattern="^(json|csv)$"),
+    format: str = Query(default="csv", pattern="^(json|csv|xlsx)$"),
     db: Session = Depends(get_db),
 ) -> Response:
     batch = db.get(RequiredFieldCheckBatch, batch_id)
@@ -2833,6 +2847,9 @@ def export_required_field_check_batch(
         "overall_status",
         *item_columns,
     ]
+    if format == "xlsx":
+        return _xlsx_download_response(rows, fieldnames, filename)
+
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     for row in rows:
@@ -4792,6 +4809,45 @@ def _csv_download_response(content: str, filename: str) -> Response:
         media_type="text/csv; charset=utf-8",
         headers=_download_headers(filename),
     )
+
+
+def _xlsx_download_response(rows: list[dict[str, Any]], fieldnames: list[str], filename: str) -> Response:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Export"
+    if fieldnames:
+        sheet.append(fieldnames)
+    for row in rows:
+        sheet.append([_xlsx_cell(row.get(field)) for field in fieldnames])
+
+    output = io.BytesIO()
+    workbook.save(output)
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=_download_headers(filename),
+    )
+
+
+def _xlsx_cell(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool, datetime)):
+        return value
+    if isinstance(value, list):
+        return ";".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return str(value)
+
+
+def _table_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    return fieldnames
 
 
 def _export_preset_read(preset: ExportPreset) -> ExportPresetRead:
