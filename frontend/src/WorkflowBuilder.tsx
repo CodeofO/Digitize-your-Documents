@@ -658,10 +658,10 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
       });
       upsertRun(run);
       setActiveRunId(run.id);
-      setMessage("업로드된 문서를 재사용하는 워크플로우 실행을 대기열에 추가했습니다.");
+      setMessage("업로드된 문서를 재사용하는 워크플로우 실행을 예약했습니다.");
       void refreshRun(run.id);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "워크플로우 실행을 대기열에 추가하지 못했습니다.");
+      setError(exc instanceof Error ? exc.message : "워크플로우 실행을 예약하지 못했습니다.");
     } finally {
       setIsSaving(false);
     }
@@ -885,10 +885,10 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
               className={`secondary workflow-run-sidebar-toolbar-toggle ${runSidebarOpen ? "active" : ""}`}
               onClick={() => setRunSidebarOpen((current) => !current)}
               aria-expanded={runSidebarOpen}
-              title={runSidebarOpen ? "실행 큐 접기" : "실행 큐 펼치기"}
+              title={runSidebarOpen ? "실행 현황 접기" : "실행 현황 펼치기"}
             >
               {runSidebarOpen ? <ChevronRight size={16} /> : <ClipboardList size={16} />}
-              실행 큐
+              실행 현황
             </button>
             {selectedEdge && (
               <div className="workflow-edge-actions">
@@ -955,7 +955,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
           </div>
 
           {runSidebarOpen && (
-            <aside className="workflow-run-sidebar" aria-label="워크플로우 실행 큐 사이드바">
+            <aside className="workflow-run-sidebar" aria-label="워크플로우 실행 현황 사이드바">
               <WorkflowRunHistory
                 runs={runs}
                 activeRunId={activeRunId}
@@ -1132,7 +1132,7 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
         void refreshRun();
       }
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "워크플로우 실행을 대기열에 추가하지 못했습니다.");
+      setError(exc instanceof Error ? exc.message : "워크플로우 실행을 예약하지 못했습니다.");
     }
   }
 
@@ -1445,7 +1445,7 @@ function WorkflowRunProgressDock(props: {
           )}
           {workflowRunCanEnqueue(props.run) && (
             <button type="button" className="secondary" onClick={props.onEnqueue}>
-              <Plus size={15} /> 큐에 예약
+              <Plus size={15} /> 실행 예약
             </button>
           )}
           {workflowRunCanStartWaiting(props.run) && props.canStartWaiting !== false && (
@@ -1513,11 +1513,11 @@ function WorkflowRunHistory(props: {
   onCancelWaiting: (runId: string) => void;
 }) {
   return (
-    <section className="workflow-run-history" aria-label="워크플로우 실행 큐">
+    <section className="workflow-run-history" aria-label="워크플로우 실행 현황">
       <div className="workflow-run-history-head">
         <div>
-          <p className="eyebrow">Queue</p>
-          <h3>실행 큐</h3>
+          <p className="eyebrow">현황</p>
+          <h3>실행 현황</h3>
         </div>
         <button type="button" className="secondary compact" onClick={props.onRefresh}>
           <Library size={14} /> 새로고침
@@ -1538,7 +1538,7 @@ function WorkflowRunHistory(props: {
                     {formatWorkflowRunDate(run.created_at)} · {finishedCount.toLocaleString()} / {run.total_count.toLocaleString()} 처리
                     {run.restarted_from_run_id ? " · 재시작" : ""}
                     {run.queued_from_run_id ? " · 대기 실행" : ""}
-                    {run.queue_order ? ` · 대기열 #${run.queue_order}` : ""}
+                    {run.queue_order ? ` · 예약 순서 #${run.queue_order}` : ""}
                     {run.failed_count ? ` · ${run.failed_count.toLocaleString()} 실패` : ""}
                     {run.needs_review_count ? ` · ${run.needs_review_count.toLocaleString()} 검토` : ""}
                   </small>
@@ -1550,7 +1550,7 @@ function WorkflowRunHistory(props: {
                 <div className="workflow-run-history-actions">
                   {workflowRunCanEnqueue(run) && (
                     <button type="button" className="secondary" onClick={() => props.onEnqueue(run.id)}>
-                      <Plus size={14} /> 큐에 예약
+                      <Plus size={14} /> 실행 예약
                     </button>
                   )}
                   {workflowRunCanStartWaiting(run, props.runs) && (
@@ -1698,7 +1698,7 @@ function WorkflowRunResults(props: {
           )}
           {props.onEnqueue && workflowRunCanEnqueue(props.run) && (
             <button type="button" className="secondary" onClick={props.onEnqueue}>
-              <Plus size={15} /> 큐에 예약
+              <Plus size={15} /> 실행 예약
             </button>
           )}
           {props.onStartWaiting && workflowRunCanStartWaiting(props.run) && (
