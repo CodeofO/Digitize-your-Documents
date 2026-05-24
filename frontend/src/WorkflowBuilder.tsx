@@ -880,6 +880,16 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
             <button type="button" onClick={() => void saveWorkflow()} disabled={isSaving || validation.errors.length > 0}>
               {isSaving ? <Loader2 size={16} className="spin" /> : <Save size={16} />} 저장
             </button>
+            <button
+              type="button"
+              className={`secondary workflow-run-sidebar-toolbar-toggle ${runSidebarOpen ? "active" : ""}`}
+              onClick={() => setRunSidebarOpen((current) => !current)}
+              aria-expanded={runSidebarOpen}
+              title={runSidebarOpen ? "실행 큐 접기" : "실행 큐 펼치기"}
+            >
+              {runSidebarOpen ? <ChevronRight size={16} /> : <ClipboardList size={16} />}
+              실행 큐
+            </button>
             {selectedEdge && (
               <div className="workflow-edge-actions">
                 <span>{edgeLabel(selectedEdge, nodes)}</span>
@@ -944,18 +954,8 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
 
           </div>
 
-          <button
-            type="button"
-            className={`workflow-run-sidebar-toggle ${runSidebarOpen ? "open" : ""}`}
-            onClick={() => setRunSidebarOpen((current) => !current)}
-            aria-expanded={runSidebarOpen}
-            title={runSidebarOpen ? "실행 기록 접기" : "실행 기록 펼치기"}
-          >
-            {runSidebarOpen ? <ChevronRight size={16} /> : <History size={16} />}
-            <span>실행 기록</span>
-          </button>
           {runSidebarOpen && (
-            <aside className="workflow-run-sidebar" aria-label="워크플로우 실행 기록 사이드바">
+            <aside className="workflow-run-sidebar" aria-label="워크플로우 실행 큐 사이드바">
               <WorkflowRunHistory
                 runs={runs}
                 activeRunId={activeRunId}
@@ -1308,7 +1308,7 @@ function WorkflowUploadButton(props: {
         <span>{triggerLabel}</span>
       </button>
       {menu.open && !props.disabled && (
-        <div className="workflow-upload-menu" role="menu">
+        <div className="workflow-upload-menu workflow-upload-menu-up" role="menu">
           <label className="workflow-upload-menu-item" role="menuitem">
             파일 선택
             <input type="file" multiple accept={WORKFLOW_FILE_ACCEPT} onChange={onChange} />
@@ -1513,11 +1513,11 @@ function WorkflowRunHistory(props: {
   onCancelWaiting: (runId: string) => void;
 }) {
   return (
-    <section className="workflow-run-history" aria-label="워크플로우 실행 기록">
+    <section className="workflow-run-history" aria-label="워크플로우 실행 큐">
       <div className="workflow-run-history-head">
         <div>
-          <p className="eyebrow">History</p>
-          <h3>실행 기록</h3>
+          <p className="eyebrow">Queue</p>
+          <h3>실행 큐</h3>
         </div>
         <button type="button" className="secondary compact" onClick={props.onRefresh}>
           <Library size={14} /> 새로고침
@@ -1580,7 +1580,7 @@ function WorkflowRunHistory(props: {
       ) : (
         <div className="workflow-run-history-empty">
           <History size={18} />
-          <span>아직 실행 기록이 없습니다.</span>
+          <span>아직 실행 작업이 없습니다.</span>
         </div>
       )}
     </section>

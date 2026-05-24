@@ -555,6 +555,12 @@ textarea {
   padding: 5px 8px;
 }
 
+.workflow-run-sidebar-toolbar-toggle.active {
+  border-color: var(--tds-blue-500);
+  box-shadow: 0 0 0 3px rgba(49, 130, 246, 0.12);
+  color: var(--tds-blue-700);
+}
+
 .workflow-run-bar {
   border-top: 1px solid #e1e7e2;
   padding: 10px 12px;
@@ -570,26 +576,6 @@ textarea {
   min-height: 0;
   overflow: hidden;
   padding: 12px;
-}
-
-.workflow-run-sidebar-toggle {
-  align-items: center;
-  background: #ffffff;
-  border: 1px solid var(--tds-gray-200);
-  border-radius: var(--tds-radius-sm);
-  box-shadow: var(--tds-shadow-card);
-  display: inline-flex;
-  gap: 6px;
-  min-height: 36px;
-  padding: 8px 10px;
-  position: absolute;
-  right: 14px;
-  top: 74px;
-  z-index: 9;
-}
-
-.workflow-run-sidebar-toggle.open {
-  right: min(588px, calc(100% - 54px));
 }
 
 .workflow-run-sidebar {
@@ -813,6 +799,11 @@ textarea {
 .workflow-upload-menu-right {
   left: auto;
   right: 0;
+}
+
+.workflow-upload-menu-up {
+  bottom: calc(100% + 6px);
+  top: auto;
 }
 
 .workflow-upload-menu-item {
@@ -1479,12 +1470,6 @@ textarea {
     right: 10px;
     top: 86px;
     width: auto;
-  }
-
-  .workflow-run-sidebar-toggle,
-  .workflow-run-sidebar-toggle.open {
-    right: 10px;
-    top: 86px;
   }
 
   .workflow-run-workbench {
