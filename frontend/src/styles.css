@@ -565,10 +565,49 @@ textarea {
   border-top: 1px solid var(--tds-gray-200);
   display: grid;
   gap: 10px;
+  grid-template-rows: auto minmax(0, 1fr);
   max-height: 260px;
   min-height: 0;
   overflow: hidden;
   padding: 12px;
+}
+
+.workflow-run-sidebar-toggle {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--tds-gray-200);
+  border-radius: var(--tds-radius-sm);
+  box-shadow: var(--tds-shadow-card);
+  display: inline-flex;
+  gap: 6px;
+  min-height: 36px;
+  padding: 8px 10px;
+  position: absolute;
+  right: 14px;
+  top: 74px;
+  z-index: 9;
+}
+
+.workflow-run-sidebar-toggle.open {
+  right: min(448px, calc(100% - 54px));
+}
+
+.workflow-run-sidebar {
+  bottom: 72px;
+  max-width: calc(100% - 28px);
+  position: absolute;
+  right: 14px;
+  top: 74px;
+  width: 420px;
+  z-index: 8;
+}
+
+.workflow-run-sidebar .workflow-run-history {
+  border: 1px solid var(--tds-gray-200);
+  border-radius: var(--tds-radius-md);
+  box-shadow: var(--tds-shadow-card);
+  height: 100%;
+  max-height: none;
 }
 
 .workflow-run-history-head {
@@ -586,6 +625,7 @@ textarea {
 .workflow-run-history-list {
   display: grid;
   gap: 8px;
+  min-height: 0;
   overflow: auto;
   padding-right: 2px;
 }
@@ -1417,6 +1457,21 @@ textarea {
 
   .workflow-run-history-actions {
     justify-content: flex-start;
+  }
+
+  .workflow-run-sidebar {
+    bottom: 86px;
+    left: 10px;
+    max-width: none;
+    right: 10px;
+    top: 86px;
+    width: auto;
+  }
+
+  .workflow-run-sidebar-toggle,
+  .workflow-run-sidebar-toggle.open {
+    right: 10px;
+    top: 86px;
   }
 
   .workflow-run-workbench {

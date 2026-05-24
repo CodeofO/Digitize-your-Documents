@@ -2385,6 +2385,13 @@ def test_workflow_enqueue_creates_waiting_run_without_copying_documents(monkeypa
         assert run_response.status_code == 200, run_response.text
         source_run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
         source_document_ids = [item["document_id"] for item in source_run["items"]]
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            document_count_before = db.query(Document).count()
+        finally:
+            db.close()
 
         queued = client.post(
             f"/api/workflow-runs/{source_run['id']}/enqueue",
@@ -2401,10 +2408,73 @@ def test_workflow_enqueue_creates_waiting_run_without_copying_documents(monkeypa
         assert payload["queue_order"] == 2
         assert [item["document_id"] for item in payload["items"]] == source_document_ids
         assert {item["status"] for item in payload["items"]} == {"queued"}
+        db = SessionLocal()
+        try:
+            assert db.query(Document).count() == document_count_before
+        finally:
+            db.close()
 
         refreshed_source = client.get(f"/api/workflow-runs/{source_run['id']}").json()
         assert refreshed_source["workflow_run_group_id"] == source_run["id"]
         assert refreshed_source["queue_order"] == 1
+
+
+def test_workflow_waiting_run_cannot_enqueue_or_start_out_of_order(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_workflow_run", lambda *args: None)
+
+    with get_client() as client:
+        schema = create_schema(client, name="workflow_queue_order_schema")
+        classifier = create_document_classifier(client, name="workflow_queue_order_classifier")
+        checklist = create_required_field_checklist(client, name="workflow_queue_order_checklist")
+        workflow = client.post(
+            "/api/workflows",
+            json={"name": "queue_order_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        assert workflow.status_code == 200, workflow.text
+
+        run_response = client.post(
+            f"/api/workflows/{workflow.json()['id']}/runs",
+            files=[("files", ("first.png", ONE_BY_ONE_PNG, "image/png"))],
+        )
+        assert run_response.status_code == 200, run_response.text
+        source_run_id = run_response.json()["id"]
+
+        first_waiting = client.post(f"/api/workflow-runs/{source_run_id}/enqueue")
+        second_waiting = client.post(f"/api/workflow-runs/{source_run_id}/enqueue")
+        assert first_waiting.status_code == 200, first_waiting.text
+        assert second_waiting.status_code == 200, second_waiting.text
+        first_waiting_id = first_waiting.json()["id"]
+        second_waiting_id = second_waiting.json()["id"]
+
+        reenqueued = client.post(f"/api/workflow-runs/{first_waiting_id}/enqueue")
+        assert reenqueued.status_code == 409, reenqueued.text
+
+        blocked_by_source = client.post(f"/api/workflow-runs/{first_waiting_id}/start")
+        assert blocked_by_source.status_code == 409, blocked_by_source.text
+
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            source_run = db.get(WorkflowRun, source_run_id)
+            assert source_run is not None
+            source_run.status = "completed"
+            source_run.completed_at = datetime.utcnow()
+            for item in source_run.items:
+                item.status = "completed"
+                item.error_message = None
+                item.completed_at = datetime.utcnow()
+                item.result_json = json.dumps({"document_id": item.document_id, "filename": item.filename, "node_results": {}})
+            db.commit()
+        finally:
+            db.close()
+
+        out_of_order = client.post(f"/api/workflow-runs/{second_waiting_id}/start")
+        assert out_of_order.status_code == 409, out_of_order.text
+
+        started = client.post(f"/api/workflow-runs/{first_waiting_id}/start")
+        assert started.status_code == 200, started.text
+        assert started.json()["status"] == "running"
 
 
 def test_workflow_finalize_starts_next_waiting_run(monkeypatch) -> None:
@@ -2466,6 +2536,56 @@ def test_workflow_finalize_starts_next_waiting_run(monkeypatch) -> None:
             assert {item.execution_generation for item in queued_items} == {1}
         finally:
             db.close()
+
+
+@pytest.mark.parametrize("blocked_status", ["paused", "canceled"])
+def test_workflow_finalize_does_not_advance_queue_for_blocking_statuses(monkeypatch, blocked_status: str) -> None:
+    from app import workflows as workflow_module
+    from app.database import SessionLocal
+
+    dispatched: list[tuple[str, int]] = []
+    monkeypatch.setattr("app.main.run_workflow_run", lambda *args: None)
+    monkeypatch.setattr("app.workflows._dispatch_workflow_run_async", lambda run_id, generation: dispatched.append((run_id, generation)))
+
+    with get_client() as client:
+        schema = create_schema(client, name=f"workflow_queue_blocked_{blocked_status}_schema")
+        classifier = create_document_classifier(client, name=f"workflow_queue_blocked_{blocked_status}_classifier")
+        checklist = create_required_field_checklist(client, name=f"workflow_queue_blocked_{blocked_status}_checklist")
+        workflow = client.post(
+            "/api/workflows",
+            json={"name": f"queue_blocked_{blocked_status}_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        assert workflow.status_code == 200, workflow.text
+
+        run_response = client.post(
+            f"/api/workflows/{workflow.json()['id']}/runs",
+            files=[("files", ("first.png", ONE_BY_ONE_PNG, "image/png"))],
+        )
+        assert run_response.status_code == 200, run_response.text
+        source_run_id = run_response.json()["id"]
+        queued = client.post(f"/api/workflow-runs/{source_run_id}/enqueue")
+        assert queued.status_code == 200, queued.text
+        queued_run_id = queued.json()["id"]
+
+        db = SessionLocal()
+        try:
+            source_run = db.get(WorkflowRun, source_run_id)
+            assert source_run is not None
+            generation = source_run.execution_generation
+            source_run.status = blocked_status
+            for item in source_run.items:
+                item.status = blocked_status
+                item.error_message = f"{blocked_status} by test"
+                item.completed_at = datetime.utcnow()
+            db.commit()
+        finally:
+            db.close()
+
+        workflow_module._finalize_workflow_run(source_run_id, generation)
+
+        payload = client.get(f"/api/workflow-runs/{queued_run_id}").json()
+        assert payload["status"] == "waiting"
+        assert dispatched == []
 
 
 def test_workflow_cancel_waiting_run_preserves_shared_documents(monkeypatch) -> None:

@@ -162,6 +162,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Document Automation Workspace API", version="0.1.0", lifespan=lifespan)
 
+WORKFLOW_RUN_TERMINAL_STATUSES = {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}
+WORKFLOW_ENQUEUE_BLOCKED_STATUSES = {"waiting", "failed", "canceled"}
+
 settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
@@ -1673,6 +1676,8 @@ def start_workflow_run(
         raise HTTPException(status_code=404, detail="Workflow run not found")
     if run.status not in {"uploading", "queued", "waiting"}:
         return WorkflowRunRead(**workflow_run_to_read(run))
+    if run.status == "waiting":
+        _validate_waiting_workflow_run_can_start(run, db)
     _validate_owner_can_start(run, run.items)
     now = datetime.utcnow()
     run.execution_generation = (run.execution_generation or 0) + 1
@@ -1711,6 +1716,7 @@ def enqueue_workflow_run(
         raise HTTPException(status_code=404, detail="Workflow run not found")
     if not source_run.items:
         raise HTTPException(status_code=422, detail="No uploaded workflow items are available to enqueue")
+    _validate_workflow_enqueue_source(source_run)
     workflow_id = payload.workflow_id if payload and payload.workflow_id else source_run.workflow_id
     workflow = db.get(WorkflowDefinition, workflow_id)
     if not workflow or workflow.archived:
@@ -3762,6 +3768,45 @@ def _next_workflow_queue_order(db: Session, group_id: str) -> int:
         if order is not None
     ]
     return max(orders, default=0) + 1
+
+
+def _validate_workflow_enqueue_source(run: WorkflowRun) -> None:
+    if run.status not in WORKFLOW_ENQUEUE_BLOCKED_STATUSES:
+        return
+    if run.status == "waiting":
+        detail = "Waiting workflow runs cannot be enqueued again"
+    elif run.status == "canceled":
+        detail = "Canceled workflow runs cannot be enqueued"
+    else:
+        detail = "Failed workflow runs cannot be enqueued"
+    raise HTTPException(status_code=409, detail=detail)
+
+
+def _validate_waiting_workflow_run_can_start(run: WorkflowRun, db: Session) -> None:
+    group_id = run.workflow_run_group_id or run.id
+    first_waiting = (
+        db.query(WorkflowRun)
+        .filter(WorkflowRun.workflow_run_group_id == group_id, WorkflowRun.status == "waiting")
+        .order_by(WorkflowRun.queue_order.asc(), WorkflowRun.created_at.asc(), WorkflowRun.id.asc())
+        .first()
+    )
+    if not first_waiting or first_waiting.id != run.id:
+        raise HTTPException(status_code=409, detail="Only the first waiting workflow run can be started")
+
+    run_position = _workflow_queue_position(run)
+    active_predecessors = [
+        candidate
+        for candidate in db.query(WorkflowRun).filter(WorkflowRun.workflow_run_group_id == group_id).all()
+        if candidate.id != run.id
+        and candidate.status not in WORKFLOW_RUN_TERMINAL_STATUSES
+        and _workflow_queue_position(candidate) < run_position
+    ]
+    if active_predecessors:
+        raise HTTPException(status_code=409, detail="Previous workflow runs in this queue are still active")
+
+
+def _workflow_queue_position(run: WorkflowRun) -> tuple[int, datetime, str]:
+    return (run.queue_order if run.queue_order is not None else 0, run.created_at or datetime.min, run.id)
 
 
 def _cancel_waiting_workflow_run(run: WorkflowRun, db: Session) -> None:
