@@ -184,6 +184,8 @@ VLM_MODEL_NAME=mock-vlm
 | `UPLOAD_MAX_BATCH_FILES` | `10000` | 한 번에 업로드할 수 있는 batch 파일 수 |
 
 Workflow local blocking work는 `WORKFLOW_MAX_WORKERS` 크기의 전용 executor 큐로 제한합니다. 대량 문서 실행에서 worker 대기 자체가 Python default threadpool을 점유하지 않도록 하기 위한 구조입니다.
+
+Workflow 화면의 `처리 중`은 workflow item이 모듈 단계에 진입한 문서 수입니다. 실제 provider 동시 호출 수는 별도 KPI인 `AI 요청 중 / AI 요청 한도`, provider 호출 대기는 `AI 요청 대기`로 표시됩니다. async VLM 호출은 `VLM_TIMEOUT_SECONDS` 안에 완료되지 않으면 실패/재시도 경로로 수렴합니다.
 | `UPLOAD_RETENTION_HOURS` | `24` | 업로드 문서 보존 시간 |
 
 운영에서 5,000장 이상 대량 처리를 자주 실행한다면 SQLite보다 Postgres 사용을 권장합니다.

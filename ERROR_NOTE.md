@@ -1,5 +1,36 @@
 # 오류 기록
 
+## 2026-05-25 - KIE 소량 실행도 `running`에서 수렴하지 않는 문제
+
+### 문제 정의
+
+1. KIE/VLM 실행 제어 문제
+   - 931장 대량 실행뿐 아니라 5장짜리 단순 KIE schema 실행도 `running` 상태에서 결과 또는 실패로 수렴하지 않았다.
+   - workflow item과 extraction job은 `running`으로 바뀌지만 `extraction_results` row가 생성되지 않았다.
+   - 따라서 병렬 처리량 문제가 아니라 VLM async 호출 경로가 완료/실패 상태를 보장하지 못하는 문제로 정의한다.
+
+2. 실행 카운트 의미 문제
+   - UI의 `실행 931`은 실제 provider로 나간 동시 VLM 요청 수가 아니라 `workflow_run_items.status == running`인 문서 수였다.
+   - 사용자는 이를 “931개가 동시에 추론 중”으로 해석할 수 있으므로 용어와 카운터를 분리해야 한다.
+
+### 원인
+
+- VLM async limiter에도 `asyncio.to_thread(semaphore.acquire)` 패턴이 남아 있었다.
+- provider 호출에 대한 상위 `asyncio.wait_for` timeout이 없어 Google GenAI async 호출이 반환하지 않으면 job이 계속 `running`으로 남을 수 있었다.
+
+### 수정
+
+- VLM async limiter를 non-blocking acquire + async sleep 대기로 변경해 threadpool 점유 대기를 제거했다.
+- async VLM 호출 전체를 `VLM_TIMEOUT_SECONDS`로 감싸고 timeout 시 `VlmRuntimeError`로 실패/재시도 경로에 태운다.
+- VLM runtime counter를 추가해 `AI 요청 중`, `AI 요청 대기`, `AI 요청 한도`를 API 응답에 포함한다.
+- UI의 `실행 중` 카운트 표현은 `처리 중`으로 바꾸고, 실제 VLM limiter 기준 카운트는 별도 KPI로 표시한다.
+
+### 검증
+
+- `test_async_vlm_limit_queues_without_threadpool_deadlock` 추가
+- `test_async_vlm_request_times_out` 추가
+- targeted pytest, backend compile, frontend build 통과
+
 ## 2026-05-25 - 워크플로우 run이 `running` 0%에서 무한 대기
 
 ### 증상

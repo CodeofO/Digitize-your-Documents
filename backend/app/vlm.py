@@ -1,6 +1,6 @@
 import asyncio
 import base64
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 import functools
 import json
 import mimetypes
@@ -76,15 +76,21 @@ def vlm_error_detail(exc: Exception) -> str | dict[str, str]:
 _VLM_SLOT_LOCK = threading.Lock()
 _VLM_SLOT_LIMIT = 0
 _VLM_SLOT_SEMAPHORE: threading.BoundedSemaphore | None = None
+_VLM_ACTIVE_REQUESTS = 0
+_VLM_WAITING_REQUESTS = 0
+_VLM_ASYNC_SLOT_POLL_SECONDS = 0.02
 
 
 @contextmanager
 def _vlm_request_slot():
     semaphore = _vlm_request_semaphore()
+    _adjust_vlm_runtime_counter(waiting_delta=1)
     semaphore.acquire()
+    _adjust_vlm_runtime_counter(waiting_delta=-1, active_delta=1)
     try:
         yield
     finally:
+        _adjust_vlm_runtime_counter(active_delta=-1)
         semaphore.release()
 
 
@@ -96,6 +102,47 @@ def _vlm_request_semaphore() -> threading.BoundedSemaphore:
             _VLM_SLOT_LIMIT = limit
             _VLM_SLOT_SEMAPHORE = threading.BoundedSemaphore(limit)
         return _VLM_SLOT_SEMAPHORE
+
+
+def _adjust_vlm_runtime_counter(*, active_delta: int = 0, waiting_delta: int = 0) -> None:
+    global _VLM_ACTIVE_REQUESTS, _VLM_WAITING_REQUESTS
+    if not active_delta and not waiting_delta:
+        return
+    with _VLM_SLOT_LOCK:
+        _VLM_ACTIVE_REQUESTS = max(0, _VLM_ACTIVE_REQUESTS + active_delta)
+        _VLM_WAITING_REQUESTS = max(0, _VLM_WAITING_REQUESTS + waiting_delta)
+
+
+def vlm_runtime_counters() -> dict[str, int]:
+    with _VLM_SLOT_LOCK:
+        return {
+            "vlm_active_count": _VLM_ACTIVE_REQUESTS,
+            "vlm_waiting_count": _VLM_WAITING_REQUESTS,
+            "vlm_limit": max(1, get_settings().vlm_max_concurrent_requests),
+        }
+
+
+@asynccontextmanager
+async def _vlm_request_slot_async():
+    semaphore = _vlm_request_semaphore()
+    acquired = False
+    _adjust_vlm_runtime_counter(waiting_delta=1)
+    try:
+        while True:
+            if semaphore.acquire(blocking=False):
+                acquired = True
+                break
+            await asyncio.sleep(_VLM_ASYNC_SLOT_POLL_SECONDS)
+        _adjust_vlm_runtime_counter(waiting_delta=-1, active_delta=1)
+        try:
+            yield
+        finally:
+            _adjust_vlm_runtime_counter(active_delta=-1)
+            semaphore.release()
+    except BaseException:
+        if not acquired:
+            _adjust_vlm_runtime_counter(waiting_delta=-1)
+        raise
 
 
 def _invoke_vlm_with_limit(
@@ -126,27 +173,20 @@ async def _invoke_vlm_with_limit_async(
 ) -> dict[str, Any]:
     max_attempts = max(1, get_settings().vlm_max_retries + 1)
     for attempt in range(max_attempts):
-        semaphore = _vlm_request_semaphore()
-        await asyncio.to_thread(semaphore.acquire)
         try:
-            return await _invoke_structured_llm_async(system_prompt, prompt, image_inputs, output_schema, api_style)
+            async with _vlm_request_slot_async():
+                return await _invoke_structured_llm_with_timeout_async(system_prompt, prompt, image_inputs, output_schema, api_style)
         except VlmRuntimeError as exc:
             if attempt >= max_attempts - 1 or not _is_retryable_vlm_error(exc):
                 raise
             retry_delay = _vlm_retry_delay_seconds(attempt)
-        finally:
-            semaphore.release()
         await asyncio.sleep(retry_delay)
     raise VlmRuntimeError("VLM_PROVIDER_REQUEST_FAILED", "VLM request failed after retries.")
 
 
 async def run_sync_with_vlm_limit_async(func, *args, **kwargs) -> Any:
-    semaphore = _vlm_request_semaphore()
-    await asyncio.to_thread(semaphore.acquire)
-    try:
+    async with _vlm_request_slot_async():
         return await asyncio.to_thread(functools.partial(func, *args, **kwargs))
-    finally:
-        semaphore.release()
 
 
 def _is_retryable_vlm_error(exc: VlmRuntimeError) -> bool:
@@ -518,6 +558,26 @@ async def _invoke_structured_llm_async(
         raise VlmRuntimeError("VLM_API_STYLE_UNSUPPORTED", f"Unsupported VLM API style: {api_style}")
     content = await asyncio.to_thread(_build_multimodal_content, prompt, image_inputs)
     return await _invoke_openai_compatible_async(system_prompt, content, output_schema)
+
+
+async def _invoke_structured_llm_with_timeout_async(
+    system_prompt: str,
+    prompt: str,
+    image_inputs: list[dict[str, str]],
+    output_schema: dict[str, Any],
+    api_style: str,
+) -> dict[str, Any]:
+    timeout_seconds = max(1, get_settings().vlm_timeout_seconds)
+    try:
+        return await asyncio.wait_for(
+            _invoke_structured_llm_async(system_prompt, prompt, image_inputs, output_schema, api_style),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError as exc:
+        raise VlmRuntimeError(
+            "VLM_PROVIDER_REQUEST_FAILED",
+            f"VLM request timed out after {timeout_seconds} seconds.",
+        ) from exc
 
 
 def _invoke_openai_compatible(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any]) -> dict[str, Any]:

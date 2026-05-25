@@ -33,6 +33,7 @@ from app.models import (
     WorkflowRun,
     WorkflowRunItem,
 )
+from app.vlm import vlm_runtime_counters
 
 
 WORKFLOW_NODE_KINDS = {"input", "classifier", "branch", "kie", "required-checker", "merge", "export"}
@@ -101,6 +102,7 @@ def _workflow_definition_for_run(run: WorkflowRun, workflow: WorkflowDefinition 
 def workflow_run_to_read(run: WorkflowRun, *, include_items: bool = True) -> dict[str, Any]:
     items = sorted(run.items, key=_workflow_item_sort_key)
     counters = _workflow_run_counters(run, items)
+    vlm_counters = vlm_runtime_counters()
     completed = [item for item in items if item.status in WORKFLOW_TERMINAL_STATUSES]
     failed = [item for item in items if item.status == "failed"]
     needs_review = [item for item in items if item.status == "needs_review"]
@@ -123,6 +125,9 @@ def workflow_run_to_read(run: WorkflowRun, *, include_items: bool = True) -> dic
         "queued_count": counters["queued_count"],
         "running_count": counters["running_count"],
         "canceled_count": counters["canceled_count"],
+        "vlm_active_count": vlm_counters["vlm_active_count"],
+        "vlm_waiting_count": vlm_counters["vlm_waiting_count"],
+        "vlm_limit": vlm_counters["vlm_limit"],
         "progress_phase": counters["progress_phase"],
         "progress": counters["progress"],
         "error_message": run.error_message,

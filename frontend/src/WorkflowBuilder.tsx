@@ -164,6 +164,9 @@ type WorkflowRun = {
   queued_count?: number;
   running_count?: number;
   canceled_count?: number;
+  vlm_active_count?: number;
+  vlm_waiting_count?: number;
+  vlm_limit?: number;
   progress_phase?: string;
   progress: number;
   error_message: string | null;
@@ -1558,8 +1561,10 @@ function WorkflowRunProgressDock(props: {
         <div className="workflow-run-kpis">
           <span><strong>{uploadedCount}</strong> / {props.run.total_count.toLocaleString()} 업로드됨</span>
           {preprocessingCount ? <span><strong>{preprocessingCount}</strong> 전처리 중</span> : null}
-          <span><strong>{runningCount}</strong> 실행 중</span>
+          <span><strong>{runningCount}</strong> 처리 중</span>
           <span><strong>{queuedCount}</strong> 대기</span>
+          <span><strong>{props.run.vlm_active_count ?? 0}{props.run.vlm_limit ? ` / ${props.run.vlm_limit}` : ""}</strong> AI 요청 중</span>
+          <span><strong>{props.run.vlm_waiting_count ?? 0}</strong> AI 요청 대기</span>
           <span><strong>{finishedCount}</strong> 완료/검토/실패</span>
           <span><strong>{formatDurationMs(props.run.upload_duration_ms)}</strong> 업로드</span>
           <span><strong>{formatDurationMs(props.run.inference_duration_ms)}</strong> 추론</span>
@@ -1817,8 +1822,10 @@ function WorkflowRunResults(props: {
         <div className="workflow-run-kpis">
           <span><strong>{finishedCount}</strong> 완료/검토/실패</span>
           <span><strong>{props.run.preprocessing_count ?? props.run.items.filter((item) => item.status === "preprocessing").length}</strong> 전처리 중</span>
-          <span><strong>{props.run.running_count ?? props.run.items.filter((item) => item.status === "running").length}</strong> 실행 중</span>
+          <span><strong>{props.run.running_count ?? props.run.items.filter((item) => item.status === "running").length}</strong> 처리 중</span>
           <span><strong>{props.run.queued_count ?? props.run.items.filter((item) => item.status === "queued").length}</strong> 대기</span>
+          <span><strong>{props.run.vlm_active_count ?? 0}{props.run.vlm_limit ? ` / ${props.run.vlm_limit}` : ""}</strong> AI 요청 중</span>
+          <span><strong>{props.run.vlm_waiting_count ?? 0}</strong> AI 요청 대기</span>
           <span><strong>{formatDurationMs(props.run.upload_duration_ms)}</strong> 업로드</span>
           <span><strong>{formatDurationMs(props.run.inference_duration_ms)}</strong> 추론</span>
           <span><strong>{workflowRunStartedAtLabel(props.run)}</strong> 시작</span>
@@ -1902,7 +1909,7 @@ const workflowResultFilterOptions: { value: WorkflowResultFilter; label: string 
   { value: "success", label: "성공" },
   { value: "failed", label: "실패" },
   { value: "waiting", label: "대기" },
-  { value: "running", label: "실행" },
+  { value: "running", label: "처리" },
   { value: "review", label: "검토" }
 ];
 
@@ -2137,7 +2144,7 @@ function workflowRunStatusLabel(run: WorkflowRun) {
   if (run.status === "preprocessing") return "전처리 중";
   if (run.status === "paused") return "일시중단";
   if (run.status === "waiting") return "실행 대기";
-  if (run.status === "running") return "실행 중";
+  if (run.status === "running") return "처리 중";
   if (run.status === "queued") return "대기";
   if (run.status === "failed") return "실패";
   if (run.status === "completed_with_errors") return "일부 실패";
@@ -2508,7 +2515,7 @@ function WorkflowItemInspector({ item }: { item: WorkflowRunItem | null }) {
         </div>
       </div>
       {classificationOnly && <div className="workflow-classification-only">이 문서는 후속 route가 없어 분류 결과만 export됩니다.</div>}
-      {item.status === "running" && <div className="workflow-running-skeleton">모듈 실행 결과를 기다리는 중입니다.</div>}
+      {item.status === "running" && <div className="workflow-running-skeleton">모듈 처리 결과를 기다리는 중입니다.</div>}
       {item.error_message && <div className="module-error">{item.error_message}</div>}
       <h4>KIE 결과</h4>
       <div className="workflow-result-table-wrap compact">
@@ -2872,7 +2879,7 @@ function workflowStatusLabel(status: string | null | undefined) {
     uploading: "업로드 중",
     preprocessing: "전처리 중",
     queued: "대기 중",
-    running: "실행 중",
+    running: "처리 중",
     paused: "일시중단",
     completed: "완료",
     completed_with_errors: "일부 실패",

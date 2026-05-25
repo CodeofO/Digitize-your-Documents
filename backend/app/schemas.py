@@ -878,6 +878,9 @@ class WorkflowRunRead(BaseModel):
     queued_count: int = 0
     running_count: int = 0
     canceled_count: int = 0
+    vlm_active_count: int = 0
+    vlm_waiting_count: int = 0
+    vlm_limit: int = 0
     progress_phase: str = "queued"
     progress: float
     error_message: str | None = None

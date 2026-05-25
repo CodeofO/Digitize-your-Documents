@@ -107,6 +107,71 @@ def test_run_workflow_blocking_queues_without_threadpool_deadlock(monkeypatch) -
         get_settings.cache_clear()
 
 
+def test_async_vlm_limit_queues_without_threadpool_deadlock(monkeypatch) -> None:
+    from app import vlm as vlm_module
+
+    active = 0
+    max_active = 0
+    lock = asyncio.Lock()
+
+    async def fake_invoke(*args, **kwargs):
+        nonlocal active, max_active
+        async with lock:
+            active += 1
+            max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        async with lock:
+            active -= 1
+        return {"ok": True}
+
+    async def run_many() -> list[dict[str, bool]]:
+        tasks = [
+            vlm_module._invoke_vlm_with_limit_async("system", "prompt", [], {}, "google_genai")
+            for _ in range(80)
+        ]
+        return await asyncio.wait_for(asyncio.gather(*tasks), timeout=3)
+
+    try:
+        monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "2")
+        monkeypatch.setenv("VLM_TIMEOUT_SECONDS", "2")
+        monkeypatch.setenv("VLM_MAX_RETRIES", "0")
+        get_settings.cache_clear()
+        monkeypatch.setattr(vlm_module, "_invoke_structured_llm_async", fake_invoke)
+
+        results = asyncio.run(run_many())
+        assert results == [{"ok": True}] * 80
+        assert max_active == 2
+        assert vlm_module.vlm_runtime_counters()["vlm_active_count"] == 0
+        assert vlm_module.vlm_runtime_counters()["vlm_waiting_count"] == 0
+    finally:
+        get_settings.cache_clear()
+
+
+def test_async_vlm_request_times_out(monkeypatch) -> None:
+    from app import vlm as vlm_module
+
+    async def slow_invoke(*args, **kwargs):
+        await asyncio.sleep(2)
+        return {"ok": True}
+
+    async def run_once() -> None:
+        with pytest.raises(vlm_module.VlmRuntimeError) as exc_info:
+            await vlm_module._invoke_vlm_with_limit_async("system", "prompt", [], {}, "google_genai")
+        assert "timed out" in exc_info.value.message
+
+    try:
+        monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "2")
+        monkeypatch.setenv("VLM_TIMEOUT_SECONDS", "1")
+        monkeypatch.setenv("VLM_MAX_RETRIES", "0")
+        get_settings.cache_clear()
+        monkeypatch.setattr(vlm_module, "_invoke_structured_llm_async", slow_invoke)
+
+        asyncio.run(run_once())
+        assert vlm_module.vlm_runtime_counters()["vlm_active_count"] == 0
+    finally:
+        get_settings.cache_clear()
+
+
 def test_root_env_upsert_creates_vlm_settings(monkeypatch, tmp_path) -> None:
     from app import config as config_module
 
