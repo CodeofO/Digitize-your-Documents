@@ -29,6 +29,7 @@ import {
   History,
   Loader2,
   Maximize2,
+  Minus,
   Pause,
   Play,
   Plus,
@@ -53,7 +54,7 @@ const WORKFLOW_RESULT_LEFT_WIDTH_KEY = "digitize_workflow_result_left_width_v1";
 const WORKFLOW_RESULT_RIGHT_WIDTH_KEY = "digitize_workflow_result_right_width_v1";
 const WORKFLOW_RESULT_MIN_LEFT_WIDTH = 220;
 const WORKFLOW_RESULT_MIN_MIDDLE_WIDTH = 420;
-const WORKFLOW_RESULT_MIN_RIGHT_WIDTH = 360;
+const WORKFLOW_RESULT_MIN_RIGHT_WIDTH = 300;
 const WORKFLOW_RESULT_SPLITTER_WIDTH = 12;
 const WORKFLOW_RUN_SIDEBAR_WIDTH_KEY = "digitize_workflow_run_sidebar_width_v1";
 const WORKFLOW_RUN_SIDEBAR_DEFAULT_WIDTH = 560;
@@ -727,29 +728,6 @@ export function WorkflowBuilder({
     }
   }
 
-  async function restartRun(runId: string) {
-    setError(null);
-    setIsSaving(true);
-    try {
-      const currentRun = runs.find((item) => item.id === runId) ?? activeRun;
-      if (!confirmWorkflowRestart(currentRun)) return;
-      const saved = await persistWorkflow();
-      const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/restart`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workflow_id: saved.id })
-      });
-      upsertRun(run);
-      focusWorkflowRun(run.id, false);
-      setMessage("업로드된 문서는 재사용하고 새 워크플로우 실행 기록으로 다시 추론합니다.");
-      void refreshRun(run.id);
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "업로드된 문서로 새 실행을 만들지 못했습니다.");
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
   async function enqueueRun(runId: string) {
     setError(null);
     setIsSaving(true);
@@ -1048,7 +1026,6 @@ export function WorkflowBuilder({
                   <Plus size={15} /> {workflowRunSourceLabel(activeRun)}로 실행 예약
                 </button>
               )}
-              {activeRun && <WorkflowRunExportButton runId={activeRun.id} title={`${workflowRunSourceTitle(activeRun)} 결과 내보내기`} />}
             </div>
             {selectedEdge && (
               <div className="workflow-edge-actions">
@@ -1101,7 +1078,6 @@ export function WorkflowBuilder({
                 onOpen={() => openWorkflowResultScreen(activeRun.id)}
                 onResume={() => void resumeRun(activeRun.id)}
                 onPause={() => void pauseRun(activeRun.id)}
-                onRestart={() => void restartRun(activeRun.id)}
                 onStartWaiting={() => void startWaitingRun(activeRun.id)}
                 onDeleteQueueEntry={() => void deleteQueueEntry(activeRun.id)}
                 onResumeUpload={(source) => source === "folder" ? requestResumeFolderUpload(activeRun.id) : requestResumeUpload(activeRun.id)}
@@ -1225,23 +1201,6 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
     }
   }
 
-  async function restartRun() {
-    try {
-      if (!confirmWorkflowRestart(run)) return;
-      const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/restart`, { method: "POST" });
-      setRun(nextRun);
-      setSelectedItemId((current) => current ?? nextRun.items[0]?.id ?? null);
-      setError(null);
-      if (nextRun.id !== runId) {
-        openWorkflowResultScreen(nextRun.id);
-      } else {
-        void refreshRun();
-      }
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "업로드된 문서로 새 실행을 만들지 못했습니다.");
-    }
-  }
-
   async function startWaitingRun() {
     try {
       const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/start`, { method: "POST" });
@@ -1306,7 +1265,6 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
           onPage={setActiveDocumentPage}
           onResume={() => void resumeRun()}
           onPause={() => void pauseRun()}
-          onRestart={() => void restartRun()}
           onStartWaiting={() => void startWaitingRun()}
           onDeleteQueueEntry={() => void deleteQueueEntry()}
           onRetryFailed={() => void retryFailedRun()}
@@ -1412,7 +1370,7 @@ function WorkflowUploadButton(props: {
         <span>{triggerLabel}</span>
       </button>
       {menu.open && !props.disabled && (
-        <div className="workflow-upload-menu" role="menu">
+        <div className="workflow-upload-menu workflow-upload-menu-fixed" role="menu" style={menu.menuStyle}>
           <label className="workflow-upload-menu-item" role="menuitem">
             파일 선택
             <input type="file" multiple accept={WORKFLOW_FILE_ACCEPT} onChange={onChange} />
@@ -1436,7 +1394,7 @@ function WorkflowUploadButton(props: {
 function WorkflowResumeUploadButton(props: {
   onSelect: (source: WorkflowUploadSource) => void;
 }) {
-  const menu = useWorkflowUploadMenu();
+  const menu = useWorkflowUploadMenu("right");
   const select = (source: WorkflowUploadSource) => {
     menu.close();
     props.onSelect(source);
@@ -1454,7 +1412,7 @@ function WorkflowResumeUploadButton(props: {
         <UploadCloud size={15} /> 이어가기
       </button>
       {menu.open && (
-        <div className="workflow-upload-menu workflow-upload-menu-right" role="menu">
+        <div className="workflow-upload-menu workflow-upload-menu-right workflow-upload-menu-fixed" role="menu" style={menu.menuStyle}>
           <button type="button" className="workflow-upload-menu-item" role="menuitem" onClick={() => select("files")}>
             파일 선택
           </button>
@@ -1472,7 +1430,7 @@ function WorkflowRunExportButton(props: {
   compact?: boolean;
   title?: string;
 }) {
-  const menu = useWorkflowUploadMenu();
+  const menu = useWorkflowUploadMenu("right");
   const buttonClass = props.compact ? "secondary compact" : "secondary";
   const iconSize = props.compact ? 14 : 15;
   const formats: { format: ExportFormat; label: string }[] = [
@@ -1487,7 +1445,7 @@ function WorkflowRunExportButton(props: {
         <Download size={iconSize} /> Export
       </button>
       {menu.open && (
-        <div className="workflow-upload-menu workflow-upload-menu-right" role="menu">
+        <div className="workflow-upload-menu workflow-upload-menu-right workflow-upload-menu-fixed" role="menu" style={menu.menuStyle}>
           {formats.map((item) => (
             <a
               key={item.format}
@@ -1505,25 +1463,48 @@ function WorkflowRunExportButton(props: {
   );
 }
 
-function useWorkflowUploadMenu() {
+function useWorkflowUploadMenu(placement: "left" | "right" = "left") {
   const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
   const ref = useRef<HTMLDivElement | null>(null);
+  const updatePosition = useCallback(() => {
+    const rect = ref.current?.getBoundingClientRect();
+    if (!rect) return;
+    const top = Math.round(rect.bottom + 6);
+    if (placement === "right") {
+      setMenuStyle({ top, right: Math.max(8, Math.round(window.innerWidth - rect.right)) });
+      return;
+    }
+    setMenuStyle({ top, left: Math.max(8, Math.round(rect.left)) });
+  }, [placement]);
 
   useEffect(() => {
     if (!open) return;
+    updatePosition();
     const onPointerDown = (event: globalThis.PointerEvent) => {
       if (event.target instanceof globalThis.Node && ref.current?.contains(event.target)) return;
       setOpen(false);
     };
+    const onPositionChange = () => updatePosition();
     window.addEventListener("pointerdown", onPointerDown);
-    return () => window.removeEventListener("pointerdown", onPointerDown);
-  }, [open]);
+    window.addEventListener("resize", onPositionChange);
+    window.addEventListener("scroll", onPositionChange, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("resize", onPositionChange);
+      window.removeEventListener("scroll", onPositionChange, true);
+    };
+  }, [open, updatePosition]);
 
   return {
     open,
     ref,
+    menuStyle,
     close: () => setOpen(false),
-    toggle: () => setOpen((current) => !current)
+    toggle: () => {
+      updatePosition();
+      setOpen((current) => !current);
+    }
   };
 }
 
@@ -1539,7 +1520,6 @@ function WorkflowRunProgressDock(props: {
   onOpen: () => void;
   onResume: () => void;
   onPause: () => void;
-  onRestart: () => void;
   onStartWaiting: () => void;
   onDeleteQueueEntry: () => void;
   onResumeUpload: (source: WorkflowUploadSource) => void;
@@ -1586,11 +1566,6 @@ function WorkflowRunProgressDock(props: {
           {workflowRunCanPause(props.run) && (
             <button type="button" className="secondary" onClick={props.onPause}>
               <Pause size={15} /> 추론 일시중단
-            </button>
-          )}
-          {workflowRunCanRestart(props.run) && (
-            <button type="button" className="secondary" onClick={props.onRestart} title="문서 보관함의 같은 문서로 현재 캔버스 워크플로우를 새 실행으로 만듭니다.">
-              <Play size={15} /> 같은 문서로 다시 실행
             </button>
           )}
           {workflowRunCanStartWaiting(props.run) && props.canStartWaiting !== false && (
@@ -1755,7 +1730,6 @@ function WorkflowRunResults(props: {
   onPage: (page: number) => void;
   onResume?: () => void;
   onPause?: () => void;
-  onRestart?: () => void;
   onStartWaiting?: () => void;
   onDeleteQueueEntry?: () => void;
   onRetryFailed?: () => void;
@@ -1766,7 +1740,7 @@ function WorkflowRunResults(props: {
   const [statusFilter, setStatusFilter] = useState<WorkflowResultFilter>("all");
   const [classFilter, setClassFilter] = useState("all");
   const [leftWidth, setLeftWidth] = useState(() => readWorkflowResultPaneWidth(WORKFLOW_RESULT_LEFT_WIDTH_KEY, 280));
-  const [rightWidth, setRightWidth] = useState(() => readWorkflowResultPaneWidth(WORKFLOW_RESULT_RIGHT_WIDTH_KEY, 520));
+  const [rightWidth, setRightWidth] = useState(() => readWorkflowResultPaneWidth(WORKFLOW_RESULT_RIGHT_WIDTH_KEY, 420));
   const statusScopedItems = useMemo(
     () => props.run.items.filter((item) => workflowResultFilterMatches(item, statusFilter)),
     [props.run.items, statusFilter]
@@ -1815,6 +1789,9 @@ function WorkflowRunResults(props: {
   return (
     <section className={`workflow-results ${workflowRunStatusClass(props.run)}`}>
       <div className="workflow-results-header">
+        <button type="button" className="workflow-results-close" onClick={props.onClose} aria-label="닫기" title="닫기">
+          <X size={18} />
+        </button>
         <div>
           <p className="eyebrow">Run</p>
           <h2>{props.run.workflow_name || "워크플로우"} · {workflowRunHeadline(props.run)} · {Math.round(props.run.progress * 100)}%</h2>
@@ -1832,10 +1809,6 @@ function WorkflowRunResults(props: {
           <span><strong>{workflowRunCompletedAtLabel(props.run)}</strong> 종료</span>
         </div>
         <div className="workflow-results-actions">
-          <WorkflowRunExportButton runId={props.run.id} />
-          <button type="button" className="secondary" onClick={props.onClose}>
-            <X size={15} /> 닫기
-          </button>
           {props.onResume && workflowRunCanResume(props.run) && (
             <button type="button" className="secondary" onClick={props.onResume}>
               <Play size={15} /> 이어하기
@@ -1844,11 +1817,6 @@ function WorkflowRunResults(props: {
           {props.onPause && workflowRunCanPause(props.run) && (
             <button type="button" className="secondary" onClick={props.onPause}>
               <Pause size={15} /> 추론 일시중단
-            </button>
-          )}
-          {props.onRestart && workflowRunCanRestart(props.run) && (
-            <button type="button" className="secondary" onClick={props.onRestart} title="문서 보관함의 같은 문서로 현재 캔버스 워크플로우를 새 실행으로 만듭니다.">
-              <Play size={15} /> 같은 문서로 다시 실행
             </button>
           )}
           {props.onStartWaiting && workflowRunCanStartWaiting(props.run) && (
@@ -2281,16 +2249,6 @@ function startWorkflowRunSidebarResize(
   window.addEventListener("pointerup", onUp);
 }
 
-function confirmWorkflowRestart(run: WorkflowRun | null | undefined) {
-  if (!run) return true;
-  const inferredCount = run.items.filter((item) =>
-    ["completed", "failed", "needs_review", "running", "paused"].includes(item.status) || item.inference_duration_ms !== null && item.inference_duration_ms !== undefined
-  ).length;
-  return window.confirm(
-    `현재 ${inferredCount.toLocaleString()} / ${run.total_count.toLocaleString()}개 문서에 추론 결과나 진행 기록이 있습니다.\n\n계속하면 기존 추론은 중지하고, 업로드된 원본 문서는 그대로 재사용해 새 실행 기록을 만듭니다. 현재 캔버스의 워크플로우로 처음부터 다시 추론합니다.\n\n계속할까요?`
-  );
-}
-
 function useWorkflowRunVirtualRows(count: number, activeIndex: number, activeKey: string | null | undefined) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -2443,6 +2401,63 @@ function WorkflowDocumentPreview(props: {
   item: WorkflowRunItem | null;
   onPage: (page: number) => void;
 }) {
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panStartRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
+
+  useEffect(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    setIsPanning(false);
+    panStartRef.current = null;
+  }, [props.document?.document_id, props.activePage]);
+
+  const setPreviewZoom = useCallback((nextZoom: number) => {
+    const clamped = Math.min(3, Math.max(0.5, Number(nextZoom.toFixed(2))));
+    setZoom(clamped);
+    if (clamped <= 1) setPan({ x: 0, y: 0 });
+  }, []);
+
+  const resetPreview = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    setIsPanning(false);
+    panStartRef.current = null;
+  }, []);
+
+  const onPreviewPointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (zoom <= 1) return;
+    panStartRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: pan.x,
+      originY: pan.y
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsPanning(true);
+  }, [pan.x, pan.y, zoom]);
+
+  const onPreviewPointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const start = panStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    setPan({
+      x: start.originX + event.clientX - start.startX,
+      y: start.originY + event.clientY - start.startY
+    });
+  }, []);
+
+  const stopPreviewPan = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const start = panStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    panStartRef.current = null;
+    setIsPanning(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
   if (props.loading) {
     return <section className="workflow-preview-pane"><div className="workflow-preview-empty">문서 preview를 불러오는 중입니다.</div></section>;
   }
@@ -2455,18 +2470,40 @@ function WorkflowDocumentPreview(props: {
   return (
     <section className="workflow-preview-pane">
       <div className="workflow-preview-toolbar">
-        <button type="button" onClick={() => props.onPage(Math.max(0, safePage - 1))}>
-          <ChevronLeft size={15} />
-        </button>
-        <span>{safePage + 1} / {document.page_count}</span>
-        <button type="button" onClick={() => props.onPage(Math.min(document.page_count - 1, safePage + 1))}>
-          <ChevronRight size={15} />
-        </button>
-        {props.item?.result.current_node_label && <strong>{props.item.result.current_node_label} 진행 중</strong>}
+        <div className="workflow-preview-status">
+          {props.item?.result.current_node_label && <strong>{props.item.result.current_node_label} 진행 중</strong>}
+        </div>
+        <div className="workflow-preview-page-controls">
+          <button type="button" onClick={() => props.onPage(Math.max(0, safePage - 1))} disabled={safePage <= 0} aria-label="이전 페이지">
+            <ChevronLeft size={15} />
+          </button>
+          <span>{safePage + 1} / {document.page_count}</span>
+          <button type="button" onClick={() => props.onPage(Math.min(document.page_count - 1, safePage + 1))} disabled={safePage >= document.page_count - 1} aria-label="다음 페이지">
+            <ChevronRight size={15} />
+          </button>
+        </div>
+        <div className="workflow-preview-zoom-controls">
+          <button type="button" onClick={() => setPreviewZoom(zoom - 0.25)} disabled={zoom <= 0.5} aria-label="축소" title="축소">
+            <Minus size={15} />
+          </button>
+          <span>{Math.round(zoom * 100)}%</span>
+          <button type="button" onClick={() => setPreviewZoom(zoom + 0.25)} disabled={zoom >= 3} aria-label="확대" title="확대">
+            <Plus size={15} />
+          </button>
+          <button type="button" onClick={resetPreview} aria-label="전체 보기" title="전체 보기">
+            <Maximize2 size={15} />
+          </button>
+        </div>
       </div>
-      <div className="workflow-preview-stage">
-        <div className="workflow-preview-image-wrap">
-          {page && <img src={workflowDocumentPageSrc(page)} alt={`${document.filename} ${safePage + 1}페이지`} />}
+      <div
+        className={`workflow-preview-stage ${zoom > 1 ? "can-pan" : ""} ${isPanning ? "is-panning" : ""}`}
+        onPointerDown={onPreviewPointerDown}
+        onPointerMove={onPreviewPointerMove}
+        onPointerUp={stopPreviewPan}
+        onPointerCancel={stopPreviewPan}
+      >
+        <div className="workflow-preview-image-wrap" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
+          {page && <img src={workflowDocumentPageSrc(page)} alt={`${document.filename} ${safePage + 1}페이지`} draggable={false} />}
         </div>
       </div>
     </section>
