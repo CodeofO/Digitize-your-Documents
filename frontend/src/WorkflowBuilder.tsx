@@ -42,6 +42,7 @@ import {
 import { ChangeEvent, CSSProperties, PointerEvent, UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
+import { DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "./DocumentLibrary";
 
 const WORKFLOW_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const WORKFLOW_RUN_ROW_HEIGHT = 64;
@@ -54,6 +55,10 @@ const WORKFLOW_RESULT_MIN_LEFT_WIDTH = 220;
 const WORKFLOW_RESULT_MIN_MIDDLE_WIDTH = 420;
 const WORKFLOW_RESULT_MIN_RIGHT_WIDTH = 360;
 const WORKFLOW_RESULT_SPLITTER_WIDTH = 12;
+const WORKFLOW_RUN_SIDEBAR_WIDTH_KEY = "digitize_workflow_run_sidebar_width_v1";
+const WORKFLOW_RUN_SIDEBAR_DEFAULT_WIDTH = 560;
+const WORKFLOW_RUN_SIDEBAR_MIN_WIDTH = 420;
+const WORKFLOW_RUN_SIDEBAR_MAX_WIDTH = 900;
 
 type WorkflowNodeKind = "input" | "classifier" | "branch" | "kie" | "required-checker" | "merge" | "export";
 type WorkflowResultFilter = "all" | "success" | "failed" | "waiting" | "running" | "review";
@@ -166,6 +171,7 @@ type WorkflowRun = {
   inference_duration_ms?: number | null;
   items: WorkflowRunItem[];
   created_at?: string;
+  started_at?: string | null;
   completed_at?: string | null;
 };
 
@@ -187,6 +193,8 @@ type WorkflowItemResult = {
 type WorkflowBuilderProps = {
   uploadMaxBatchFiles: number;
   uploadChunkFiles: number;
+  initialLibraryDocuments?: LibraryDocument[];
+  onConsumeInitialLibraryDocuments?: () => void;
   onCreateSchema: () => void;
   onCreateClassifier: () => void;
   onCreateChecklist: () => void;
@@ -237,7 +245,15 @@ const nodeTypes = {
   workflow: WorkflowCanvasNode
 };
 
-export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreateSchema, onCreateClassifier, onCreateChecklist }: WorkflowBuilderProps) {
+export function WorkflowBuilder({
+  uploadMaxBatchFiles,
+  uploadChunkFiles,
+  initialLibraryDocuments = [],
+  onConsumeInitialLibraryDocuments,
+  onCreateSchema,
+  onCreateClassifier,
+  onCreateChecklist
+}: WorkflowBuilderProps) {
   const [initialDraft] = useState<WorkflowDraft | null>(() => readWorkflowDraft());
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
   const [activeWorkflowId, setActiveWorkflowId] = useState(initialDraft?.activeWorkflowId ?? "");
@@ -250,9 +266,18 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
   const [classifiers, setClassifiers] = useState<ClassifierSummary[]>([]);
   const [checklists, setChecklists] = useState<ChecklistSummary[]>([]);
   const [files, setFiles] = useState<File[]>([]);
+  const [libraryDocuments, setLibraryDocuments] = useState<LibraryDocument[]>([]);
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [activeRunId, setActiveRunId] = useState("");
+  const [manualRunSelection, setManualRunSelection] = useState(false);
   const [runSidebarOpen, setRunSidebarOpen] = useState(true);
+  const [runSidebarWidth, setRunSidebarWidth] = useState(() =>
+    clampWorkflowPaneWidth(
+      readWorkflowResultPaneWidth(WORKFLOW_RUN_SIDEBAR_WIDTH_KEY, WORKFLOW_RUN_SIDEBAR_DEFAULT_WIDTH),
+      WORKFLOW_RUN_SIDEBAR_MIN_WIDTH,
+      WORKFLOW_RUN_SIDEBAR_MAX_WIDTH
+    )
+  );
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingRun, setIsStartingRun] = useState(false);
   const [runStartMessage, setRunStartMessage] = useState<string | null>(null);
@@ -267,14 +292,20 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
   const workflowResumeFolderInputRef = useRef<HTMLInputElement | null>(null);
   const workflowResumeRunIdRef = useRef<string>("");
 
-  const activeRun = runs.find((run) => run.id === activeRunId) ?? runs[0] ?? null;
+  const processingRun = runs.find((run) => workflowRunIsProcessing(run)) ?? null;
+  const pausedRun = runs.find((run) => workflowRunIsPaused(run)) ?? null;
+  const selectedRun = runs.find((run) => run.id === activeRunId) ?? null;
+  const liveRun = processingRun ?? pausedRun ?? runs.find((run) => workflowRunIsLive(run)) ?? null;
+  const activeRun = selectedRun ?? liveRun ?? runs[0] ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
   const canvasNodes = useMemo(
     () => buildCanvasNodes(nodes, edges, schemas, classifiers, checklists, updateNodeConfig),
     [nodes, edges, schemas, classifiers, checklists]
   );
   const validation = useMemo(() => validateWorkflow(nodes, edges), [nodes, edges]);
-  const isRunningRun = Boolean(activeRun && !TERMINAL_RUN_STATUSES.includes(activeRun.status) && activeRun.status !== "waiting");
+  const runSidebarStyle = useMemo<CSSProperties>(() => ({ width: `${runSidebarWidth}px` }), [runSidebarWidth]);
+  const isRunningRun = Boolean(processingRun);
+  const selectedDocumentCount = files.length || libraryDocuments.length;
   const shouldAnimateCanvasEdges = isRunningRun || isStartingRun;
   const canvasEdges = useMemo(
     () =>
@@ -296,10 +327,33 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
   }, []);
 
   useEffect(() => {
+    if (!initialLibraryDocuments.length) return;
+    setLibraryDocuments(initialLibraryDocuments);
+    setFiles([]);
+    setMessage(`${initialLibraryDocuments.length.toLocaleString()}개 보관 문서를 선택했습니다.`);
+    onConsumeInitialLibraryDocuments?.();
+  }, [initialLibraryDocuments, onConsumeInitialLibraryDocuments]);
+
+  useEffect(() => {
     if (!activeRun || TERMINAL_RUN_STATUSES.includes(activeRun.status)) return;
     const timer = window.setInterval(() => void refreshRun(activeRun.id), 1200);
     return () => window.clearInterval(timer);
   }, [activeRun?.id, activeRun?.status]);
+
+  useEffect(() => {
+    if (!runs.length) {
+      if (activeRunId) setActiveRunId("");
+      return;
+    }
+    const current = runs.find((run) => run.id === activeRunId) ?? null;
+    if (liveRun && (!manualRunSelection || !current || workflowRunIsTerminalOrWaiting(current))) {
+      if (activeRunId !== liveRun.id) setActiveRunId(liveRun.id);
+      return;
+    }
+    if (!current) {
+      setActiveRunId((liveRun ?? runs[0]).id);
+    }
+  }, [activeRunId, liveRun, manualRunSelection, runs]);
 
   useEffect(() => {
     const timer = window.setInterval(() => void refreshRunsList(), 3000);
@@ -359,6 +413,23 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     setMessage("선 연결을 삭제했습니다.");
   }
 
+  function onRunSidebarResize(event: PointerEvent<HTMLButtonElement>) {
+    startWorkflowRunSidebarResize(event, runSidebarWidth, setRunSidebarWidth);
+  }
+
+  function focusWorkflowRun(runId: string, manual = true) {
+    setManualRunSelection(manual);
+    setActiveRunId(runId);
+  }
+
+  function pauseRunFromHistory(runId: string) {
+    if (isStartingRun && (workflowStartRunIdRef.current === runId || activeRunId === runId)) {
+      void pauseStartingRun();
+      return;
+    }
+    void pauseRun(runId);
+  }
+
   async function refreshAll() {
     setError(null);
     try {
@@ -373,12 +444,13 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
       setSchemas(loadedSchemas);
       setClassifiers(loadedClassifiers);
       setChecklists(loadedChecklists);
-      setRuns(loadedRuns);
+      const sortedRuns = sortWorkflowRunsByRegistration(loadedRuns);
+      setRuns(sortedRuns);
+      if (!activeRunId && sortedRuns[0]) {
+        focusWorkflowRun((sortedRuns.find((run) => workflowRunIsLive(run)) ?? sortedRuns[0]).id, false);
+      }
       if (!activeWorkflowId && !initialDraft && loadedWorkflows[0]) {
         loadWorkflowIntoCanvas(loadedWorkflows[0]);
-      }
-      if (!activeRunId && loadedRuns[0]) {
-        setActiveRunId(loadedRuns[0].id);
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 데이터를 불러오지 못했습니다.");
@@ -390,10 +462,10 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
       const loadedRuns = await api<WorkflowRun[]>(`/api/workflow-runs?limit=${WORKFLOW_RUN_HISTORY_LIMIT}`);
       setRuns((current) => {
         const currentById = new Map(current.map((run) => [run.id, run]));
-        return loadedRuns.map((run) => {
+        return sortWorkflowRunsByRegistration(loadedRuns.map((run) => {
           const existing = currentById.get(run.id);
           return run.items.length || !existing ? run : { ...run, items: existing.items };
-        });
+        }), current);
       });
     } catch {
       // Background polling should not interrupt the current editing flow.
@@ -453,8 +525,8 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
 
   async function runWorkflow() {
     const runFiles = sortUploadFiles(files);
-    if (!runFiles.length) {
-      setError("실행할 문서를 업로드하세요.");
+    if (!runFiles.length && !libraryDocuments.length) {
+      setError("실행할 문서를 업로드하거나 문서 보관함에서 선택하세요.");
       return;
     }
     if (validation.errors.length) {
@@ -462,7 +534,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
       return;
     }
     setIsStartingRun(true);
-    setRunStartFileCount(runFiles.length);
+    setRunStartFileCount(runFiles.length || libraryDocuments.length);
     setRunStartMessage("작업 준비 중");
     setIsSaving(true);
     setError(null);
@@ -472,22 +544,21 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     workflowStartRunIdRef.current = "";
     try {
       const saved = await persistWorkflow();
-      const initializedRun = await api<WorkflowRun>(`/api/workflows/${saved.id}/runs/init`, {
+      const sourceDocuments = libraryDocuments.length
+        ? libraryDocuments
+        : await uploadWorkflowFilesToLibrary(runFiles, abortController);
+      setRunStartMessage("작업 등록 완료");
+      const run = await api<WorkflowRun>(`/api/workflows/${saved.id}/runs/from-documents`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ total_count: runFiles.length }),
+        body: JSON.stringify({ document_ids: sourceDocuments.map((document) => document.document_id) }),
         signal: abortController.signal
       });
-      workflowStartRunIdRef.current = initializedRun.id;
-      setRuns((current) => [initializedRun, ...current.filter((item) => item.id !== initializedRun.id)].slice(0, WORKFLOW_RUN_HISTORY_LIMIT));
-      setActiveRunId(initializedRun.id);
-
-      await uploadWorkflowFiles(initializedRun.id, runFiles, initializedRun, abortController, "문서 업로드 중");
-      setRunStartMessage("작업 등록 완료");
-      const run = await api<WorkflowRun>(`/api/workflow-runs/${initializedRun.id}/start`, { method: "POST", signal: abortController.signal });
-      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)].slice(0, WORKFLOW_RUN_HISTORY_LIMIT));
-      setActiveRunId(run.id);
-      setMessage("워크플로우 실행을 시작했습니다. 실행 전에 워크플로우를 저장했습니다.");
+      workflowStartRunIdRef.current = run.id;
+      upsertRun(run);
+      focusWorkflowRun(run.id, false);
+      setFiles([]);
+      setLibraryDocuments([]);
+      setMessage("문서 보관함 기준으로 워크플로우 실행을 시작했습니다. 변환 중인 문서는 준비되면 자동 실행됩니다.");
       void refreshRun(run.id);
     } catch (exc) {
       if (workflowStartCancelRequestedRef.current || (exc instanceof Error && exc.name === "AbortError")) {
@@ -506,9 +577,24 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     }
   }
 
+  async function uploadWorkflowFilesToLibrary(runFiles: File[], abortController: AbortController) {
+    const uploadedDocuments: LibraryDocument[] = [];
+    let uploadedCount = 0;
+    for (let chunkStart = 0; chunkStart < runFiles.length; chunkStart += uploadChunkFiles) {
+      if (abortController.signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const chunk = runFiles.slice(chunkStart, chunkStart + uploadChunkFiles);
+      setRunStartMessage(`${uploadedCount.toLocaleString()} / ${runFiles.length.toLocaleString()} 문서 보관함 업로드 중`);
+      const uploaded = await uploadLibraryFiles(chunk);
+      uploadedDocuments.push(...uploaded);
+      uploadedCount += chunk.length;
+      setRunStartMessage(`${uploadedCount.toLocaleString()} / ${runFiles.length.toLocaleString()} 문서 보관함 업로드 중`);
+    }
+    return uploadedDocuments;
+  }
+
   async function stopStartingRun() {
     workflowStartCancelRequestedRef.current = true;
-    setRunStartMessage("중단·정리 중");
+    setRunStartMessage("업로드 삭제 중");
     workflowStartAbortRef.current?.abort();
     const runId = workflowStartRunIdRef.current || activeRunId;
     if (!runId) {
@@ -548,16 +634,15 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
       setRuns((current) => {
         const existing = current.find((item) => item.id === run.id);
         const merged = run.items.length || !existing ? run : { ...run, items: existing.items };
-        return [merged, ...current.filter((item) => item.id !== run.id)].slice(0, WORKFLOW_RUN_HISTORY_LIMIT);
+        return sortWorkflowRunsByRegistration([merged, ...current.filter((item) => item.id !== run.id)], current).slice(0, WORKFLOW_RUN_HISTORY_LIMIT);
       });
-      setActiveRunId(run.id);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 실행 상태를 갱신하지 못했습니다.");
     }
   }
 
   function upsertRun(run: WorkflowRun) {
-    setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)].slice(0, WORKFLOW_RUN_HISTORY_LIMIT));
+    setRuns((current) => sortWorkflowRunsByRegistration([run, ...current.filter((item) => item.id !== run.id)], current).slice(0, WORKFLOW_RUN_HISTORY_LIMIT));
   }
 
   async function uploadWorkflowFiles(
@@ -617,8 +702,8 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     setError(null);
     try {
       const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/resume`, { method: "POST" });
-      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)].slice(0, WORKFLOW_RUN_HISTORY_LIMIT));
-      setActiveRunId(run.id);
+      upsertRun(run);
+      focusWorkflowRun(run.id, false);
       setMessage("일시중단된 워크플로우 처리를 이어갑니다.");
       void refreshRun(run.id);
     } catch (exc) {
@@ -631,7 +716,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     try {
       const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/pause`, { method: "POST" });
       upsertRun(run);
-      setActiveRunId(run.id);
+      focusWorkflowRun(run.id, false);
       setMessage("워크플로우 실행을 일시중단했습니다. 업로드된 문서는 보존됩니다.");
       void refreshRun(run.id);
     } catch (exc) {
@@ -652,11 +737,11 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
         body: JSON.stringify({ workflow_id: saved.id })
       });
       upsertRun(run);
-      setActiveRunId(run.id);
+      focusWorkflowRun(run.id, false);
       setMessage("업로드된 문서는 재사용하고 새 워크플로우 실행 기록으로 다시 추론합니다.");
       void refreshRun(run.id);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "워크플로우를 재시작하지 못했습니다.");
+      setError(exc instanceof Error ? exc.message : "업로드된 문서로 새 실행을 만들지 못했습니다.");
     } finally {
       setIsSaving(false);
     }
@@ -687,7 +772,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     try {
       const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/start`, { method: "POST" });
       upsertRun(run);
-      setActiveRunId(run.id);
+      focusWorkflowRun(run.id, false);
       setMessage("대기 중인 워크플로우 실행을 바로 시작했습니다.");
       void refreshRun(run.id);
     } catch (exc) {
@@ -695,15 +780,18 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     }
   }
 
-  async function cancelWaitingRun(runId: string) {
+  async function deleteQueueEntry(runId: string) {
     setError(null);
     try {
-      const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/cancel-waiting`, { method: "POST" });
-      upsertRun(run);
-      setActiveRunId(run.id);
-      setMessage("워크플로우 실행 대기를 취소했습니다. 공유 문서는 보존됩니다.");
+      await api<{ status: string; id: string }>(`/api/workflow-runs/${runId}/queue-entry`, { method: "DELETE" });
+      setRuns((current) => current.filter((run) => run.id !== runId));
+      if (activeRunId === runId) {
+        setManualRunSelection(false);
+        setActiveRunId("");
+      }
+      setMessage("추론 실행을 중단하고 대기열 항목을 삭제했습니다. 업로드된 문서는 보존됩니다.");
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "대기 중인 워크플로우 실행을 취소하지 못했습니다.");
+      setError(exc instanceof Error ? exc.message : "대기열 항목을 삭제하지 못했습니다.");
     }
   }
 
@@ -753,8 +841,8 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     workflowStartRunIdRef.current = runId;
     try {
       let latestRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/summary`, { signal: abortController.signal });
-      setRuns((current) => [latestRun, ...current.filter((item) => item.id !== latestRun.id)].slice(0, WORKFLOW_RUN_HISTORY_LIMIT));
-      setActiveRunId(latestRun.id);
+      upsertRun(latestRun);
+      focusWorkflowRun(latestRun.id, false);
       latestRun = await uploadWorkflowFiles(runId, selectedFiles, latestRun, abortController, "문서 업로드 이어가는 중");
 
       const uploadedCount = latestRun.uploaded_count ?? latestRun.items.length;
@@ -764,8 +852,8 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
       }
       setRunStartMessage("업로드 완료, 실행 등록 중");
       const startedRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/start`, { method: "POST", signal: abortController.signal });
-      setRuns((current) => [startedRun, ...current.filter((item) => item.id !== startedRun.id)].slice(0, WORKFLOW_RUN_HISTORY_LIMIT));
-      setActiveRunId(startedRun.id);
+      upsertRun(startedRun);
+      focusWorkflowRun(startedRun.id, false);
       setMessage("업로드를 복구했고 워크플로우 실행을 시작했습니다.");
       void refreshRun(startedRun.id);
     } catch (exc) {
@@ -788,8 +876,8 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
     setError(null);
     try {
       const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/discard`, { method: "POST" });
-      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)].slice(0, WORKFLOW_RUN_HISTORY_LIMIT));
-      setActiveRunId(run.id);
+      upsertRun(run);
+      focusWorkflowRun(run.id, false);
       setMessage("워크플로우 실행 기록만 남기고 업로드 산출물을 정리했습니다.");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 실행을 중단하지 못했습니다.");
@@ -900,7 +988,20 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
               <WorkflowUploadButton
                 disabled={isStartingRun || isRunningRun}
                 selectedCount={files.length}
-                onChange={onFileInput}
+                onChange={(event) => {
+                  setLibraryDocuments([]);
+                  onFileInput(event);
+                }}
+              />
+              <DocumentPickerButton
+                selectedDocuments={libraryDocuments}
+                uploadChunkFiles={uploadChunkFiles}
+                disabled={isStartingRun || isRunningRun}
+                onSelected={(documents) => {
+                  setLibraryDocuments(documents);
+                  setFiles([]);
+                  setMessage(documents.length ? `${documents.length.toLocaleString()}개 보관 문서를 선택했습니다.` : null);
+                }}
               />
               <input
                 ref={workflowResumeFileInputRef}
@@ -923,7 +1024,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                 type="button"
                 className="primary workflow-run-primary-button"
                 onClick={() => void runWorkflow()}
-                disabled={isStartingRun || isRunningRun || !files.length}
+                disabled={isStartingRun || isRunningRun || !selectedDocumentCount}
                 title={runButtonTitle}
               >
                 {isStartingRun || isRunningRun ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
@@ -938,13 +1039,13 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                   title={
                     validation.errors.length
                       ? `예약할 수 없습니다: ${validation.errors[0]}`
-                      : "현재 문서 묶음을 재사용해 캔버스의 워크플로우를 다음 실행으로 예약합니다."
+                      : `${workflowRunSourceTitle(activeRun)}를 재사용해 캔버스의 워크플로우를 다음 실행으로 예약합니다.`
                   }
                 >
-                  <Plus size={15} /> 현재 문서로 실행 예약
+                  <Plus size={15} /> {workflowRunSourceLabel(activeRun)}로 실행 예약
                 </button>
               )}
-              {activeRun && <WorkflowRunExportButton runId={activeRun.id} />}
+              {activeRun && <WorkflowRunExportButton runId={activeRun.id} title={`${workflowRunSourceTitle(activeRun)} 결과 내보내기`} />}
             </div>
             {selectedEdge && (
               <div className="workflow-edge-actions">
@@ -1000,7 +1101,7 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
                 onPause={() => void pauseRun(activeRun.id)}
                 onRestart={() => void restartRun(activeRun.id)}
                 onStartWaiting={() => void startWaitingRun(activeRun.id)}
-                onCancelWaiting={() => void cancelWaitingRun(activeRun.id)}
+                onDeleteQueueEntry={() => void deleteQueueEntry(activeRun.id)}
                 onResumeUpload={(source) => source === "folder" ? requestResumeFolderUpload(activeRun.id) : requestResumeUpload(activeRun.id)}
                 onDiscard={() => void discardRun(activeRun.id)}
               />
@@ -1009,13 +1110,25 @@ export function WorkflowBuilder({ uploadMaxBatchFiles, uploadChunkFiles, onCreat
           </div>
 
           {runSidebarOpen && (
-            <aside className="workflow-run-sidebar" aria-label="워크플로우 실행 현황 사이드바">
+            <aside className="workflow-run-sidebar" aria-label="워크플로우 실행 현황 사이드바" style={runSidebarStyle}>
+              <button
+                type="button"
+                className="workflow-run-sidebar-resize"
+                aria-label="실행 현황 너비 조절"
+                title="실행 현황 너비 조절"
+                onPointerDown={onRunSidebarResize}
+              >
+                <GripVertical size={16} />
+              </button>
               <WorkflowRunHistory
                 runs={runs}
                 activeRunId={activeRunId}
+                onSelect={(runId) => focusWorkflowRun(runId, true)}
                 onOpen={(runId) => openWorkflowResultScreen(runId)}
+                onResume={(runId) => void resumeRun(runId)}
+                onPause={pauseRunFromHistory}
                 onStartWaiting={(runId) => void startWaitingRun(runId)}
-                onCancelWaiting={(runId) => void cancelWaitingRun(runId)}
+                onDeleteQueueEntry={(runId) => void deleteQueueEntry(runId)}
               />
             </aside>
           )}
@@ -1123,7 +1236,7 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
         void refreshRun();
       }
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "워크플로우를 재시작하지 못했습니다.");
+      setError(exc instanceof Error ? exc.message : "업로드된 문서로 새 실행을 만들지 못했습니다.");
     }
   }
 
@@ -1139,13 +1252,13 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
     }
   }
 
-  async function cancelWaitingRun() {
+  async function deleteQueueEntry() {
     try {
-      const nextRun = await api<WorkflowRun>(`/api/workflow-runs/${runId}/cancel-waiting`, { method: "POST" });
-      setRun(nextRun);
+      await api<{ status: string; id: string }>(`/api/workflow-runs/${runId}/queue-entry`, { method: "DELETE" });
       setError(null);
+      closeWindow();
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "대기 중인 워크플로우 실행을 취소하지 못했습니다.");
+      setError(exc instanceof Error ? exc.message : "대기열 항목을 삭제하지 못했습니다.");
     }
   }
 
@@ -1193,7 +1306,7 @@ export function WorkflowRunResultWindow({ runId }: { runId: string }) {
           onPause={() => void pauseRun()}
           onRestart={() => void restartRun()}
           onStartWaiting={() => void startWaitingRun()}
-          onCancelWaiting={() => void cancelWaitingRun()}
+          onDeleteQueueEntry={() => void deleteQueueEntry()}
           onRetryFailed={() => void retryFailedRun()}
           onDiscard={() => void discardRun()}
           onClose={closeWindow}
@@ -1355,6 +1468,7 @@ function WorkflowResumeUploadButton(props: {
 function WorkflowRunExportButton(props: {
   runId: string;
   compact?: boolean;
+  title?: string;
 }) {
   const menu = useWorkflowUploadMenu();
   const buttonClass = props.compact ? "secondary compact" : "secondary";
@@ -1367,7 +1481,7 @@ function WorkflowRunExportButton(props: {
 
   return (
     <div className="workflow-upload-picker" ref={menu.ref}>
-      <button type="button" className={buttonClass} aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle}>
+      <button type="button" className={buttonClass} aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle} title={props.title}>
         <Download size={iconSize} /> Export
       </button>
       {menu.open && (
@@ -1425,7 +1539,7 @@ function WorkflowRunProgressDock(props: {
   onPause: () => void;
   onRestart: () => void;
   onStartWaiting: () => void;
-  onCancelWaiting: () => void;
+  onDeleteQueueEntry: () => void;
   onResumeUpload: (source: WorkflowUploadSource) => void;
   onDiscard: () => void;
 }) {
@@ -1436,7 +1550,7 @@ function WorkflowRunProgressDock(props: {
   const queuedCount = props.run.queued_count ?? props.run.items.filter((item) => item.status === "queued").length;
   const percent = Math.round(props.run.progress * 100);
   return (
-    <div className="workflow-progress-dock" aria-label="워크플로우 실행 진행상황">
+    <div className={`workflow-progress-dock ${workflowRunStatusClass(props.run)}`} aria-label="워크플로우 실행 진행상황">
       <div className="workflow-progress-dock-head">
         <div>
           <p className="eyebrow">Run</p>
@@ -1450,6 +1564,8 @@ function WorkflowRunProgressDock(props: {
           <span><strong>{finishedCount}</strong> 완료/검토/실패</span>
           <span><strong>{formatDurationMs(props.run.upload_duration_ms)}</strong> 업로드</span>
           <span><strong>{formatDurationMs(props.run.inference_duration_ms)}</strong> 추론</span>
+          <span><strong>{workflowRunStartedAtLabel(props.run)}</strong> 시작</span>
+          <span><strong>{workflowRunCompletedAtLabel(props.run)}</strong> 종료</span>
         </div>
         <div className="workflow-progress-dock-actions">
           <button type="button" className="secondary" onClick={props.onOpen}>
@@ -1465,12 +1581,12 @@ function WorkflowRunProgressDock(props: {
           )}
           {workflowRunCanPause(props.run) && (
             <button type="button" className="secondary" onClick={props.onPause}>
-              <Pause size={15} /> 일시중단
+              <Pause size={15} /> 추론 일시중단
             </button>
           )}
           {workflowRunCanRestart(props.run) && (
-            <button type="button" className="secondary" onClick={props.onRestart}>
-              <Play size={15} /> 재시작
+            <button type="button" className="secondary" onClick={props.onRestart} title="기존 추론은 중지하고 업로드된 문서로 현재 워크플로우를 새로 실행합니다.">
+              <Play size={15} /> 현재 문서로 새 실행
             </button>
           )}
           {workflowRunCanStartWaiting(props.run) && props.canStartWaiting !== false && (
@@ -1478,19 +1594,19 @@ function WorkflowRunProgressDock(props: {
               <Play size={15} /> 바로 실행
             </button>
           )}
-          {workflowRunCanCancelWaiting(props.run) && (
-            <button type="button" className="secondary danger-outline" onClick={props.onCancelWaiting}>
-              <X size={15} /> 대기 취소
+          {workflowRunCanDeleteQueueEntry(props.run) && (
+            <button type="button" className="secondary danger-outline" onClick={props.onDeleteQueueEntry}>
+              <X size={15} /> {workflowRunDeleteQueueEntryLabel(props.run)}
             </button>
           )}
           {workflowRunCanDiscard(props.run) && (
             <button type="button" className="secondary danger-outline" onClick={props.onDiscard}>
-              <X size={15} /> 중단·정리
+              <X size={15} /> 업로드 삭제
             </button>
           )}
         </div>
       </div>
-      <progress className="workflow-run-progress" value={props.run.progress} max={1} />
+      <progress className={`workflow-run-progress ${workflowRunStatusClass(props.run)}`} value={props.run.progress} max={1} />
     </div>
   );
 }
@@ -1518,7 +1634,7 @@ function WorkflowRunPreparingDock(props: {
             <Pause size={15} /> 일시중단
           </button>
           <button type="button" className="secondary danger-outline" onClick={props.onDiscard}>
-            <X size={15} /> 중단·정리
+            <X size={15} /> 업로드 삭제
           </button>
         </div>
       </div>
@@ -1530,9 +1646,12 @@ function WorkflowRunPreparingDock(props: {
 function WorkflowRunHistory(props: {
   runs: WorkflowRun[];
   activeRunId: string;
+  onSelect: (runId: string) => void;
   onOpen: (runId: string) => void;
+  onResume: (runId: string) => void;
+  onPause: (runId: string) => void;
   onStartWaiting: (runId: string) => void;
-  onCancelWaiting: (runId: string) => void;
+  onDeleteQueueEntry: (runId: string) => void;
 }) {
   return (
     <section className="workflow-run-history" aria-label="워크플로우 실행 현황">
@@ -1549,14 +1668,30 @@ function WorkflowRunHistory(props: {
             const isActive = run.id === props.activeRunId;
             const percent = Math.round(run.progress * 100);
             return (
-              <article key={run.id} className={`workflow-run-history-item ${isActive ? "active" : ""}`}>
+              <article
+                key={run.id}
+                className={`workflow-run-history-item ${workflowRunStatusClass(run)} ${isActive ? "active" : ""}`}
+                role="button"
+                aria-current={isActive ? "true" : undefined}
+                tabIndex={0}
+                onClick={() => props.onSelect(run.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    props.onSelect(run.id);
+                  }
+                }}
+              >
                 <div className="workflow-run-history-main">
                   <span className="workflow-run-history-status">{workflowRunStatusLabel(run)}</span>
                   <strong>{run.workflow_name || "워크플로우"} · {workflowRunHeadline(run)}</strong>
                   <small>
-                    {formatWorkflowRunDate(run.created_at)} · {finishedCount.toLocaleString()} / {run.total_count.toLocaleString()} 처리
-                    {run.restarted_from_run_id ? " · 재시작" : ""}
-                    {run.queued_from_run_id ? " · 대기 실행" : ""}
+                    등록 {formatWorkflowRunDate(run.created_at)} · 시작 {workflowRunStartedAtLabel(run)} · 종료 {workflowRunCompletedAtLabel(run)}
+                  </small>
+                  <small>
+                    {finishedCount.toLocaleString()} / {run.total_count.toLocaleString()} 처리
+                    {run.restarted_from_run_id ? " · 새 실행" : ""}
+                    {workflowRunQueueMeta(run)}
                     {run.queue_order ? ` · 예약 순서 #${run.queue_order}` : ""}
                     {run.failed_count ? ` · ${run.failed_count.toLocaleString()} 실패` : ""}
                     {run.needs_review_count ? ` · ${run.needs_review_count.toLocaleString()} 검토` : ""}
@@ -1566,15 +1701,29 @@ function WorkflowRunHistory(props: {
                     <em>{percent}%</em>
                   </div>
                 </div>
-                <div className="workflow-run-history-actions">
+                <div
+                  className="workflow-run-history-actions"
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
+                >
+                  {workflowRunCanResume(run) && (
+                    <button type="button" className="secondary" onClick={() => props.onResume(run.id)}>
+                      <Play size={14} /> 이어하기
+                    </button>
+                  )}
+                  {workflowRunCanPause(run) && (
+                    <button type="button" className="secondary" onClick={() => props.onPause(run.id)}>
+                      <Pause size={14} /> 추론 일시중단
+                    </button>
+                  )}
                   {workflowRunCanStartWaiting(run, props.runs) && (
                     <button type="button" className="secondary" onClick={() => props.onStartWaiting(run.id)}>
                       <Play size={14} /> 바로 실행
                     </button>
                   )}
-                  {workflowRunCanCancelWaiting(run) && (
-                    <button type="button" className="secondary danger-outline" onClick={() => props.onCancelWaiting(run.id)}>
-                      <X size={14} /> 대기 삭제
+                  {workflowRunCanDeleteQueueEntry(run) && (
+                    <button type="button" className="secondary danger-outline" onClick={() => props.onDeleteQueueEntry(run.id)}>
+                      <X size={14} /> {workflowRunDeleteQueueEntryLabel(run)}
                     </button>
                   )}
                   <button type="button" className="secondary" onClick={() => props.onOpen(run.id)}>
@@ -1608,7 +1757,7 @@ function WorkflowRunResults(props: {
   onPause?: () => void;
   onRestart?: () => void;
   onStartWaiting?: () => void;
-  onCancelWaiting?: () => void;
+  onDeleteQueueEntry?: () => void;
   onRetryFailed?: () => void;
   onDiscard?: () => void;
   onClose: () => void;
@@ -1664,7 +1813,7 @@ function WorkflowRunResults(props: {
   }, [leftWidth, rightWidth]);
 
   return (
-    <section className="workflow-results">
+    <section className={`workflow-results ${workflowRunStatusClass(props.run)}`}>
       <div className="workflow-results-header">
         <div>
           <p className="eyebrow">Run</p>
@@ -1677,6 +1826,8 @@ function WorkflowRunResults(props: {
           <span><strong>{props.run.queued_count ?? props.run.items.filter((item) => item.status === "queued").length}</strong> 대기</span>
           <span><strong>{formatDurationMs(props.run.upload_duration_ms)}</strong> 업로드</span>
           <span><strong>{formatDurationMs(props.run.inference_duration_ms)}</strong> 추론</span>
+          <span><strong>{workflowRunStartedAtLabel(props.run)}</strong> 시작</span>
+          <span><strong>{workflowRunCompletedAtLabel(props.run)}</strong> 종료</span>
         </div>
         <div className="workflow-results-actions">
           <WorkflowRunExportButton runId={props.run.id} />
@@ -1690,12 +1841,12 @@ function WorkflowRunResults(props: {
           )}
           {props.onPause && workflowRunCanPause(props.run) && (
             <button type="button" className="secondary" onClick={props.onPause}>
-              <Pause size={15} /> 일시중단
+              <Pause size={15} /> 추론 일시중단
             </button>
           )}
           {props.onRestart && workflowRunCanRestart(props.run) && (
-            <button type="button" className="secondary" onClick={props.onRestart}>
-              <Play size={15} /> 재시작
+            <button type="button" className="secondary" onClick={props.onRestart} title="기존 추론은 중지하고 업로드된 문서로 새 실행을 만듭니다.">
+              <Play size={15} /> 현재 문서로 새 실행
             </button>
           )}
           {props.onStartWaiting && workflowRunCanStartWaiting(props.run) && (
@@ -1703,9 +1854,9 @@ function WorkflowRunResults(props: {
               <Play size={15} /> 바로 실행
             </button>
           )}
-          {props.onCancelWaiting && workflowRunCanCancelWaiting(props.run) && (
-            <button type="button" className="secondary danger-outline" onClick={props.onCancelWaiting}>
-              <X size={15} /> 대기 취소
+          {props.onDeleteQueueEntry && workflowRunCanDeleteQueueEntry(props.run) && (
+            <button type="button" className="secondary danger-outline" onClick={props.onDeleteQueueEntry}>
+              <X size={15} /> {workflowRunDeleteQueueEntryLabel(props.run)}
             </button>
           )}
           {props.onRetryFailed && workflowRunCanRetryFailed(props.run) && (
@@ -1715,12 +1866,12 @@ function WorkflowRunResults(props: {
           )}
           {props.onDiscard && workflowRunCanDiscard(props.run) && (
             <button type="button" className="secondary danger-outline" onClick={props.onDiscard}>
-              <X size={15} /> 중단·정리
+              <X size={15} /> 업로드 삭제
             </button>
           )}
         </div>
       </div>
-      <progress className="workflow-run-progress" value={props.run.progress} max={1} />
+      <progress className={`workflow-run-progress ${workflowRunStatusClass(props.run)}`} value={props.run.progress} max={1} />
       <div className="workflow-run-workbench workflow-run-workbench-resizable resize-scope" style={workbenchStyle}>
         <WorkflowRunRail
           run={props.run}
@@ -1863,12 +2014,69 @@ function workflowRunCanStartWaiting(run: WorkflowRun, runs?: WorkflowRun[]) {
   );
 }
 
-function workflowRunCanCancelWaiting(run: WorkflowRun) {
-  return run.status === "waiting";
+function workflowRunCanDeleteQueueEntry(run: WorkflowRun) {
+  return Boolean(run.queued_from_run_id && !["completed", "completed_with_errors", "needs_review", "failed"].includes(run.status));
+}
+
+function workflowRunDeleteQueueEntryLabel(run: WorkflowRun) {
+  if (workflowRunIsProcessing(run) || workflowRunIsPaused(run)) return "중단 후 삭제";
+  if (run.status === "waiting") return "대기 삭제";
+  return "목록 삭제";
 }
 
 function workflowRunCanDiscard(run: WorkflowRun) {
   return run.status !== "waiting" && !["completed", "completed_with_errors", "needs_review", "canceled"].includes(run.status);
+}
+
+function workflowRunIsLive(run: WorkflowRun) {
+  return !workflowRunIsTerminalOrWaiting(run);
+}
+
+function workflowRunIsProcessing(run: WorkflowRun) {
+  return workflowRunIsLive(run) && run.status !== "paused" && run.progress_phase !== "paused";
+}
+
+function workflowRunIsPaused(run: WorkflowRun) {
+  return run.status === "paused" || run.progress_phase === "paused";
+}
+
+function workflowRunIsTerminalOrWaiting(run: WorkflowRun) {
+  return TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "waiting";
+}
+
+function workflowRunStatusClass(run: WorkflowRun) {
+  const status = workflowRunVisualStatus(run).replace(/_/g, "-");
+  return `status-${status}`;
+}
+
+function workflowRunVisualStatus(run: WorkflowRun) {
+  if (run.status === "completed_with_errors") return "completed-with-errors";
+  if (run.status === "needs_review") return "needs-review";
+  if (run.status === "canceled") return "canceled";
+  if (run.status === "failed") return "failed";
+  if (run.status === "completed") return "completed";
+  if (run.status === "paused" || run.progress_phase === "paused") return "paused";
+  if (run.status === "waiting" || run.progress_phase === "waiting") return "waiting";
+  if (run.status === "uploading" || run.progress_phase === "uploading") return "uploading";
+  if (run.status === "preprocessing" || run.progress_phase === "preprocessing") return "preprocessing";
+  if (run.status === "queued") return "queued";
+  return "running";
+}
+
+function workflowRunSourceLabel(run: WorkflowRun) {
+  return `${run.total_count.toLocaleString()}개 문서`;
+}
+
+function workflowRunSourceTitle(run: WorkflowRun) {
+  return `${run.workflow_name || "선택한 실행"}의 ${workflowRunSourceLabel(run)}`;
+}
+
+function workflowRunQueueMeta(run: WorkflowRun) {
+  if (!run.queued_from_run_id) return "";
+  if (run.status === "waiting") return " · 실행 예약";
+  if (run.status === "canceled") return " · 예약 취소";
+  if (TERMINAL_RUN_STATUSES.includes(run.status)) return " · 예약 실행 완료";
+  return " · 예약 실행 중";
 }
 
 function workflowRunQueueGroup(run: WorkflowRun, runs: WorkflowRun[]) {
@@ -1881,7 +2089,7 @@ function compareWorkflowQueueRuns(a: WorkflowRun, b: WorkflowRun) {
 }
 
 function workflowRunQueuePosition(run: WorkflowRun): [number, number, string] {
-  return [run.queue_order ?? 0, run.created_at ? Date.parse(run.created_at) || 0 : 0, run.id];
+  return [run.queue_order ?? 0, workflowRunTimestamp(run.created_at), run.id];
 }
 
 function compareWorkflowQueuePositions(a: [number, number, string], b: [number, number, string]) {
@@ -1890,13 +2098,42 @@ function compareWorkflowQueuePositions(a: [number, number, string], b: [number, 
   return a[2].localeCompare(b[2]);
 }
 
+function sortWorkflowRunsByRegistration(runs: WorkflowRun[], previousOrder: WorkflowRun[] = []) {
+  const previousIndex = new Map(previousOrder.map((run, index) => [run.id, index]));
+  return [...runs].sort((a, b) => {
+    const timeDiff = workflowRunTimestamp(b.created_at) - workflowRunTimestamp(a.created_at);
+    if (timeDiff) return timeDiff;
+    const previousA = previousIndex.get(a.id);
+    const previousB = previousIndex.get(b.id);
+    if (previousA !== undefined && previousB !== undefined) return previousA - previousB;
+    return 0;
+  });
+}
+
+function workflowRunTimestamp(value: string | undefined | null) {
+  if (!value) return 0;
+  const normalized = normalizeBackendUtcDate(value);
+  const parsed = Date.parse(normalized);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function normalizeBackendUtcDate(value: string) {
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(value)) return value;
+  return `${value}Z`;
+}
+
 function workflowRunHeadline(run: WorkflowRun) {
+  if (run.status === "canceled") return "취소됨";
+  if (run.status === "failed") return "실패";
+  if (run.status === "completed_with_errors") return "일부 실패";
+  if (run.status === "needs_review") return "검토 필요";
+  if (run.status === "completed") return "작업 완료";
   if (run.status === "waiting" || run.progress_phase === "waiting") return "실행 대기";
   if (run.status === "paused" || run.progress_phase === "paused") return "일시중단";
   if (workflowRunCanResumeUpload(run) || run.progress_phase === "uploading") return "문서 업로드 중";
   if (run.progress_phase === "preprocessing") return "문서 전처리 중";
   if (!TERMINAL_RUN_STATUSES.includes(run.status) && run.progress < 1) return "작업 진행 중";
-  return "작업 완료";
+  return workflowRunStatusLabel(run);
 }
 
 function workflowRunStatusLabel(run: WorkflowRun) {
@@ -1914,15 +2151,30 @@ function workflowRunStatusLabel(run: WorkflowRun) {
 }
 
 function formatWorkflowRunDate(value: string | undefined | null) {
-  if (!value) return "실행 시간 없음";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "실행 시간 없음";
+  if (!value) return "시간 없음";
+  const date = new Date(normalizeBackendUtcDate(value));
+  if (Number.isNaN(date.getTime())) return "시간 없음";
   return date.toLocaleString("ko-KR", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+function workflowRunStartedAtLabel(run: WorkflowRun) {
+  if (run.started_at) return formatWorkflowRunDate(run.started_at);
+  if (run.status === "waiting" || run.progress_phase === "waiting") return "대기 중";
+  if (["uploading", "preprocessing", "queued"].includes(run.status) || ["uploading", "preprocessing"].includes(run.progress_phase ?? "")) return "준비 중";
+  return "기록 없음";
+}
+
+function workflowRunCompletedAtLabel(run: WorkflowRun) {
+  if (run.completed_at) return formatWorkflowRunDate(run.completed_at);
+  if (workflowRunIsProcessing(run)) return "진행 중";
+  if (workflowRunIsPaused(run)) return "일시중단";
+  if (run.status === "waiting" || run.progress_phase === "waiting") return "대기 중";
+  return "기록 없음";
 }
 
 function formatDurationMs(value: number | null | undefined) {
@@ -1995,13 +2247,44 @@ function startWorkflowResultResize(
   window.addEventListener("pointerup", onUp);
 }
 
+function startWorkflowRunSidebarResize(
+  event: PointerEvent<HTMLButtonElement>,
+  currentWidth: number,
+  setWidth: (value: number) => void
+) {
+  event.preventDefault();
+  const container = event.currentTarget.closest<HTMLElement>(".workflow-canvas-shell");
+  if (!container) return;
+  const pointerId = event.pointerId;
+  event.currentTarget.setPointerCapture(pointerId);
+  const startX = event.clientX;
+  const startWidth = currentWidth;
+
+  const update = (clientX: number) => {
+    const rect = container.getBoundingClientRect();
+    const availableWidth = Math.max(WORKFLOW_RUN_SIDEBAR_MIN_WIDTH, rect.width - 28);
+    const maxWidth = Math.min(WORKFLOW_RUN_SIDEBAR_MAX_WIDTH, availableWidth);
+    const next = clampWorkflowPaneWidth(startWidth + startX - clientX, WORKFLOW_RUN_SIDEBAR_MIN_WIDTH, maxWidth);
+    setWidth(next);
+    saveWorkflowResultPaneWidth(WORKFLOW_RUN_SIDEBAR_WIDTH_KEY, next);
+  };
+
+  const onMove = (moveEvent: globalThis.PointerEvent) => update(moveEvent.clientX);
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
 function confirmWorkflowRestart(run: WorkflowRun | null | undefined) {
   if (!run) return true;
   const inferredCount = run.items.filter((item) =>
     ["completed", "failed", "needs_review", "running", "paused"].includes(item.status) || item.inference_duration_ms !== null && item.inference_duration_ms !== undefined
   ).length;
   return window.confirm(
-    `현재 ${inferredCount.toLocaleString()} / ${run.total_count.toLocaleString()}개 문서에 추론 결과나 진행 기록이 있습니다.\n\n재시작하면 업로드된 원본은 재사용하고, 새 실행 기록을 만들어 처음부터 다시 추론합니다. 기존 실행 기록과 export는 HISTORY에 남습니다.\n\n계속할까요?`
+    `현재 ${inferredCount.toLocaleString()} / ${run.total_count.toLocaleString()}개 문서에 추론 결과나 진행 기록이 있습니다.\n\n계속하면 기존 추론은 중지하고, 업로드된 원본 문서는 그대로 재사용해 새 실행 기록을 만듭니다. 현재 캔버스의 워크플로우로 처음부터 다시 추론합니다.\n\n계속할까요?`
   );
 }
 

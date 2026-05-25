@@ -1,5 +1,7 @@
+import asyncio
 import base64
 from contextlib import contextmanager
+import functools
 import json
 import mimetypes
 import threading
@@ -115,6 +117,38 @@ def _invoke_vlm_with_limit(
     raise VlmRuntimeError("VLM_PROVIDER_REQUEST_FAILED", "VLM request failed after retries.")
 
 
+async def _invoke_vlm_with_limit_async(
+    system_prompt: str,
+    prompt: str,
+    image_inputs: list[dict[str, str]],
+    output_schema: dict[str, Any],
+    api_style: str,
+) -> dict[str, Any]:
+    max_attempts = max(1, get_settings().vlm_max_retries + 1)
+    for attempt in range(max_attempts):
+        semaphore = _vlm_request_semaphore()
+        await asyncio.to_thread(semaphore.acquire)
+        try:
+            return await _invoke_structured_llm_async(system_prompt, prompt, image_inputs, output_schema, api_style)
+        except VlmRuntimeError as exc:
+            if attempt >= max_attempts - 1 or not _is_retryable_vlm_error(exc):
+                raise
+            retry_delay = _vlm_retry_delay_seconds(attempt)
+        finally:
+            semaphore.release()
+        await asyncio.sleep(retry_delay)
+    raise VlmRuntimeError("VLM_PROVIDER_REQUEST_FAILED", "VLM request failed after retries.")
+
+
+async def run_sync_with_vlm_limit_async(func, *args, **kwargs) -> Any:
+    semaphore = _vlm_request_semaphore()
+    await asyncio.to_thread(semaphore.acquire)
+    try:
+        return await asyncio.to_thread(functools.partial(func, *args, **kwargs))
+    finally:
+        semaphore.release()
+
+
 def _is_retryable_vlm_error(exc: VlmRuntimeError) -> bool:
     if exc.code != "VLM_PROVIDER_REQUEST_FAILED":
         return False
@@ -164,6 +198,23 @@ def extract_with_vlm(
     prompt = _build_user_prompt(fields)
     inputs = image_inputs or _image_inputs_from_paths(image_paths or [])
     return _invoke_vlm_with_limit(SYSTEM_PROMPT, prompt, inputs, build_structured_output_schema(fields), api_style)
+
+
+async def extract_with_vlm_async(
+    fields: list[FieldDefinition],
+    image_paths: list[str] | None = None,
+    image_inputs: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_extraction(fields)
+
+    _ensure_vlm_credentials(settings)
+
+    prompt = _build_user_prompt(fields)
+    inputs = image_inputs or _image_inputs_from_paths(image_paths or [])
+    return await _invoke_vlm_with_limit_async(SYSTEM_PROMPT, prompt, inputs, build_structured_output_schema(fields), api_style)
 
 
 def recommend_schema_with_vlm(image_paths: list[str]) -> dict[str, Any]:
@@ -229,6 +280,27 @@ def classify_document_with_vlm(
     )
 
 
+async def classify_document_with_vlm_async(
+    classes: list[ClassCandidate],
+    allow_unknown: bool,
+    image_paths: list[str],
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_classification(classes, allow_unknown)
+
+    _ensure_vlm_credentials(settings)
+    prompt = _build_classification_prompt(classes, allow_unknown)
+    return await _invoke_vlm_with_limit_async(
+        DOCUMENT_CLASSIFIER_PROMPT,
+        prompt,
+        _image_inputs_from_paths(image_paths),
+        _classification_output_schema(classes, allow_unknown),
+        api_style,
+    )
+
+
 def check_required_fields_with_vlm(
     items: list[RequiredFieldItem],
     regions: list[SchemaRegion],
@@ -244,6 +316,29 @@ def check_required_fields_with_vlm(
     prompt = _build_required_field_prompt(items, regions)
     inputs = image_inputs or _image_inputs_from_paths(image_paths or [])
     return _invoke_vlm_with_limit(
+        REQUIRED_FIELD_CHECKER_PROMPT,
+        prompt,
+        inputs,
+        _required_field_output_schema(items),
+        api_style,
+    )
+
+
+async def check_required_fields_with_vlm_async(
+    items: list[RequiredFieldItem],
+    regions: list[SchemaRegion],
+    image_paths: list[str] | None = None,
+    image_inputs: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_required_field_check(items)
+
+    _ensure_vlm_credentials(settings)
+    prompt = _build_required_field_prompt(items, regions)
+    inputs = image_inputs or _image_inputs_from_paths(image_paths or [])
+    return await _invoke_vlm_with_limit_async(
         REQUIRED_FIELD_CHECKER_PROMPT,
         prompt,
         inputs,
@@ -274,6 +369,28 @@ def judge_extraction_with_vlm(
     )
 
 
+async def judge_extraction_with_vlm_async(
+    field: FieldDefinition,
+    initial_value: Any,
+    initial_evidence: str | None,
+    image_inputs: list[dict[str, str]],
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_extraction_judgement(field)
+
+    _ensure_vlm_credentials(settings)
+    prompt = _build_kie_judgement_prompt(field, initial_value, initial_evidence)
+    return await _invoke_vlm_with_limit_async(
+        SYSTEM_PROMPT,
+        prompt,
+        image_inputs,
+        _kie_judgement_output_schema(),
+        api_style,
+    )
+
+
 def correct_extraction_with_vlm(
     field: FieldDefinition,
     initial_value: Any,
@@ -289,6 +406,29 @@ def correct_extraction_with_vlm(
     _ensure_vlm_credentials(settings)
     prompt = _build_kie_correction_prompt(field, initial_value, initial_evidence, judgement_reason)
     return _invoke_vlm_with_limit(
+        SYSTEM_PROMPT,
+        prompt,
+        image_inputs,
+        _kie_correction_output_schema(field),
+        api_style,
+    )
+
+
+async def correct_extraction_with_vlm_async(
+    field: FieldDefinition,
+    initial_value: Any,
+    initial_evidence: str | None,
+    judgement_reason: str | None,
+    image_inputs: list[dict[str, str]],
+) -> dict[str, Any]:
+    settings = get_settings()
+    api_style = resolve_vlm_api_style(settings)
+    if api_style == "mock":
+        return _mock_extraction_correction(field, initial_value, initial_evidence)
+
+    _ensure_vlm_credentials(settings)
+    prompt = _build_kie_correction_prompt(field, initial_value, initial_evidence, judgement_reason)
+    return await _invoke_vlm_with_limit_async(
         SYSTEM_PROMPT,
         prompt,
         image_inputs,
@@ -365,6 +505,21 @@ def _invoke_structured_llm(
     return _invoke_openai_compatible(system_prompt, content, output_schema)
 
 
+async def _invoke_structured_llm_async(
+    system_prompt: str,
+    prompt: str,
+    image_inputs: list[dict[str, str]],
+    output_schema: dict[str, Any],
+    api_style: str,
+) -> dict[str, Any]:
+    if api_style == "google_genai":
+        return await _invoke_google_genai_async(system_prompt, prompt, image_inputs, output_schema)
+    if api_style != "openai_compatible":
+        raise VlmRuntimeError("VLM_API_STYLE_UNSUPPORTED", f"Unsupported VLM API style: {api_style}")
+    content = await asyncio.to_thread(_build_multimodal_content, prompt, image_inputs)
+    return await _invoke_openai_compatible_async(system_prompt, content, output_schema)
+
+
 def _invoke_openai_compatible(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any]) -> dict[str, Any]:
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_openai import ChatOpenAI
@@ -378,6 +533,35 @@ def _invoke_openai_compatible(system_prompt: str, content: list[dict[str, Any]],
 
     try:
         response = structured_llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=content)])
+    except VlmRuntimeError:
+        raise
+    except Exception as exc:
+        raise VlmRuntimeError(
+            "VLM_PROVIDER_REQUEST_FAILED",
+            f"OpenAI-compatible VLM request failed: {_sanitize_provider_error(exc)}",
+        ) from exc
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+    if isinstance(response, dict):
+        return response
+    if isinstance(response, str):
+        raise VlmRuntimeError("VLM_RESPONSE_STRING", "VLM returned a string instead of a structured object.")
+    raise VlmRuntimeError("VLM_RESPONSE_UNSUPPORTED", "VLM returned an unsupported structured response.")
+
+
+async def _invoke_openai_compatible_async(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any]) -> dict[str, Any]:
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+
+    llm = ChatOpenAI(**_build_llm_kwargs())
+    structured_llm = llm.with_structured_output(
+        output_schema,
+        method="json_schema",
+        strict=True,
+    )
+
+    try:
+        response = await structured_llm.ainvoke([SystemMessage(content=system_prompt), HumanMessage(content=content)])
     except VlmRuntimeError:
         raise
     except Exception as exc:
@@ -434,6 +618,57 @@ def _invoke_google_genai(
             "VLM_PROVIDER_REQUEST_FAILED",
             f"Google GenAI VLM request failed: {_sanitize_provider_error(exc)}",
         ) from exc
+    return _coerce_structured_response(response)
+
+
+async def _invoke_google_genai_async(
+    system_prompt: str,
+    prompt: str,
+    image_inputs: list[dict[str, str]],
+    output_schema: dict[str, Any],
+) -> dict[str, Any]:
+    settings = get_settings()
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise VlmRuntimeError(
+            "VLM_GOOGLE_GENAI_MISSING",
+            "Gemini native mode requires google-genai.",
+            "Run: uv pip install -e 'backend[dev]'",
+        ) from exc
+
+    contents: list[Any] = [prompt]
+    for image_input in image_inputs:
+        label = image_input.get("label")
+        if label:
+            contents.append(label)
+        image_ref = image_input["path"]
+        contents.append(types.Part.from_bytes(data=read_storage_bytes(image_ref), mime_type=_mime_type_for_ref(image_ref)))
+
+    config = _build_google_generation_config(system_prompt, output_schema)
+    client = genai.Client(api_key=settings.resolved_vlm_api_key)
+    async_client = client.aio
+    try:
+        response = await async_client.models.generate_content(
+            model=settings.resolved_vlm_model_name,
+            contents=contents,
+            config=config,
+        )
+    except VlmRuntimeError:
+        raise
+    except Exception as exc:
+        raise VlmRuntimeError(
+            "VLM_PROVIDER_REQUEST_FAILED",
+            f"Google GenAI VLM request failed: {_sanitize_provider_error(exc)}",
+        ) from exc
+    finally:
+        close_async = getattr(async_client, "aclose", None)
+        if callable(close_async):
+            await close_async()
+        close_sync = getattr(client, "close", None)
+        if callable(close_sync):
+            close_sync()
     return _coerce_structured_response(response)
 
 

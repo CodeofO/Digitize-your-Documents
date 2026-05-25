@@ -62,7 +62,8 @@ DEFAULT_ENV_VALUES = {
     "VLM_MAX_COMPLETION_TOKENS": "",
     "VLM_TOP_P": "",
     "VLM_SERVICE_TIER": "",
-    "VLM_MAX_CONCURRENT_REQUESTS": "8",
+    "WORKFLOW_MAX_WORKERS": "16",
+    "VLM_MAX_CONCURRENT_REQUESTS": "128",
     "KIE_FIELD_GROUP_SIZE": "2",
     "LIBREOFFICE_PATH": DEFAULT_LIBREOFFICE_PATH,
 }
@@ -121,7 +122,8 @@ class Settings(BaseSettings):
     vlm_max_completion_tokens: str | None = None
     vlm_top_p: str | None = None
     vlm_service_tier: str | None = None
-    vlm_max_concurrent_requests: int = 8
+    workflow_max_workers: int = 16
+    vlm_max_concurrent_requests: int = 128
     kie_field_group_size: int = 2
 
     openai_api_key: str | None = None

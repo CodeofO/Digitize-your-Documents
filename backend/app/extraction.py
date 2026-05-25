@@ -1,5 +1,5 @@
+import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -9,13 +9,28 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 from app.audit import log_audit_event
+from app.concurrency import run_workflow_blocking
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Document, ExtractionJob, ExtractionResult, Schema
 from app.schemas import FieldDefinition, FieldRegion, SchemaRegion
 from app.storage import materialize_storage_ref, scratch_dir_for_ref
 from app.validation import validate_extracted_values
-from app.vlm import correct_extraction_with_vlm, extract_with_vlm, format_vlm_exception, judge_extraction_with_vlm
+from app.vlm import (
+    correct_extraction_with_vlm,
+    correct_extraction_with_vlm_async,
+    extract_with_vlm,
+    extract_with_vlm_async,
+    format_vlm_exception,
+    judge_extraction_with_vlm,
+    judge_extraction_with_vlm_async,
+    run_sync_with_vlm_limit_async,
+)
+
+
+_ORIGINAL_EXTRACT_WITH_VLM = extract_with_vlm
+_ORIGINAL_JUDGE_EXTRACTION_WITH_VLM = judge_extraction_with_vlm
+_ORIGINAL_CORRECT_EXTRACTION_WITH_VLM = correct_extraction_with_vlm
 
 
 TERMINAL_JOB_STATUSES = {"completed", "needs_review", "failed", "canceled"}
@@ -45,44 +60,51 @@ class ExtractionContext:
 
 
 def run_extraction_job(job_id: str) -> None:
+    asyncio.run(run_extraction_job_async(job_id))
+
+
+_ORIGINAL_RUN_EXTRACTION_JOB = run_extraction_job
+
+
+async def run_extraction_job_async(job_id: str) -> None:
     try:
-        context = _prepare_extraction_job(job_id)
+        context = await run_workflow_blocking(_prepare_extraction_job, job_id)
         if not context:
             return
-        raw_values = _extract_grouped_values(context.document, context.fields, context.regions, job_id)
+        raw_values = await _extract_grouped_values_async(context.document, context.fields, context.regions, job_id)
         values, warnings = validate_extracted_values(raw_values, context.fields)
-        values, warnings = _apply_ai_judgement(context.document, context.fields, context.regions, job_id, values, warnings)
-        _save_extraction_result(job_id, context, raw_values, values, warnings)
+        values, warnings = await _apply_ai_judgement_async(context.document, context.fields, context.regions, job_id, values, warnings)
+        await run_workflow_blocking(_save_extraction_result, job_id, context, raw_values, values, warnings)
     except Exception as exc:
-        _mark_job_failed(job_id, format_vlm_exception(exc))
+        await run_workflow_blocking(_mark_job_failed, job_id, format_vlm_exception(exc))
 
 
 def run_batch_jobs(batch_id: str, job_ids: list[str]) -> None:
-    if not job_ids:
-        _finalize_batch(batch_id)
-        return
-    max_workers = max(1, min(get_settings().vlm_max_concurrent_requests, len(job_ids)))
-    submitted_job_ids: set[str] = set()
-    try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for job_id in job_ids:
-                future = executor.submit(run_extraction_job, job_id)
-                futures[future] = job_id
-                submitted_job_ids.add(job_id)
+    asyncio.run(run_batch_jobs_async(batch_id, job_ids))
 
-            for future in as_completed(futures):
-                job_id = futures[future]
-                try:
-                    future.result()
-                except Exception as exc:
-                    _mark_job_failed(job_id, f"Batch worker failed: {exc}")
+
+async def run_batch_jobs_async(batch_id: str, job_ids: list[str]) -> None:
+    if not job_ids:
+        await run_workflow_blocking(_finalize_batch, batch_id)
+        return
+    try:
+        results = await asyncio.gather(*(_run_batch_extraction_job_async(job_id) for job_id in job_ids), return_exceptions=True)
+        for job_id, result in zip(job_ids, results, strict=True):
+            if isinstance(result, Exception):
+                await run_workflow_blocking(_mark_job_failed, job_id, f"Batch worker failed: {result}")
     except Exception as exc:
-        for job_id in set(job_ids) - submitted_job_ids:
-            _mark_job_failed(job_id, f"Batch worker did not start job: {exc}")
+        for job_id in job_ids:
+            await run_workflow_blocking(_mark_job_failed, job_id, f"Batch worker did not start job: {exc}")
         raise
     finally:
-        _finalize_batch(batch_id)
+        await run_workflow_blocking(_finalize_batch, batch_id)
+
+
+async def _run_batch_extraction_job_async(job_id: str) -> None:
+    if run_extraction_job is not _ORIGINAL_RUN_EXTRACTION_JOB:
+        await run_workflow_blocking(run_extraction_job, job_id)
+        return
+    await run_extraction_job_async(job_id)
 
 
 def _prepare_extraction_job(job_id: str) -> ExtractionContext | None:
@@ -261,6 +283,99 @@ def _apply_ai_judgement(
     return next_values, next_warnings
 
 
+async def _apply_ai_judgement_async(
+    document: DocumentSnapshot,
+    fields: list[FieldDefinition],
+    regions: list[SchemaRegion],
+    job_id: str,
+    values: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    review_fields = [field for field in fields if field.judgement_enabled]
+    if not review_fields:
+        return values, warnings
+
+    inputs_by_field = await run_workflow_blocking(_build_judgement_inputs, document, review_fields, regions, job_id)
+    results = await asyncio.gather(
+        *[
+            _apply_single_field_judgement_async(field, dict(values.get(field.key_name, {})), inputs_by_field.get(field.key_name))
+            for field in review_fields
+        ],
+    )
+    next_values = dict(values)
+    next_warnings = list(warnings)
+    for field_name, entry, field_warnings, remove_existing_warnings in results:
+        next_values[field_name] = entry
+        if remove_existing_warnings:
+            next_warnings = [warning for warning in next_warnings if not warning.startswith(f"{field_name}:")]
+        next_warnings.extend(field_warnings)
+    return next_values, next_warnings
+
+
+async def _apply_single_field_judgement_async(
+    field: FieldDefinition,
+    current: dict[str, Any],
+    image_inputs: list[dict[str, str]] | None,
+) -> tuple[str, dict[str, Any], list[str], bool]:
+    local_warnings: list[str] = []
+    initial_value = current.get("value")
+    initial_evidence = current.get("evidence") if isinstance(current.get("evidence"), str) else None
+    ai_review: dict[str, Any] = {
+        "enabled": True,
+        "mode": "region" if field.region_id or field.region is not None else "full_page",
+        "judgement_status": "failed",
+        "judgement_reason": None,
+        "judgement_confidence": None,
+        "initial_value": initial_value,
+        "initial_evidence": initial_evidence,
+        "corrected": False,
+        "correction_reason": None,
+    }
+
+    if not image_inputs:
+        _append_field_warning(current, local_warnings, field.key_name, "ai_review_failed")
+        ai_review["judgement_reason"] = "AI review images could not be prepared."
+        current["ai_review"] = ai_review
+        return field.key_name, current, local_warnings, False
+
+    try:
+        judgement = await _call_judge_extraction_with_vlm_async(field, initial_value, initial_evidence, image_inputs)
+        status = judgement.get("judgement_status")
+        if status not in {"correct", "needs_correction"}:
+            raise RuntimeError(f"Unsupported judgement_status: {status}")
+        ai_review["judgement_status"] = status
+        ai_review["judgement_reason"] = str(judgement.get("reason") or "")
+        confidence = judgement.get("confidence")
+        ai_review["judgement_confidence"] = float(confidence) if isinstance(confidence, (int, float)) else None
+        if status == "needs_correction":
+            correction = await _call_correct_extraction_with_vlm_async(field, initial_value, initial_evidence, ai_review["judgement_reason"], image_inputs)
+            corrected_values, correction_warnings = validate_extracted_values({field.key_name: correction}, [field])
+            corrected_entry = dict(corrected_values[field.key_name])
+            rejection_warning = _correction_rejection_warning(initial_value, corrected_entry)
+            if rejection_warning:
+                ai_review["correction_reason"] = _correction_rejection_reason(rejection_warning, correction)
+                _append_field_warning(current, local_warnings, field.key_name, rejection_warning)
+                current["ai_review"] = ai_review
+                return field.key_name, current, local_warnings, False
+            corrected_entry["ai_review"] = {
+                **ai_review,
+                "corrected": True,
+                "correction_reason": str(correction.get("correction_reason") or ""),
+            }
+            return field.key_name, corrected_entry, correction_warnings, True
+    except Exception as exc:
+        warning = "ai_correction_failed" if ai_review["judgement_status"] == "needs_correction" else "ai_review_failed"
+        _append_field_warning(current, local_warnings, field.key_name, warning)
+        if warning == "ai_correction_failed":
+            ai_review["correction_reason"] = str(exc)
+        else:
+            ai_review["judgement_reason"] = str(exc)
+        ai_review["judgement_status"] = "failed"
+
+    current["ai_review"] = ai_review
+    return field.key_name, current, local_warnings, False
+
+
 def _correction_rejection_warning(initial_value: Any, corrected_entry: dict[str, Any]) -> str | None:
     corrected_value = corrected_entry.get("value")
     confidence = corrected_entry.get("confidence")
@@ -406,6 +521,13 @@ def _finalize_batch(batch_id: str) -> None:
             db.commit()
             return
 
+        active = [job for job in jobs if job.status in {"queued", "running", "waiting_for_document"}]
+        if active:
+            batch.status = "running"
+            batch.completed_at = None
+            db.commit()
+            return
+
         unfinished = [job for job in jobs if job.status not in TERMINAL_JOB_STATUSES]
         for job in unfinished:
             job.status = "failed"
@@ -451,29 +573,69 @@ def _extract_grouped_values(
     regions: list[SchemaRegion],
     job_id: str,
 ) -> dict[str, Any]:
-    requests = _build_extraction_requests(document, fields, regions, job_id)
+    return asyncio.run(_extract_grouped_values_async(document, fields, regions, job_id))
+
+
+async def _extract_grouped_values_async(
+    document: DocumentSnapshot,
+    fields: list[FieldDefinition],
+    regions: list[SchemaRegion],
+    job_id: str,
+) -> dict[str, Any]:
+    requests = await run_workflow_blocking(_build_extraction_requests, document, fields, regions, job_id)
     if not requests:
         return {}
     if len(requests) == 1:
-        return extract_with_vlm(requests[0]["fields"], image_inputs=requests[0]["image_inputs"])
+        return await _call_extract_with_vlm_async(requests[0]["fields"], image_inputs=requests[0]["image_inputs"])
 
+    results = await asyncio.gather(
+        *[
+            _call_extract_with_vlm_async(request["fields"], image_inputs=request["image_inputs"])
+            for request in requests
+        ],
+    )
     merged: dict[str, Any] = {}
-    settings = get_settings()
-    max_workers = max(1, min(settings.vlm_max_concurrent_requests, len(requests)))
-    results: list[dict[str, Any] | None] = [None] * len(requests)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(extract_with_vlm, request["fields"], image_inputs=request["image_inputs"]): index
-            for index, request in enumerate(requests)
-        }
-        for future in as_completed(futures):
-            results[futures[future]] = future.result()
     for group_values in results:
         if not group_values:
             continue
         for key, value in group_values.items():
             merged[key] = value
     return merged
+
+
+async def _call_extract_with_vlm_async(
+    fields: list[FieldDefinition],
+    image_paths: list[str] | None = None,
+    image_inputs: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    if extract_with_vlm is not _ORIGINAL_EXTRACT_WITH_VLM:
+        if image_paths is None:
+            return await run_sync_with_vlm_limit_async(extract_with_vlm, fields, image_inputs=image_inputs)
+        return await run_sync_with_vlm_limit_async(extract_with_vlm, fields, image_paths=image_paths, image_inputs=image_inputs)
+    return await extract_with_vlm_async(fields, image_paths=image_paths, image_inputs=image_inputs)
+
+
+async def _call_judge_extraction_with_vlm_async(
+    field: FieldDefinition,
+    initial_value: Any,
+    initial_evidence: str | None,
+    image_inputs: list[dict[str, str]],
+) -> dict[str, Any]:
+    if judge_extraction_with_vlm is not _ORIGINAL_JUDGE_EXTRACTION_WITH_VLM:
+        return await run_sync_with_vlm_limit_async(judge_extraction_with_vlm, field, initial_value, initial_evidence, image_inputs)
+    return await judge_extraction_with_vlm_async(field, initial_value, initial_evidence, image_inputs)
+
+
+async def _call_correct_extraction_with_vlm_async(
+    field: FieldDefinition,
+    initial_value: Any,
+    initial_evidence: str | None,
+    judgement_reason: str | None,
+    image_inputs: list[dict[str, str]],
+) -> dict[str, Any]:
+    if correct_extraction_with_vlm is not _ORIGINAL_CORRECT_EXTRACTION_WITH_VLM:
+        return await run_sync_with_vlm_limit_async(correct_extraction_with_vlm, field, initial_value, initial_evidence, judgement_reason, image_inputs)
+    return await correct_extraction_with_vlm_async(field, initial_value, initial_evidence, judgement_reason, image_inputs)
 
 
 def _build_extraction_requests(

@@ -2,6 +2,8 @@ import csv
 import errno
 import io
 import json
+import os
+import queue
 import re
 import shutil
 import threading
@@ -57,6 +59,7 @@ from app.models import (
     BatchItem,
     ClassificationBatch,
     ClassificationBatchItem,
+    DocumentConversionJob,
     ClassificationJob,
     ClassificationResult,
     Document,
@@ -86,12 +89,17 @@ from app.schemas import (
     ClassificationBatchInitRequest,
     ClassificationBatchItemRead,
     ClassificationBatchRead,
+    ClassificationBatchFromDocumentsRequest,
     ClassificationJobCreate,
     ClassificationJobRead,
     ClassificationResultPatch,
     ClassificationResultRead,
     DocumentPageRead,
+    DocumentBatchUploadRead,
     DocumentRead,
+    DocumentSelectionRequest,
+    DocumentTreeRead,
+    DocumentTreeFolderRead,
     DocumentClassifierCreate,
     DocumentClassifierRead,
     DocumentClassifierUpdate,
@@ -103,9 +111,12 @@ from app.schemas import (
     ExtractionJobRead,
     ExtractionResultPatch,
     RawExtractionRead,
+    RawExtractionFromDocumentRequest,
+    BatchFromDocumentsRequest,
     RequiredFieldCheckBatchInitRequest,
     RequiredFieldCheckBatchItemRead,
     RequiredFieldCheckBatchRead,
+    RequiredFieldCheckBatchFromDocumentsRequest,
     RequiredFieldCheckJobCreate,
     RequiredFieldCheckJobRead,
     RequiredFieldCheckResultPatch,
@@ -131,6 +142,7 @@ from app.schemas import (
     WorkflowDefinitionUpdate,
     WorkflowRunInitRequest,
     WorkflowRunRead,
+    WorkflowRunFromDocumentsRequest,
     WorkflowRunRestartRequest,
 )
 from app.vlm import (
@@ -155,8 +167,11 @@ from app.storage import delete_local_tree, delete_storage_ref, is_s3_ref, materi
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_db()
+    stop_conversion = _start_document_conversion_workers()
     stop_cleanup = _start_retention_cleanup_worker()
     yield
+    if stop_conversion:
+        stop_conversion.set()
     if stop_cleanup:
         stop_cleanup.set()
 
@@ -165,6 +180,12 @@ app = FastAPI(title="Document Automation Workspace API", version="0.1.0", lifesp
 
 WORKFLOW_RUN_TERMINAL_STATUSES = {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}
 WORKFLOW_ENQUEUE_BLOCKED_STATUSES = {"waiting", "failed", "canceled"}
+DOCUMENT_READY_STATUSES = {"ready"}
+DOCUMENT_CONVERTING_STATUSES = {"queued", "preprocessing"}
+DOCUMENT_CONVERSION_TERMINAL_STATUSES = {"completed", "failed", "canceled"}
+_document_conversion_queue: queue.Queue[str] = queue.Queue()
+_document_conversion_enqueued: set[str] = set()
+_document_conversion_queue_lock = threading.Lock()
 
 settings = get_settings()
 app.add_middleware(
@@ -239,6 +260,7 @@ def system_status() -> SystemStatusRead:
         upload_max_batch_files=settings.upload_max_batch_files,
         upload_chunk_files=settings.upload_chunk_files,
         preprocess_max_workers=settings.preprocess_max_workers,
+        workflow_max_workers=settings.workflow_max_workers,
         vlm_max_concurrent_requests=settings.vlm_max_concurrent_requests,
         document_page_max_long_edge=settings.document_page_max_long_edge,
         document_page_jpeg_quality=settings.document_page_jpeg_quality,
@@ -257,6 +279,7 @@ def get_vlm_settings() -> VlmSettingsRead:
         max_completion_tokens=settings.vlm_max_completion_tokens,
         top_p=settings.vlm_top_p,
         service_tier=settings.vlm_service_tier,
+        workflow_max_workers=settings.workflow_max_workers,
         vlm_max_concurrent_requests=settings.vlm_max_concurrent_requests,
         kie_field_group_size=settings.kie_field_group_size,
         has_api_key=bool(settings.resolved_vlm_api_key),
@@ -284,6 +307,7 @@ def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
         "VLM_MAX_COMPLETION_TOKENS": (payload.max_completion_tokens or "").strip(),
         "VLM_TOP_P": (payload.top_p or "").strip(),
         "VLM_SERVICE_TIER": (payload.service_tier or "").strip(),
+        "WORKFLOW_MAX_WORKERS": str(payload.workflow_max_workers or get_settings().workflow_max_workers),
         "VLM_MAX_CONCURRENT_REQUESTS": str(payload.vlm_max_concurrent_requests or get_settings().vlm_max_concurrent_requests),
         "KIE_FIELD_GROUP_SIZE": str(payload.kie_field_group_size or get_settings().kie_field_group_size),
     }
@@ -291,7 +315,9 @@ def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
     if api_key:
         updates["VLM_API_KEY"] = api_key
 
-    upsert_root_env(updates, include_defaults=True, remove_keys={"BATCH_MAX_WORKERS", "WORKFLOW_MAX_WORKERS"})
+    upsert_root_env(updates, include_defaults=True, remove_keys={"BATCH_MAX_WORKERS"})
+    for key, value in updates.items():
+        os.environ[key] = value
     get_settings.cache_clear()
     return get_vlm_settings()
 
@@ -333,6 +359,70 @@ def upload_raw_extraction(
             raw.pdf_path = persist_artifact(pdf_path, f"raw/{raw.id}/preview.pdf", "application/pdf")
             raw.html_path = persist_artifact(html_path, f"raw/{raw.id}/content.html", "text/html; charset=utf-8")
         else:
+            raw.pdf_path = str(pdf_path)
+            raw.html_path = str(html_path)
+        raw.warnings = json.dumps(warnings, ensure_ascii=False)
+        raw.status = "completed"
+        raw.error_message = None
+    except RawExtractionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raw.status = "failed"
+        raw.error_message = str(exc)
+    db.commit()
+    db.refresh(raw)
+    return _raw_extraction_read(raw)
+
+
+@app.post("/api/raw-extractions/from-document", response_model=RawExtractionRead)
+def create_raw_extraction_from_document(
+    payload: RawExtractionFromDocumentRequest,
+    db: Session = Depends(get_db),
+) -> RawExtractionRead:
+    document = db.get(Document, payload.document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if document.status == "deleted":
+        raise HTTPException(status_code=410, detail="Original document was deleted")
+    if document.status != "ready":
+        raise HTTPException(status_code=409, detail={"message": "Document is not ready yet", "status": document.status})
+    try:
+        source_format = validate_raw_upload(document.filename)[1:]
+    except RawExtractionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    raw = RawExtraction(
+        filename=document.filename,
+        source_format=source_format,
+        size_bytes=document.size_bytes,
+        storage_path=document.storage_path,
+        status="processing",
+    )
+    db.add(raw)
+    db.flush()
+
+    try:
+        source_path = materialize_storage_ref(document.storage_path)
+        if not source_path.exists():
+            raise RawExtractionError("Original document file is missing", status_code=404)
+        work_dir = get_settings().resolved_raw_storage_dir / raw.id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        suffix = source_path.suffix or f".{source_format}"
+        working_original = work_dir / f"original{suffix}"
+        if source_path != working_original:
+            shutil.copy2(source_path, working_original)
+        pdf_path, html_path, warnings = create_raw_outputs(
+            working_original,
+            source_format,
+            RawExtractionOptions(include_images=payload.include_images, include_formulas=payload.include_formulas),
+        )
+        if get_settings().storage_backend.strip().lower() == "s3":
+            raw.storage_path = persist_artifact(working_original, f"raw/{raw.id}/original.{source_format}")
+            raw.pdf_path = persist_artifact(pdf_path, f"raw/{raw.id}/preview.pdf", "application/pdf")
+            raw.html_path = persist_artifact(html_path, f"raw/{raw.id}/content.html", "text/html; charset=utf-8")
+        else:
+            raw.storage_path = str(working_original)
             raw.pdf_path = str(pdf_path)
             raw.html_path = str(html_path)
         raw.warnings = json.dumps(warnings, ensure_ascii=False)
@@ -395,26 +485,128 @@ def get_raw_extraction(raw_id: str, db: Session = Depends(get_db)) -> RawExtract
 @app.post("/api/documents", response_model=DocumentRead)
 def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)) -> DocumentRead:
     document = _create_document_from_upload(file, db)
+    if not document.library_path:
+        document.library_path = document.filename
     log_audit_event(
         db,
         entity_type="document",
         entity_id=document.id,
-        action="uploaded",
-        message=f"Uploaded {document.filename}",
-        metadata={"filename": document.filename, "page_count": document.page_count},
+        action="upload_processed",
+        message=f"Processed {document.filename} in the document library",
+        metadata={"filename": document.filename, "library_path": document.library_path},
     )
     db.commit()
     db.refresh(document)
     return _document_read(document)
 
 
+@app.post("/api/library/uploads", response_model=DocumentBatchUploadRead)
+async def upload_library_documents(request: Request, db: Session = Depends(get_db)) -> DocumentBatchUploadRead:
+    form, files = await _read_batch_upload_form(request)
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+    _validate_upload_file_count(files)
+    library_paths = _upload_library_paths(form, files)
+    documents: list[Document] = []
+    conversion_job_ids: list[str] = []
+    try:
+        for index, file in enumerate(files):
+            document, conversion_job_id = _create_queued_library_document(file, db, library_path=library_paths[index])
+            documents.append(document)
+            conversion_job_ids.append(conversion_job_id)
+            log_audit_event(
+                db,
+                entity_type="document",
+                entity_id=document.id,
+                action="upload_queued",
+                message=f"Queued {document.filename} for document conversion",
+                metadata={"filename": document.filename, "library_path": document.library_path, "conversion_job_id": conversion_job_id},
+            )
+        db.commit()
+    except DocumentProcessingError as exc:
+        db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        for file in files:
+            await file.close()
+    for conversion_job_id in conversion_job_ids:
+        _enqueue_document_conversion_job(conversion_job_id)
+    for document in documents:
+        db.refresh(document)
+    return DocumentBatchUploadRead(documents=[_document_read(document) for document in documents])
+
+
 @app.get("/api/documents", response_model=list[DocumentRead])
 def list_documents(
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    q: str | None = Query(default=None),
+    library_path: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    include_deleted: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> list[DocumentRead]:
-    documents = db.query(Document).order_by(Document.created_at.desc()).limit(limit).all()
+    query = db.query(Document)
+    if not include_deleted:
+        query = query.filter(Document.status != "deleted")
+    if status:
+        query = query.filter(Document.status == status)
+    if q:
+        pattern = f"%{q.strip()}%"
+        query = query.filter((Document.filename.ilike(pattern)) | (Document.library_path.ilike(pattern)))
+    if library_path:
+        normalized_path = _normalize_library_path(library_path)
+        if normalized_path:
+            query = query.filter(Document.library_path.ilike(f"{normalized_path}/%"))
+        else:
+            query = query.filter((Document.library_path.is_(None)) | (Document.library_path == "") | (~Document.library_path.contains("/")))
+    documents = query.order_by(Document.created_at.desc(), Document.id.desc()).offset(offset).limit(limit).all()
     return [_document_read(document) for document in documents]
+
+
+@app.get("/api/library/tree", response_model=DocumentTreeRead)
+def get_document_library_tree(include_deleted: bool = Query(default=False), db: Session = Depends(get_db)) -> DocumentTreeRead:
+    query = db.query(Document)
+    if not include_deleted:
+        query = query.filter(Document.status != "deleted")
+    documents = query.all()
+    folders: dict[str, dict[str, Any]] = {}
+
+    def ensure_folder(path: str) -> dict[str, Any]:
+        normalized = _normalize_library_path(path)
+        if normalized not in folders:
+            parent = normalized.rsplit("/", 1)[0] if "/" in normalized else None
+            folders[normalized] = {
+                "path": normalized,
+                "name": normalized.rsplit("/", 1)[-1] if normalized else "문서 보관함",
+                "parent": parent,
+                "total_count": 0,
+                "ready_count": 0,
+                "converting_count": 0,
+                "failed_count": 0,
+                "deleted_count": 0,
+            }
+            if parent is not None:
+                ensure_folder(parent)
+        return folders[normalized]
+
+    ensure_folder("")
+    for document in documents:
+        folder_path = _library_folder_path(document.library_path)
+        folder = ensure_folder(folder_path)
+        folder["total_count"] += 1
+        if document.status == "ready":
+            folder["ready_count"] += 1
+        elif document.status in DOCUMENT_CONVERTING_STATUSES:
+            folder["converting_count"] += 1
+        elif document.status == "deleted":
+            folder["deleted_count"] += 1
+        elif document.status == "failed":
+            folder["failed_count"] += 1
+    return DocumentTreeRead(folders=[DocumentTreeFolderRead(**folders[path]) for path in sorted(folders)])
 
 
 @app.get("/api/documents/{document_id}", response_model=DocumentRead)
@@ -422,12 +614,42 @@ def get_document(document_id: str, db: Session = Depends(get_db)) -> DocumentRea
     document = db.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    _repair_image_document_if_needed(document, db)
+    if document.status == "ready":
+        _repair_image_document_if_needed(document, db)
+    return _document_read(document)
+
+
+@app.delete("/api/documents/{document_id}", response_model=DocumentRead)
+def delete_document_from_library(document_id: str, db: Session = Depends(get_db)) -> DocumentRead:
+    document = db.get(Document, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if document.status != "deleted":
+        _delete_document_storage(document)
+        for page in list(document.pages):
+            db.delete(page)
+        document.page_count = 0
+        document.status = "deleted"
+        document.error_message = "Original document was deleted from the document library"
+        document.deleted_at = datetime.utcnow()
+        log_audit_event(
+            db,
+            entity_type="document",
+            entity_id=document.id,
+            action="deleted",
+            message="Deleted original document payload; historical results were kept",
+            metadata={"filename": document.filename, "library_path": document.library_path},
+        )
+        db.commit()
+        db.refresh(document)
     return _document_read(document)
 
 
 @app.get("/api/documents/{document_id}/pages/{page_number}/image")
 def get_document_page_image(document_id: str, page_number: int, db: Session = Depends(get_db)) -> FileResponse:
+    document = db.get(Document, document_id)
+    if document and document.status == "deleted":
+        raise HTTPException(status_code=410, detail="Original document was deleted")
     page = (
         db.query(DocumentPage)
         .filter(DocumentPage.document_id == document_id, DocumentPage.page_number == page_number)
@@ -435,8 +657,7 @@ def get_document_page_image(document_id: str, page_number: int, db: Session = De
     )
     if not page:
         raise HTTPException(status_code=404, detail="Document page not found")
-    document = db.get(Document, document_id)
-    if document:
+    if document and document.status == "ready":
         _repair_image_document_if_needed(document, db)
         db.refresh(page)
     path = materialize_storage_ref(page.image_path)
@@ -452,6 +673,9 @@ def get_document_page_thumbnail(
     width: int = Query(default=96, ge=48, le=512),
     db: Session = Depends(get_db),
 ) -> FileResponse:
+    document = db.get(Document, document_id)
+    if document and document.status == "deleted":
+        raise HTTPException(status_code=410, detail="Original document was deleted")
     page = (
         db.query(DocumentPage)
         .filter(DocumentPage.document_id == document_id, DocumentPage.page_number == page_number)
@@ -459,8 +683,7 @@ def get_document_page_thumbnail(
     )
     if not page:
         raise HTTPException(status_code=404, detail="Document page not found")
-    document = db.get(Document, document_id)
-    if document:
+    if document and document.status == "ready":
         _repair_image_document_if_needed(document, db)
         db.refresh(page)
     source_path = materialize_storage_ref(page.image_path)
@@ -865,8 +1088,12 @@ def create_classification_job(
         raise HTTPException(status_code=404, detail="Document not found")
     if not classifier or classifier.archived:
         raise HTTPException(status_code=404, detail="Document classifier not found")
-    _repair_image_document_if_needed(document, db)
-    job = ClassificationJob(document_id=document.id, classifier_id=classifier.id, status="queued")
+    status = _execution_job_status_for_document(document)
+    if status == "blocked":
+        _raise_document_not_executable(document)
+    if document.status == "ready":
+        _repair_image_document_if_needed(document, db)
+    job = ClassificationJob(document_id=document.id, classifier_id=classifier.id, status=status)
     db.add(job)
     db.flush()
     log_audit_event(
@@ -880,8 +1107,9 @@ def create_classification_job(
     db.commit()
     db.refresh(job)
     response = _classification_job_read(job)
-    db.close()
-    background_tasks.add_task(run_classification_job, job.id)
+    if status == "queued":
+        db.close()
+        background_tasks.add_task(run_classification_job, job.id)
     return response
 
 
@@ -1086,8 +1314,12 @@ def create_required_field_check_job(
         raise HTTPException(status_code=404, detail="Document not found")
     if not checklist or checklist.archived:
         raise HTTPException(status_code=404, detail="Required field checklist not found")
-    _repair_image_document_if_needed(document, db)
-    job = RequiredFieldCheckJob(document_id=document.id, checklist_id=checklist.id, status="queued")
+    status = _execution_job_status_for_document(document)
+    if status == "blocked":
+        _raise_document_not_executable(document)
+    if document.status == "ready":
+        _repair_image_document_if_needed(document, db)
+    job = RequiredFieldCheckJob(document_id=document.id, checklist_id=checklist.id, status=status)
     db.add(job)
     db.flush()
     log_audit_event(
@@ -1101,8 +1333,9 @@ def create_required_field_check_job(
     db.commit()
     db.refresh(job)
     response = _required_field_job_read(job)
-    db.close()
-    background_tasks.add_task(run_required_field_check_job, job.id)
+    if status == "queued":
+        db.close()
+        background_tasks.add_task(run_required_field_check_job, job.id)
     return response
 
 
@@ -1144,13 +1377,17 @@ def create_extraction_job(
         raise HTTPException(status_code=404, detail="Document not found")
     if not schema:
         raise HTTPException(status_code=404, detail="Schema not found")
-    _repair_image_document_if_needed(document, db)
+    status = _execution_job_status_for_document(document)
+    if status == "blocked":
+        _raise_document_not_executable(document)
+    if document.status == "ready":
+        _repair_image_document_if_needed(document, db)
 
     job = ExtractionJob(
         document_id=document.id,
         schema_id=schema.id,
         schema_version=1,
-        status="queued",
+        status=status,
     )
     db.add(job)
     db.flush()
@@ -1165,8 +1402,9 @@ def create_extraction_job(
     db.commit()
     db.refresh(job)
     response = _job_read(job)
-    db.close()
-    background_tasks.add_task(run_extraction_job, job.id)
+    if status == "queued":
+        db.close()
+        background_tasks.add_task(run_extraction_job, job.id)
     return response
 
 
@@ -1179,7 +1417,11 @@ def create_draft_extraction_job(
     document = db.get(Document, payload.document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    _repair_image_document_if_needed(document, db)
+    status = _execution_job_status_for_document(document)
+    if status == "blocked":
+        _raise_document_not_executable(document)
+    if document.status == "ready":
+        _repair_image_document_if_needed(document, db)
 
     draft_schema = payload.schema_definition
     schema_data = draft_schema.model_dump()
@@ -1206,7 +1448,7 @@ def create_draft_extraction_job(
         document_id=document.id,
         schema_id=schema.id,
         schema_version=1,
-        status="queued",
+        status=status,
     )
     db.add(job)
     db.flush()
@@ -1221,8 +1463,9 @@ def create_draft_extraction_job(
     db.commit()
     db.refresh(job)
     response = _job_read(job)
-    db.close()
-    background_tasks.add_task(run_extraction_job, job.id)
+    if status == "queued":
+        db.close()
+        background_tasks.add_task(run_extraction_job, job.id)
     return response
 
 
@@ -1572,6 +1815,7 @@ async def create_workflow_run(
         workflow_definition_json=workflow.definition_json,
         status="uploading",
         total_count=len(files),
+        created_at=datetime.utcnow(),
     )
     db.add(run)
     db.flush()
@@ -1591,6 +1835,7 @@ async def create_workflow_run(
     run.execution_generation = (run.execution_generation or 0) + 1
     run.status = "running"
     run.upload_duration_ms = _workflow_upload_duration_ms(run)
+    run.started_at = run.started_at or now
     run.inference_started_at = now
     for item in run.items:
         if item.status == "queued":
@@ -1633,6 +1878,7 @@ def init_workflow_run(
         workflow_definition_json=workflow.definition_json,
         status="uploading",
         total_count=payload.total_count,
+        created_at=datetime.utcnow(),
     )
     db.add(run)
     db.flush()
@@ -1647,6 +1893,31 @@ def init_workflow_run(
     db.commit()
     db.refresh(run)
     return WorkflowRunRead(**workflow_run_to_read(run))
+
+
+@app.post("/api/workflows/{workflow_id}/runs/from-documents", response_model=WorkflowRunRead)
+def create_workflow_run_from_documents(
+    workflow_id: str,
+    payload: WorkflowRunFromDocumentsRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> WorkflowRunRead:
+    workflow = db.get(WorkflowDefinition, workflow_id)
+    if not workflow or workflow.archived:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    try:
+        validate_workflow_definition(json.loads(workflow.definition_json), db)
+    except WorkflowDefinitionError as exc:
+        raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
+    documents = _documents_for_selection(payload.document_ids, db)
+    run, has_ready_items = _create_workflow_run_from_documents(workflow, documents, db)
+    response = WorkflowRunRead(**workflow_run_to_read(run))
+    if has_ready_items:
+        execution_generation = run.execution_generation
+        run_id = run.id
+        db.close()
+        background_tasks.add_task(run_workflow_run, run_id, execution_generation)
+    return response
 
 
 @app.post("/api/workflow-runs/{run_id}/items", response_model=WorkflowRunRead)
@@ -1688,6 +1959,7 @@ def start_workflow_run(
     run.execution_generation = (run.execution_generation or 0) + 1
     run.status = "running"
     run.upload_duration_ms = _workflow_upload_duration_ms(run)
+    run.started_at = run.started_at or now
     run.inference_started_at = now
     for item in run.items:
         if item.status in {"queued", "paused"}:
@@ -1769,6 +2041,43 @@ def cancel_waiting_workflow_run(run_id: str, db: Session = Depends(get_db)) -> W
     return WorkflowRunRead(**workflow_run_to_read(run))
 
 
+@app.delete("/api/workflow-runs/{run_id}/queue-entry")
+def delete_workflow_queue_entry(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    run = db.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if not run.queued_from_run_id:
+        raise HTTPException(status_code=409, detail="Only queued workflow run entries can be removed")
+    if run.status in {"completed", "completed_with_errors", "needs_review", "failed"}:
+        raise HTTPException(status_code=409, detail="Finished queued workflow runs cannot be removed")
+    if run.status == "waiting":
+        _cancel_waiting_workflow_run(run, db)
+        db.flush()
+    elif run.status != "canceled":
+        _stop_workflow_run_without_deleting_documents(run, "Stopped and removed from workflow run queue", db)
+        db.flush()
+    item_count = len(run.items)
+    queue_group_id = run.workflow_run_group_id
+    queue_order = run.queue_order
+    source_run_id = run.queued_from_run_id
+    db.delete(run)
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run_id,
+        action="queue_entry_deleted",
+        message=f"Removed queued workflow run entry with {item_count} item(s); shared documents were kept",
+        metadata={
+            "queue_group_id": queue_group_id,
+            "queue_order": queue_order,
+            "source_run_id": source_run_id,
+            "removed_item_count": item_count,
+        },
+    )
+    db.commit()
+    return {"status": "deleted", "id": run_id}
+
+
 @app.post("/api/workflow-runs/{run_id}/discard", response_model=WorkflowRunRead)
 def discard_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
     run = db.get(WorkflowRun, run_id)
@@ -1819,8 +2128,10 @@ def resume_workflow_run(
     run.status = "running" if resumed_count else workflow_run_to_read(run)["status"]
     run.completed_at = None if resumed_count else run.completed_at
     if resumed_count:
+        now = datetime.utcnow()
         run.execution_generation = (run.execution_generation or 0) + 1
-        run.inference_started_at = datetime.utcnow()
+        run.started_at = run.started_at or now
+        run.inference_started_at = now
         for item in run.items:
             if item.status == "queued":
                 item.execution_generation = run.execution_generation
@@ -1855,6 +2166,7 @@ def pause_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRu
     run.execution_generation = (run.execution_generation or 0) + 1
     for item in run.items:
         if item.status in {"queued", "preprocessing", "running"}:
+            _cancel_workflow_item_active_jobs(item, db, now, "Paused by user")
             item.status = "paused"
             item.error_message = "Paused by user"
             item.completed_at = now
@@ -1975,6 +2287,7 @@ def retry_failed_workflow_run(
     run.status = "running"
     run.completed_at = None
     run.error_message = None
+    run.started_at = run.started_at or now
     run.inference_started_at = now
     log_audit_event(
         db,
@@ -1993,8 +2306,8 @@ def retry_failed_workflow_run(
 
 @app.get("/api/workflow-runs", response_model=list[WorkflowRunRead])
 def list_workflow_runs(limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)) -> list[WorkflowRunRead]:
-    runs = db.query(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(limit).all()
-    return [WorkflowRunRead(**workflow_run_to_read(run)) for run in runs]
+    runs = db.query(WorkflowRun).order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc()).limit(limit).all()
+    return [WorkflowRunRead(**workflow_run_to_read(run, include_items=False)) for run in runs]
 
 
 @app.get("/api/workflow-runs/{run_id}", response_model=WorkflowRunRead)
@@ -2110,6 +2423,24 @@ def init_batch(payload: BatchInitRequest, db: Session = Depends(get_db)) -> Batc
     db.commit()
     db.refresh(batch)
     return _batch_read(batch)
+
+
+@app.post("/api/batches/from-documents", response_model=BatchRead)
+def create_batch_from_documents(
+    payload: BatchFromDocumentsRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> BatchRead:
+    schema = db.get(Schema, payload.schema_id)
+    if not schema:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    documents = _documents_for_selection(payload.document_ids, db)
+    batch, ready_job_ids = _create_extraction_batch_from_documents(schema, documents, db)
+    response = _batch_read(batch)
+    if ready_job_ids:
+        db.close()
+        background_tasks.add_task(run_batch_jobs, response.id, ready_job_ids)
+    return response
 
 
 @app.post("/api/batches/{batch_id}/items", response_model=BatchRead)
@@ -2401,6 +2732,24 @@ def init_classification_batch(payload: ClassificationBatchInitRequest, db: Sessi
     return _classification_batch_read(batch)
 
 
+@app.post("/api/classification-batches/from-documents", response_model=ClassificationBatchRead)
+def create_classification_batch_from_documents(
+    payload: ClassificationBatchFromDocumentsRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> ClassificationBatchRead:
+    classifier = db.get(DocumentClassifier, payload.classifier_id)
+    if not classifier or classifier.archived:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
+    documents = _documents_for_selection(payload.document_ids, db)
+    batch, ready_job_ids = _create_classification_batch_from_documents(classifier, documents, db)
+    response = _classification_batch_read(batch)
+    if ready_job_ids:
+        db.close()
+        background_tasks.add_task(run_classification_batch, response.id, ready_job_ids)
+    return response
+
+
 @app.post("/api/classification-batches/{batch_id}/items", response_model=ClassificationBatchRead)
 async def append_classification_batch_items(batch_id: str, request: Request, db: Session = Depends(get_db)) -> ClassificationBatchRead:
     form, files = await _read_batch_upload_form(request)
@@ -2660,6 +3009,24 @@ def init_required_field_check_batch(
     db.commit()
     db.refresh(batch)
     return _required_field_batch_read(batch)
+
+
+@app.post("/api/required-field-check-batches/from-documents", response_model=RequiredFieldCheckBatchRead)
+def create_required_field_check_batch_from_documents(
+    payload: RequiredFieldCheckBatchFromDocumentsRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> RequiredFieldCheckBatchRead:
+    checklist = db.get(RequiredFieldChecklist, payload.checklist_id)
+    if not checklist or checklist.archived:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    documents = _documents_for_selection(payload.document_ids, db)
+    batch, ready_job_ids = _create_required_field_batch_from_documents(checklist, documents, db)
+    response = _required_field_batch_read(batch)
+    if ready_job_ids:
+        db.close()
+        background_tasks.add_task(run_required_field_check_batch, response.id, ready_job_ids)
+    return response
 
 
 @app.post("/api/required-field-check-batches/{batch_id}/items", response_model=RequiredFieldCheckBatchRead)
@@ -2952,6 +3319,7 @@ def _document_read(document: Document) -> DocumentRead:
     return DocumentRead(
         document_id=document.id,
         filename=document.filename,
+        library_path=document.library_path,
         mime_type=document.mime_type,
         size_bytes=document.size_bytes,
         page_count=document.page_count,
@@ -2962,6 +3330,7 @@ def _document_read(document: Document) -> DocumentRead:
         ai_summary=document.ai_summary,
         recommendation_reasoning=document.recommendation_reasoning,
         created_at=document.created_at,
+        deleted_at=document.deleted_at,
         pages=[
             DocumentPageRead(
                 id=page.id,
@@ -3118,6 +3487,520 @@ def _preprocess_document_pages(document: Document, original_path: Path, db: Sess
     document.status = "ready"
     document.error_message = None
     return True
+
+
+def _upload_library_paths(form: FormData, files: list[UploadFile]) -> list[str | None]:
+    raw_values = list(form.getlist("library_paths") or form.getlist("relative_paths") or [])
+    paths = [str(value) if value is not None else "" for value in raw_values]
+    if len(paths) != len(files):
+        paths = [getattr(file, "filename", "") or "" for file in files]
+    return [_normalize_library_path(path) or (file.filename or "") for path, file in zip(paths, files, strict=False)]
+
+
+def _normalize_library_path(path: str | None) -> str:
+    if not path:
+        return ""
+    normalized = str(path).replace("\\", "/").strip().strip("/")
+    parts = [part.strip() for part in normalized.split("/") if part.strip() and part.strip() not in {".", ".."}]
+    return "/".join(parts)
+
+
+def _library_folder_path(path: str | None) -> str:
+    normalized = _normalize_library_path(path)
+    if not normalized or "/" not in normalized:
+        return ""
+    return normalized.rsplit("/", 1)[0]
+
+
+def _create_queued_library_document(file: UploadFile, db: Session, *, library_path: str | None = None) -> tuple[Document, str]:
+    filename, original_path, size_bytes = save_upload_file(file)
+    display_path = _normalize_library_path(library_path) or filename
+    document = Document(
+        filename=filename,
+        mime_type=file.content_type or "application/octet-stream",
+        size_bytes=size_bytes,
+        page_count=0,
+        storage_path=_persist_original_artifact(original_path),
+        library_path=display_path,
+        status="queued",
+    )
+    db.add(document)
+    db.flush()
+    job = DocumentConversionJob(document_id=document.id, status="queued")
+    db.add(job)
+    db.flush()
+    return document, job.id
+
+
+def _enqueue_document_conversion_job(job_id: str) -> None:
+    with _document_conversion_queue_lock:
+        if job_id in _document_conversion_enqueued:
+            return
+        _document_conversion_enqueued.add(job_id)
+    _document_conversion_queue.put(job_id)
+
+
+def _start_document_conversion_workers() -> threading.Event:
+    stop_event = threading.Event()
+    _enqueue_pending_document_conversion_jobs()
+    worker_count = max(1, int(get_settings().preprocess_max_workers or 1))
+
+    def _run() -> None:
+        while not stop_event.is_set():
+            try:
+                job_id = _document_conversion_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                _run_document_conversion_job(job_id)
+            finally:
+                with _document_conversion_queue_lock:
+                    _document_conversion_enqueued.discard(job_id)
+                _document_conversion_queue.task_done()
+
+    for index in range(worker_count):
+        thread = threading.Thread(target=_run, name=f"document-conversion-{index + 1}", daemon=True)
+        thread.start()
+    return stop_event
+
+
+def _enqueue_pending_document_conversion_jobs() -> None:
+    db = SessionLocal()
+    try:
+        pending = (
+            db.query(DocumentConversionJob)
+            .filter(DocumentConversionJob.status.in_(["queued", "running"]))
+            .order_by(DocumentConversionJob.created_at.asc(), DocumentConversionJob.id.asc())
+            .all()
+        )
+        for job in pending:
+            if job.status == "running":
+                job.status = "queued"
+                job.started_at = None
+        db.commit()
+        for job in pending:
+            _enqueue_document_conversion_job(job.id)
+    finally:
+        db.close()
+
+
+def _run_document_conversion_job(job_id: str) -> None:
+    db = SessionLocal()
+    document_id: str | None = None
+    try:
+        job = db.get(DocumentConversionJob, job_id)
+        if not job or job.status not in {"queued", "running"}:
+            return
+        document = db.get(Document, job.document_id)
+        if not document or document.status == "deleted":
+            job.status = "canceled"
+            job.completed_at = datetime.utcnow()
+            db.commit()
+            return
+        document_id = document.id
+        now = datetime.utcnow()
+        job.status = "running"
+        job.started_at = job.started_at or now
+        job.attempts = (job.attempts or 0) + 1
+        document.status = "preprocessing"
+        document.error_message = None
+        db.commit()
+
+        original_path = materialize_storage_ref(document.storage_path)
+        if not original_path.exists():
+            raise DocumentProcessingError("Original document file is missing", status_code=404)
+        _preprocess_document_pages(document, original_path, db, raise_errors=True)
+        job.status = "completed"
+        job.error_message = None
+        job.completed_at = datetime.utcnow()
+        log_audit_event(
+            db,
+            entity_type="document",
+            entity_id=document.id,
+            action="ready",
+            message=f"Document conversion completed for {document.filename}",
+            metadata={"conversion_job_id": job.id, "page_count": document.page_count},
+        )
+        db.commit()
+    except DocumentProcessingError as exc:
+        db.rollback()
+        _mark_document_conversion_failed(job_id, str(exc))
+    except Exception:
+        db.rollback()
+        _mark_document_conversion_failed(job_id, "Failed to process uploaded document")
+    finally:
+        db.close()
+    if document_id:
+        _activate_ready_document_waiters(document_id)
+
+
+def _mark_document_conversion_failed(job_id: str, message: str) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(DocumentConversionJob, job_id)
+        if not job:
+            return
+        document = db.get(Document, job.document_id)
+        job.status = "failed"
+        job.error_message = message
+        job.completed_at = datetime.utcnow()
+        if document and document.status != "deleted":
+            document.status = "failed"
+            document.error_message = message
+        log_audit_event(
+            db,
+            entity_type="document_conversion_job",
+            entity_id=job.id,
+            action="failed",
+            message=message,
+            metadata={"document_id": job.document_id},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _activate_ready_document_waiters(document_id: str) -> None:
+    extraction_batches: list[tuple[str, str]] = []
+    classification_batches: list[tuple[str, str]] = []
+    required_batches: list[tuple[str, str]] = []
+    extraction_jobs: list[str] = []
+    classification_jobs: list[str] = []
+    required_jobs: list[str] = []
+    workflow_runs: list[tuple[str, int]] = []
+    db = SessionLocal()
+    try:
+        document = db.get(Document, document_id)
+        if not document or document.status != "ready":
+            return
+
+        for job in db.query(ExtractionJob).filter(ExtractionJob.document_id == document_id, ExtractionJob.status == "waiting_for_document").all():
+            job.status = "queued"
+            job.error_message = None
+            item = db.query(BatchItem).filter(BatchItem.job_id == job.id).one_or_none()
+            if item and item.batch and item.batch.status == "running":
+                extraction_batches.append((item.batch_id, job.id))
+            elif not item:
+                extraction_jobs.append(job.id)
+
+        for job in db.query(ClassificationJob).filter(ClassificationJob.document_id == document_id, ClassificationJob.status == "waiting_for_document").all():
+            job.status = "queued"
+            job.error_message = None
+            item = db.query(ClassificationBatchItem).filter(ClassificationBatchItem.job_id == job.id).one_or_none()
+            if item and item.batch and item.batch.status == "running":
+                classification_batches.append((item.batch_id, job.id))
+            elif not item:
+                classification_jobs.append(job.id)
+
+        for job in db.query(RequiredFieldCheckJob).filter(RequiredFieldCheckJob.document_id == document_id, RequiredFieldCheckJob.status == "waiting_for_document").all():
+            job.status = "queued"
+            job.error_message = None
+            item = db.query(RequiredFieldCheckBatchItem).filter(RequiredFieldCheckBatchItem.job_id == job.id).one_or_none()
+            if item and item.batch and item.batch.status == "running":
+                required_batches.append((item.batch_id, job.id))
+            elif not item:
+                required_jobs.append(job.id)
+
+        for item in db.query(WorkflowRunItem).filter(WorkflowRunItem.document_id == document_id, WorkflowRunItem.status == "waiting_for_document").all():
+            run = item.run
+            if not run or run.status != "running":
+                continue
+            item.status = "queued"
+            item.error_message = None
+            item.completed_at = None
+            item.execution_generation = run.execution_generation
+            workflow_runs.append((run.id, run.execution_generation))
+
+        db.commit()
+    finally:
+        db.close()
+
+    for batch_id, job_id in extraction_batches:
+        threading.Thread(target=run_batch_jobs, args=(batch_id, [job_id]), daemon=True).start()
+    for batch_id, job_id in classification_batches:
+        threading.Thread(target=run_classification_batch, args=(batch_id, [job_id]), daemon=True).start()
+    for batch_id, job_id in required_batches:
+        threading.Thread(target=run_required_field_check_batch, args=(batch_id, [job_id]), daemon=True).start()
+    for job_id in extraction_jobs:
+        threading.Thread(target=run_extraction_job, args=(job_id,), daemon=True).start()
+    for job_id in classification_jobs:
+        threading.Thread(target=run_classification_job, args=(job_id,), daemon=True).start()
+    for job_id in required_jobs:
+        threading.Thread(target=run_required_field_check_job, args=(job_id,), daemon=True).start()
+    for run_id, generation in sorted(set(workflow_runs)):
+        threading.Thread(target=run_workflow_run, args=(run_id, generation), daemon=True).start()
+
+
+def _execution_job_status_for_document(document: Document) -> str:
+    if document.status == "ready":
+        return "queued"
+    if document.status in DOCUMENT_CONVERTING_STATUSES:
+        return "waiting_for_document"
+    return "blocked"
+
+
+def _document_not_executable_message(document: Document) -> str:
+    if document.status == "deleted":
+        return "Original document was deleted"
+    if document.status == "failed":
+        return document.error_message or "Document conversion failed"
+    return f"Document is not executable in status {document.status}"
+
+
+def _raise_document_not_executable(document: Document) -> None:
+    if document.status == "deleted":
+        raise HTTPException(status_code=410, detail=_document_not_executable_message(document))
+    raise HTTPException(status_code=422, detail=_document_not_executable_message(document))
+
+
+def _documents_for_selection(document_ids: list[str], db: Session) -> list[Document]:
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+    for document_id in document_ids:
+        if document_id not in seen:
+            ordered_ids.append(document_id)
+            seen.add(document_id)
+    documents = db.query(Document).filter(Document.id.in_(ordered_ids)).all()
+    by_id = {document.id: document for document in documents}
+    missing = [document_id for document_id in ordered_ids if document_id not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail={"message": "Some documents were not found", "document_ids": missing})
+    return [by_id[document_id] for document_id in ordered_ids]
+
+
+def _create_extraction_batch_from_documents(schema: Schema, documents: list[Document], db: Session) -> tuple[Batch, list[str]]:
+    batch = Batch(schema_id=schema.id, schema_version=1, status="running", total_count=len(documents))
+    db.add(batch)
+    db.flush()
+    ready_job_ids: list[str] = []
+    waiting_count = 0
+    for index, document in enumerate(documents):
+        job_status = _execution_job_status_for_document(document)
+        error_message = None
+        completed_at = None
+        if job_status == "blocked":
+            job_status = "failed"
+            error_message = _document_not_executable_message(document)
+            completed_at = datetime.utcnow()
+        elif job_status == "queued":
+            ready_job_ids.append("")
+        else:
+            waiting_count += 1
+        job = ExtractionJob(
+            document_id=document.id,
+            schema_id=schema.id,
+            schema_version=1,
+            status=job_status,
+            error_message=error_message,
+            completed_at=completed_at,
+        )
+        db.add(job)
+        db.flush()
+        if job_status == "queued":
+            ready_job_ids[-1] = job.id
+        db.add(
+            BatchItem(
+                batch_id=batch.id,
+                document_id=document.id,
+                job_id=job.id,
+                filename=document.filename,
+                upload_index=index,
+                client_file_id=f"library:{document.id}",
+            )
+        )
+    _finish_batch_immediately_if_no_active_documents(batch, waiting_count, ready_job_ids)
+    log_audit_event(
+        db,
+        entity_type="batch",
+        entity_id=batch.id,
+        action="created_from_documents",
+        message=f"Created KIE batch from {len(documents)} library document(s)",
+        metadata={"schema_id": schema.id, "ready_count": len(ready_job_ids), "waiting_count": waiting_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    return batch, ready_job_ids
+
+
+def _create_classification_batch_from_documents(classifier: DocumentClassifier, documents: list[Document], db: Session) -> tuple[ClassificationBatch, list[str]]:
+    batch = ClassificationBatch(classifier_id=classifier.id, status="running", total_count=len(documents))
+    db.add(batch)
+    db.flush()
+    ready_job_ids: list[str] = []
+    waiting_count = 0
+    for index, document in enumerate(documents):
+        job_status = _execution_job_status_for_document(document)
+        error_message = None
+        completed_at = None
+        if job_status == "blocked":
+            job_status = "failed"
+            error_message = _document_not_executable_message(document)
+            completed_at = datetime.utcnow()
+        elif job_status == "queued":
+            ready_job_ids.append("")
+        else:
+            waiting_count += 1
+        job = ClassificationJob(
+            document_id=document.id,
+            classifier_id=classifier.id,
+            status=job_status,
+            error_message=error_message,
+            completed_at=completed_at,
+        )
+        db.add(job)
+        db.flush()
+        if job_status == "queued":
+            ready_job_ids[-1] = job.id
+        db.add(
+            ClassificationBatchItem(
+                batch_id=batch.id,
+                document_id=document.id,
+                job_id=job.id,
+                filename=document.filename,
+                upload_index=index,
+                client_file_id=f"library:{document.id}",
+            )
+        )
+    _finish_batch_immediately_if_no_active_documents(batch, waiting_count, ready_job_ids)
+    log_audit_event(
+        db,
+        entity_type="classification_batch",
+        entity_id=batch.id,
+        action="created_from_documents",
+        message=f"Created classification batch from {len(documents)} library document(s)",
+        metadata={"classifier_id": classifier.id, "ready_count": len(ready_job_ids), "waiting_count": waiting_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    return batch, ready_job_ids
+
+
+def _create_required_field_batch_from_documents(checklist: RequiredFieldChecklist, documents: list[Document], db: Session) -> tuple[RequiredFieldCheckBatch, list[str]]:
+    batch = RequiredFieldCheckBatch(checklist_id=checklist.id, status="running", total_count=len(documents))
+    db.add(batch)
+    db.flush()
+    ready_job_ids: list[str] = []
+    waiting_count = 0
+    for index, document in enumerate(documents):
+        job_status = _execution_job_status_for_document(document)
+        error_message = None
+        completed_at = None
+        if job_status == "blocked":
+            job_status = "failed"
+            error_message = _document_not_executable_message(document)
+            completed_at = datetime.utcnow()
+        elif job_status == "queued":
+            ready_job_ids.append("")
+        else:
+            waiting_count += 1
+        job = RequiredFieldCheckJob(
+            document_id=document.id,
+            checklist_id=checklist.id,
+            status=job_status,
+            error_message=error_message,
+            completed_at=completed_at,
+        )
+        db.add(job)
+        db.flush()
+        if job_status == "queued":
+            ready_job_ids[-1] = job.id
+        db.add(
+            RequiredFieldCheckBatchItem(
+                batch_id=batch.id,
+                document_id=document.id,
+                job_id=job.id,
+                filename=document.filename,
+                upload_index=index,
+                client_file_id=f"library:{document.id}",
+            )
+        )
+    _finish_batch_immediately_if_no_active_documents(batch, waiting_count, ready_job_ids)
+    log_audit_event(
+        db,
+        entity_type="required_field_check_batch",
+        entity_id=batch.id,
+        action="created_from_documents",
+        message=f"Created required field check batch from {len(documents)} library document(s)",
+        metadata={"checklist_id": checklist.id, "ready_count": len(ready_job_ids), "waiting_count": waiting_count},
+    )
+    db.commit()
+    db.refresh(batch)
+    return batch, ready_job_ids
+
+
+def _finish_batch_immediately_if_no_active_documents(batch: Any, waiting_count: int, ready_job_ids: list[str]) -> None:
+    if ready_job_ids or waiting_count:
+        return
+    batch.status = "completed_with_errors"
+    batch.completed_at = datetime.utcnow()
+
+
+def _create_workflow_run_from_documents(workflow: WorkflowDefinition, documents: list[Document], db: Session) -> tuple[WorkflowRun, bool]:
+    now = datetime.utcnow()
+    run = WorkflowRun(
+        workflow_id=workflow.id,
+        workflow_name=workflow.name,
+        workflow_definition_json=workflow.definition_json,
+        status="running",
+        total_count=len(documents),
+        created_at=now,
+        started_at=now,
+        inference_started_at=now,
+        execution_generation=1,
+    )
+    db.add(run)
+    db.flush()
+    has_ready_items = False
+    has_waiting_items = False
+    for index, document in enumerate(documents):
+        item_status = _execution_job_status_for_document(document)
+        error_message = None
+        completed_at = None
+        if item_status == "blocked":
+            item_status = "failed"
+            error_message = _document_not_executable_message(document)
+            completed_at = now
+        elif item_status == "queued":
+            has_ready_items = True
+        else:
+            has_waiting_items = True
+        db.add(
+            WorkflowRunItem(
+                run_id=run.id,
+                document_id=document.id,
+                filename=document.filename,
+                upload_index=index,
+                status=item_status,
+                error_message=error_message,
+                client_file_id=f"library:{document.id}",
+                execution_generation=run.execution_generation,
+                result_json=json.dumps(
+                    {
+                        "document_id": document.id,
+                        "filename": document.filename,
+                        "node_results": {},
+                        "error_message": error_message,
+                    },
+                    ensure_ascii=False,
+                ),
+                completed_at=completed_at,
+            )
+        )
+    if not has_ready_items and not has_waiting_items:
+        run.status = "completed_with_errors"
+        run.completed_at = now
+        run.inference_started_at = None
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="created_from_documents",
+        message=f"Created workflow run from {len(documents)} library document(s)",
+        metadata={"workflow_id": workflow.id, "ready_count": has_ready_items, "waiting_count": has_waiting_items},
+    )
+    db.commit()
+    db.refresh(run)
+    return run, has_ready_items
 
 
 def _persist_original_artifact(original_path: Path) -> str:
@@ -3514,7 +4397,7 @@ def _owner_counters(total_count: int, statuses: list[str], owner_status: str) ->
     completed_statuses = {"completed", "needs_review"}
     terminal_statuses = {"completed", "needs_review", "failed", "canceled"}
     uploaded_count = len(statuses)
-    preprocessing_count = sum(1 for status in statuses if status in {"uploading", "preprocessing"})
+    preprocessing_count = sum(1 for status in statuses if status in {"uploading", "preprocessing", "waiting_for_document"})
     queued_count = sum(1 for status in statuses if status == "queued")
     running_count = sum(1 for status in statuses if status == "running")
     needs_review_count = sum(1 for status in statuses if status == "needs_review")
@@ -3573,7 +4456,7 @@ def _cancel_module_batch(batch: Any, entity_type: str, db: Session) -> None:
     canceled_count = 0
     now = datetime.utcnow()
     for item in batch.items:
-        if item.job and item.job.status in {"queued", "running"}:
+        if item.job and item.job.status in {"queued", "running", "waiting_for_document"}:
             item.job.status = "canceled"
             item.job.error_message = "Canceled by user"
             item.job.completed_at = now
@@ -3661,7 +4544,9 @@ def _create_restarted_workflow_run(
         restarted_from_run_id=source_run.id,
         status="running",
         total_count=source_run.total_count,
+        created_at=now,
         upload_duration_ms=source_run.upload_duration_ms or _workflow_upload_duration_ms(source_run),
+        started_at=now,
         inference_started_at=now,
         execution_generation=1,
     )
@@ -3724,6 +4609,7 @@ def _create_waiting_workflow_run(
         queue_order=queue_order,
         status="waiting",
         total_count=source_run.total_count,
+        created_at=now,
         upload_duration_ms=source_run.upload_duration_ms or _workflow_upload_duration_ms(source_run),
         execution_generation=0,
     )
@@ -3847,6 +4733,78 @@ def _cancel_waiting_workflow_run(run: WorkflowRun, db: Session) -> None:
         message=f"Canceled waiting workflow run with {canceled_count} queued item(s)",
         metadata={"workflow_id": run.workflow_id, "queue_group_id": run.workflow_run_group_id, "queue_order": run.queue_order},
     )
+
+
+def _stop_workflow_run_without_deleting_documents(run: WorkflowRun, message: str, db: Session) -> None:
+    now = datetime.utcnow()
+    stopped_count = 0
+    run.execution_generation = (run.execution_generation or 0) + 1
+    _accumulate_workflow_run_inference_duration(run, now)
+    for item in run.items:
+        if item.status in {"queued", "preprocessing", "running", "paused"}:
+            _cancel_workflow_item_active_jobs(item, db, now, message)
+            item.status = "canceled"
+            item.error_message = message
+            item.completed_at = now
+            stopped_count += 1
+    run.status = "canceled"
+    run.error_message = message
+    run.completed_at = now
+    run.inference_started_at = None
+    log_audit_event(
+        db,
+        entity_type="workflow_run",
+        entity_id=run.id,
+        action="stopped",
+        message=f"Stopped workflow run without deleting uploaded documents; {stopped_count} active item(s) canceled",
+        metadata={
+            "workflow_id": run.workflow_id,
+            "queue_group_id": run.workflow_run_group_id,
+            "queue_order": run.queue_order,
+            "stopped_count": stopped_count,
+        },
+    )
+
+
+def _cancel_workflow_item_active_jobs(item: WorkflowRunItem, db: Session, now: datetime, message: str) -> None:
+    try:
+        payload = json.loads(item.result_json or "{}")
+    except json.JSONDecodeError:
+        return
+    node_results = payload.get("node_results")
+    if not isinstance(node_results, dict):
+        return
+    for node_result in node_results.values():
+        if not isinstance(node_result, dict):
+            continue
+        job_id = node_result.get("job_id")
+        kind = node_result.get("kind")
+        if not isinstance(job_id, str):
+            continue
+        if kind == "classifier":
+            job = db.get(ClassificationJob, job_id)
+            entity_type = "classification_job"
+        elif kind == "kie":
+            job = db.get(ExtractionJob, job_id)
+            entity_type = "extraction_job"
+        elif kind == "required-checker":
+            job = db.get(RequiredFieldCheckJob, job_id)
+            entity_type = "required_field_check_job"
+        else:
+            continue
+        if not job or job.status in {"completed", "needs_review", "failed", "canceled"}:
+            continue
+        job.status = "canceled"
+        job.error_message = message
+        job.completed_at = now
+        log_audit_event(
+            db,
+            entity_type=entity_type,
+            entity_id=job.id,
+            action="canceled",
+            message=message,
+            metadata={"workflow_run_id": item.run_id, "workflow_run_item_id": item.id},
+        )
 
 
 def _unshared_workflow_document_ids(run: WorkflowRun, document_ids: list[str], db: Session) -> list[str]:

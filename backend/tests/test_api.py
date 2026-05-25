@@ -46,6 +46,7 @@ def test_system_status_mock_mode(monkeypatch) -> None:
         monkeypatch.setenv("VLM_PROVIDER", "mock")
         monkeypatch.setenv("UPLOAD_MAX_BATCH_FILES", "1234")
         monkeypatch.setenv("UPLOAD_CHUNK_FILES", "10")
+        monkeypatch.setenv("WORKFLOW_MAX_WORKERS", "16")
         monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "8")
         get_settings.cache_clear()
         with get_client() as client:
@@ -56,9 +57,9 @@ def test_system_status_mock_mode(monkeypatch) -> None:
         assert payload["is_mock"] is True
         assert payload["upload_max_batch_files"] == 1234
         assert payload["upload_chunk_files"] == 10
+        assert payload["workflow_max_workers"] == 16
         assert payload["vlm_max_concurrent_requests"] == 8
         assert "batch_max_workers" not in payload
-        assert "workflow_max_workers" not in payload
         assert payload["document_page_max_long_edge"] == 3000
         assert payload["document_page_jpeg_quality"] == 88
         assert "vlm_api_key" not in payload
@@ -110,6 +111,7 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
                 "model_name": "test-model",
                 "libreoffice_path": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
                 "provider": "openai",
+                "workflow_max_workers": 11,
                 "vlm_max_concurrent_requests": 7,
                 "kie_field_group_size": 3,
             },
@@ -118,15 +120,15 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
         payload = response.json()
         assert payload["libreoffice_path"] == "/Applications/LibreOffice.app/Contents/MacOS/soffice"
         assert "vlm_max_concurrent_requests" in payload
+        assert payload["workflow_max_workers"] == 11
         assert "batch_max_workers" not in payload
-        assert "workflow_max_workers" not in payload
         assert "kie_field_group_size" in payload
         assert payload["runtime_settings_writable"] is True
 
     contents = env_path.read_text(encoding="utf-8")
     assert 'LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"' in contents
     assert "BATCH_MAX_WORKERS" not in contents
-    assert "WORKFLOW_MAX_WORKERS" not in contents
+    assert 'WORKFLOW_MAX_WORKERS="11"' in contents
     assert 'VLM_MAX_CONCURRENT_REQUESTS="7"' in contents
     assert 'KIE_FIELD_GROUP_SIZE="3"' in contents
 
@@ -386,6 +388,7 @@ def test_kie_field_groups_run_with_bounded_parallelism(monkeypatch) -> None:
     from app.schemas import FieldDefinition
 
     monkeypatch.setenv("KIE_FIELD_GROUP_SIZE", "1")
+    monkeypatch.setenv("WORKFLOW_MAX_WORKERS", "1")
     monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "2")
     get_settings.cache_clear()
 
@@ -426,7 +429,7 @@ def test_kie_field_groups_run_with_bounded_parallelism(monkeypatch) -> None:
         get_settings.cache_clear()
 
 
-def test_module_batch_workers_use_vlm_concurrent_request_limit(monkeypatch) -> None:
+def test_module_batch_workers_use_workflow_worker_limit(monkeypatch) -> None:
     from app import document_modules
 
     active = 0
@@ -450,7 +453,7 @@ def test_module_batch_workers_use_vlm_concurrent_request_limit(monkeypatch) -> N
         nonlocal finalized
         finalized = True
 
-    monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "2")
+    monkeypatch.setenv("WORKFLOW_MAX_WORKERS", "2")
     get_settings.cache_clear()
     try:
         document_modules._run_parallel_batch(["job_1", "job_2", "job_3", "job_4"], fake_runner, fake_failer, fake_finalizer)
@@ -460,7 +463,7 @@ def test_module_batch_workers_use_vlm_concurrent_request_limit(monkeypatch) -> N
         get_settings.cache_clear()
 
 
-def test_extraction_batch_workers_use_vlm_concurrent_request_limit(monkeypatch) -> None:
+def test_extraction_batch_workers_use_workflow_worker_limit(monkeypatch) -> None:
     from app import extraction as extraction_module
 
     active = 0
@@ -477,7 +480,7 @@ def test_extraction_batch_workers_use_vlm_concurrent_request_limit(monkeypatch) 
         with lock:
             active -= 1
 
-    monkeypatch.setenv("VLM_MAX_CONCURRENT_REQUESTS", "2")
+    monkeypatch.setenv("WORKFLOW_MAX_WORKERS", "2")
     monkeypatch.setattr(extraction_module, "run_extraction_job", fake_run_job)
     monkeypatch.setattr(extraction_module, "_finalize_batch", lambda batch_id: finalized.append(batch_id))
     get_settings.cache_clear()
@@ -793,7 +796,12 @@ def test_office_upload_for_key_information_extractor(monkeypatch) -> None:
             assert image.headers["content-type"] == "image/jpeg"
 
 
-def test_extraction_fails_without_vlm_credentials() -> None:
+def test_extraction_fails_without_vlm_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("VLM_API_KEY", "")
+    monkeypatch.setenv("VLM_MODEL_NAME", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_MODEL_NAME", "")
+    get_settings.cache_clear()
     with get_client() as client:
         document = upload_png(client)
         schema = create_schema(client)
@@ -2362,6 +2370,8 @@ def test_workflow_restart_can_create_new_run_with_current_workflow_without_copyi
         assert run_response.status_code == 200, run_response.text
         source_run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
         source_document_ids = [item["document_id"] for item in source_run["items"]]
+        assert source_run["started_at"] is not None
+        assert source_run["completed_at"] is None
 
         restarted = client.post(
             f"/api/workflow-runs/{source_run['id']}/restart",
@@ -2374,9 +2384,12 @@ def test_workflow_restart_can_create_new_run_with_current_workflow_without_copyi
         assert new_run["workflow_name"] == "workflow_two"
         assert new_run["restarted_from_run_id"] == source_run["id"]
         assert [item["document_id"] for item in new_run["items"]] == source_document_ids
+        assert new_run["started_at"] is not None
+        assert new_run["completed_at"] is None
 
         replaced_source = client.get(f"/api/workflow-runs/{source_run['id']}").json()
         assert replaced_source["status"] == "canceled"
+        assert replaced_source["completed_at"] is not None
 
 
 def test_workflow_enqueue_creates_waiting_run_without_copying_documents(monkeypatch) -> None:
@@ -2630,6 +2643,21 @@ def test_workflow_cancel_waiting_run_preserves_shared_documents(monkeypatch) -> 
         assert run_response.status_code == 200, run_response.text
         source_run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
         source_document_id = source_run["items"][0]["document_id"]
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            source_row = db.get(WorkflowRun, source_run["id"])
+            assert source_row is not None
+            source_row.status = "completed"
+            source_row.completed_at = datetime.utcnow()
+            source_row.inference_started_at = None
+            for item in source_row.items:
+                item.status = "completed"
+                item.completed_at = source_row.completed_at
+            db.commit()
+        finally:
+            db.close()
 
         queued = client.post(f"/api/workflow-runs/{source_run['id']}/enqueue")
         assert queued.status_code == 200, queued.text
@@ -2640,6 +2668,85 @@ def test_workflow_cancel_waiting_run_preserves_shared_documents(monkeypatch) -> 
         payload = canceled.json()
         assert payload["status"] == "canceled"
         assert payload["items"][0]["status"] == "canceled"
+        assert client.get(f"/api/documents/{source_document_id}").status_code == 200
+
+
+def test_workflow_queue_entry_delete_removes_run_without_deleting_documents(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.run_workflow_run", lambda *args: None)
+
+    with get_client() as client:
+        schema = create_schema(client, name="workflow_delete_queue_schema")
+        classifier = create_document_classifier(client, name="workflow_delete_queue_classifier")
+        checklist = create_required_field_checklist(client, name="workflow_delete_queue_checklist")
+        workflow = client.post(
+            "/api/workflows",
+            json={"name": "delete_queue_workflow", "definition": workflow_definition(schema["id"], classifier["id"], checklist["id"])},
+        )
+        assert workflow.status_code == 200, workflow.text
+
+        run_response = client.post(
+            f"/api/workflows/{workflow.json()['id']}/runs",
+            files=[("files", ("first.png", ONE_BY_ONE_PNG, "image/png"))],
+        )
+        assert run_response.status_code == 200, run_response.text
+        source_run = client.get(f"/api/workflow-runs/{run_response.json()['id']}").json()
+        source_document_id = source_run["items"][0]["document_id"]
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            source_row = db.get(WorkflowRun, source_run["id"])
+            assert source_row is not None
+            source_row.status = "completed"
+            source_row.completed_at = datetime.utcnow()
+            source_row.inference_started_at = None
+            for item in source_row.items:
+                item.status = "completed"
+                item.completed_at = source_row.completed_at
+            db.commit()
+        finally:
+            db.close()
+
+        queued = client.post(f"/api/workflow-runs/{source_run['id']}/enqueue")
+        assert queued.status_code == 200, queued.text
+        queued_run_id = queued.json()["id"]
+
+        removed = client.delete(f"/api/workflow-runs/{queued_run_id}/queue-entry")
+        assert removed.status_code == 200, removed.text
+        assert removed.json() == {"status": "deleted", "id": queued_run_id}
+        assert client.get(f"/api/workflow-runs/{queued_run_id}").status_code == 404
+        assert client.get(f"/api/documents/{source_document_id}").status_code == 200
+
+        queued_again = client.post(f"/api/workflow-runs/{source_run['id']}/enqueue")
+        assert queued_again.status_code == 200, queued_again.text
+        queued_again_id = queued_again.json()["id"]
+        canceled = client.post(f"/api/workflow-runs/{queued_again_id}/cancel-waiting")
+        assert canceled.status_code == 200, canceled.text
+        removed_canceled = client.delete(f"/api/workflow-runs/{queued_again_id}/queue-entry")
+        assert removed_canceled.status_code == 200, removed_canceled.text
+        assert client.get(f"/api/workflow-runs/{queued_again_id}").status_code == 404
+        assert client.get(f"/api/documents/{source_document_id}").status_code == 200
+
+        queued_active = client.post(f"/api/workflow-runs/{source_run['id']}/enqueue")
+        assert queued_active.status_code == 200, queued_active.text
+        queued_active_id = queued_active.json()["id"]
+        started = client.post(f"/api/workflow-runs/{queued_active_id}/start")
+        assert started.status_code == 200, started.text
+        removed_active = client.delete(f"/api/workflow-runs/{queued_active_id}/queue-entry")
+        assert removed_active.status_code == 200, removed_active.text
+        assert client.get(f"/api/workflow-runs/{queued_active_id}").status_code == 404
+        assert client.get(f"/api/documents/{source_document_id}").status_code == 200
+
+        queued_paused = client.post(f"/api/workflow-runs/{source_run['id']}/enqueue")
+        assert queued_paused.status_code == 200, queued_paused.text
+        queued_paused_id = queued_paused.json()["id"]
+        started_paused = client.post(f"/api/workflow-runs/{queued_paused_id}/start")
+        assert started_paused.status_code == 200, started_paused.text
+        paused = client.post(f"/api/workflow-runs/{queued_paused_id}/pause")
+        assert paused.status_code == 200, paused.text
+        removed_paused = client.delete(f"/api/workflow-runs/{queued_paused_id}/queue-entry")
+        assert removed_paused.status_code == 200, removed_paused.text
+        assert client.get(f"/api/workflow-runs/{queued_paused_id}").status_code == 404
         assert client.get(f"/api/documents/{source_document_id}").status_code == 200
 
 
@@ -2844,7 +2951,7 @@ def test_workflow_progress_payload_marks_current_and_completed_nodes(monkeypatch
         get_settings.cache_clear()
 
 
-def test_workflow_run_uses_vlm_max_concurrent_requests(monkeypatch) -> None:
+def test_workflow_run_uses_workflow_worker_limit_for_blocking_work(monkeypatch) -> None:
     active = 0
     max_active = 0
     lock = threading.Lock()
@@ -2878,7 +2985,8 @@ def test_workflow_run_uses_vlm_max_concurrent_requests(monkeypatch) -> None:
     monkeypatch.setattr("app.workflows._execute_graph_for_item", fake_execute)
     try:
         os.environ["VLM_PROVIDER"] = "mock"
-        os.environ["VLM_MAX_CONCURRENT_REQUESTS"] = "2"
+        os.environ["WORKFLOW_MAX_WORKERS"] = "2"
+        os.environ["VLM_MAX_CONCURRENT_REQUESTS"] = "8"
         get_settings.cache_clear()
         with get_client() as client:
             schema = create_schema(client, name="workflow_parallel_schema")
@@ -2898,6 +3006,7 @@ def test_workflow_run_uses_vlm_max_concurrent_requests(monkeypatch) -> None:
             assert run["status"] == "completed"
             assert max_active == 2
     finally:
+        os.environ.pop("WORKFLOW_MAX_WORKERS", None)
         os.environ.pop("VLM_MAX_CONCURRENT_REQUESTS", None)
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()

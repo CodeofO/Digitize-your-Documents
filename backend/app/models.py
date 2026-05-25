@@ -20,6 +20,7 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     page_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     storage_path: Mapped[str] = mapped_column(String, nullable=False)
+    library_path: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="ready")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     document_type: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -27,12 +28,28 @@ class Document(Base):
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     recommendation_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     pages: Mapped[list["DocumentPage"]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",
         order_by="DocumentPage.page_number",
     )
+
+
+class DocumentConversionJob(Base):
+    __tablename__ = "document_conversion_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("document_conversion_job"))
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    document: Mapped[Document] = relationship()
 
 
 class DocumentPage(Base):
@@ -419,6 +436,7 @@ class WorkflowRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     upload_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     inference_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     inference_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     execution_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

@@ -13,6 +13,7 @@ import {
   FileSpreadsheet,
   FileUp,
   Filter,
+  FolderOpen,
   GripVertical,
   History,
   Loader2,
@@ -34,6 +35,7 @@ import { ChangeEvent, DragEvent, PointerEvent, memo, useCallback, useEffect, use
 import type { CSSProperties, ReactNode, UIEvent } from "react";
 import { apiFetch, exchangeAccessFragment, refreshAuthSession } from "./apiClient";
 import { API_BASE } from "./apiConfig";
+import { DocumentLibraryScreen, DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "./DocumentLibrary";
 import { ModuleWorkspace } from "./ModuleWorkspace";
 import { WorkflowBuilder, WorkflowRunResultWindow } from "./WorkflowBuilder";
 
@@ -76,7 +78,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 ];
 
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
-type AppMode = "home" | "raw" | "key-info" | "classifier" | "required-checker" | "workflow" | "workflow-result";
+type AppMode = "home" | "documents" | "raw" | "key-info" | "classifier" | "required-checker" | "workflow" | "workflow-result";
 type ExportFormat = "json" | "csv" | "xlsx";
 type Step = "upload" | "schema" | "review";
 type ReviewFilter = "needs_review" | "all" | "warning" | "null" | "changed" | "low_confidence" | "unreviewed" | "ai_corrected" | "ai_review_failed";
@@ -123,16 +125,19 @@ type RegionEditorTarget = {
 type UploadedDocument = {
   document_id: string;
   filename: string;
+  library_path: string | null;
   mime_type: string;
   size_bytes: number;
   page_count: number;
   status: string;
+  error_message?: string | null;
   document_type: string | null;
   language: string | null;
   ai_summary: string | null;
   recommendation_reasoning: string | null;
   pages: DocumentPage[];
   created_at: string;
+  deleted_at?: string | null;
 };
 
 type FieldDefinition = {
@@ -254,6 +259,7 @@ type SystemStatus = {
   upload_max_batch_files: number;
   upload_chunk_files: number;
   preprocess_max_workers: number;
+  workflow_max_workers: number;
   vlm_max_concurrent_requests: number;
   document_page_max_long_edge: number;
   document_page_jpeg_quality: number;
@@ -268,6 +274,7 @@ type VlmSettings = {
   max_completion_tokens: string | null;
   top_p: string | null;
   service_tier: string | null;
+  workflow_max_workers: number;
   vlm_max_concurrent_requests: number;
   kie_field_group_size: number;
   has_api_key: boolean;
@@ -463,7 +470,7 @@ function modeFromLocation(): AppMode {
 }
 
 function isAppMode(value: unknown): value is AppMode {
-  return value === "home" || value === "raw" || value === "key-info" || value === "classifier" || value === "required-checker" || value === "workflow" || value === "workflow-result";
+  return value === "home" || value === "documents" || value === "raw" || value === "key-info" || value === "classifier" || value === "required-checker" || value === "workflow" || value === "workflow-result";
 }
 
 function replaceModeHash(nextMode: AppMode) {
@@ -821,7 +828,8 @@ export default function App() {
   const [vlmMaxCompletionTokens, setVlmMaxCompletionTokens] = useState("");
   const [vlmTopP, setVlmTopP] = useState("");
   const [vlmServiceTier, setVlmServiceTier] = useState("");
-  const [vlmMaxConcurrentRequests, setVlmMaxConcurrentRequests] = useState("8");
+  const [workflowMaxWorkers, setWorkflowMaxWorkers] = useState("16");
+  const [vlmMaxConcurrentRequests, setVlmMaxConcurrentRequests] = useState("128");
   const [kieFieldGroupSize, setKieFieldGroupSize] = useState("2");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -840,6 +848,7 @@ export default function App() {
   const [batchOpen, setBatchOpen] = useState(false);
   const [schemaLibraryOpen, setSchemaLibraryOpen] = useState(false);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [selectedLibraryDocuments, setSelectedLibraryDocuments] = useState<LibraryDocument[]>([]);
   const [draftBatchIndex, setDraftBatchIndex] = useState(0);
   const [batchMessage, setBatchMessage] = useState<string | null>(null);
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
@@ -1281,7 +1290,8 @@ export default function App() {
       setVlmMaxCompletionTokens(settings.max_completion_tokens ?? "");
       setVlmTopP(settings.top_p ?? "");
       setVlmServiceTier(settings.service_tier ?? "");
-      setVlmMaxConcurrentRequests(String(settings.vlm_max_concurrent_requests ?? 8));
+      setWorkflowMaxWorkers(String(settings.workflow_max_workers ?? 16));
+      setVlmMaxConcurrentRequests(String(settings.vlm_max_concurrent_requests ?? 128));
       setKieFieldGroupSize(String(settings.kie_field_group_size ?? 2));
     } catch {
       setVlmSettings(null);
@@ -1305,7 +1315,8 @@ export default function App() {
           max_completion_tokens: vlmMaxCompletionTokens,
           top_p: vlmTopP,
           service_tier: vlmServiceTier,
-          vlm_max_concurrent_requests: Number.parseInt(vlmMaxConcurrentRequests, 10) || 8,
+          workflow_max_workers: Number.parseInt(workflowMaxWorkers, 10) || 16,
+          vlm_max_concurrent_requests: Number.parseInt(vlmMaxConcurrentRequests, 10) || 128,
           kie_field_group_size: Number.parseInt(kieFieldGroupSize, 10) || 2,
           provider: "auto"
         })
@@ -1493,6 +1504,17 @@ export default function App() {
     setError(null);
     try {
       let sourceDocument = document;
+      if (!sourceDocument && selectedLibraryDocuments.length) {
+        const libraryDocument = selectedLibraryDocuments[draftBatchIndex] ?? selectedLibraryDocuments[0];
+        sourceDocument = await api<UploadedDocument>(`/api/documents/${libraryDocument.document_id}`);
+        setActiveBatchId(null);
+        setActiveBatchItemId(null);
+        applyDocument(sourceDocument);
+        setStep("schema");
+        if (selectedLibraryDocuments.length === 1) {
+          setSelectedLibraryDocuments([]);
+        }
+      }
       if (!sourceDocument && batchFiles.length) {
         const sourceFile = batchFiles[draftBatchIndex] ?? batchFiles[0];
         if (sourceFile) {
@@ -2136,6 +2158,7 @@ export default function App() {
       setBatchMessage(`한 번에 최대 ${uploadMaxBatchFiles.toLocaleString()}개 파일까지 업로드할 수 있습니다.`);
       return;
     }
+    setSelectedLibraryDocuments([]);
     setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
     setBatchFiles(supported);
   }
@@ -2155,17 +2178,30 @@ export default function App() {
     if (!supported.length) {
       setBatchFiles([]);
       setDraftBatchIndex(0);
+      setSelectedLibraryDocuments([]);
       setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
       return;
     }
+    setSelectedLibraryDocuments([]);
     setBatchFiles(supported);
     setDraftBatchIndex(0);
     setBatchMessage(ignoredCount ? `지원하지 않는 파일 ${ignoredCount}개는 제외했습니다.` : null);
   }
 
   async function runKieUploadSelection() {
-    if (!batchFiles.length) {
+    if (!batchFiles.length && !selectedLibraryDocuments.length) {
       setBatchMessage("실행할 파일이나 폴더를 선택하세요.");
+      return;
+    }
+    if (selectedLibraryDocuments.length === 1 && !batchFiles.length) {
+      const [libraryDocument] = selectedLibraryDocuments;
+      setSelectedLibraryDocuments([]);
+      setBatchMessage(null);
+      await loadDocument(libraryDocument.document_id);
+      return;
+    }
+    if (selectedLibraryDocuments.length > 1 && !batchFiles.length) {
+      await runBatchUpload();
       return;
     }
     if (batchFiles.length === 1) {
@@ -2180,7 +2216,7 @@ export default function App() {
   }
 
   async function runBatchUpload() {
-    if (!batchFiles.length) {
+    if (!batchFiles.length && !selectedLibraryDocuments.length) {
       setBatchMessage("배치 처리할 파일이나 폴더를 선택하세요.");
       return;
     }
@@ -2206,31 +2242,47 @@ export default function App() {
         }
         selectedSchema = saved;
       }
+      if (selectedLibraryDocuments.length) {
+        const batch = await api<Batch>("/api/batches/from-documents", {
+          method: "POST",
+          body: JSON.stringify({
+            schema_id: selectedSchema.id,
+            document_ids: selectedLibraryDocuments.map((item) => item.document_id)
+          })
+        });
+        setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 12));
+        setActiveBatchId(batch.id);
+        setActiveBatchItemId(batch.items[0]?.id ?? null);
+        setSelectedLibraryDocuments([]);
+        setBatchMessage(
+          `${batch.total_count}개 보관 문서의 배치 추출을 시작했습니다. 준비 중인 문서는 변환이 끝나면 자동으로 실행됩니다.`
+        );
+        if (batch.items[0]) {
+          await openBatchItem(batch.id, batch.items[0].id, batch);
+        } else {
+          setStep("review");
+        }
+        await refreshBatches();
+        return;
+      }
       const uploadFiles = sortFilesByDisplayName(batchFiles);
-      const initializedBatch = await api<Batch>("/api/batches/init", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schema_id: selectedSchema.id, total_count: uploadFiles.length })
-      });
-      setBatches((current) => [initializedBatch, ...current.filter((item) => item.id !== initializedBatch.id)].slice(0, 12));
+      const uploadedDocuments: LibraryDocument[] = [];
       let uploadedCount = 0;
-      let latestBatch = initializedBatch;
       for (let chunkStart = 0; chunkStart < uploadFiles.length; chunkStart += uploadChunkFiles) {
         const chunk = uploadFiles.slice(chunkStart, chunkStart + uploadChunkFiles);
-        setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 업로드 중`);
-        const form = new FormData();
-        chunk.forEach((file, index) => {
-          const uploadIndex = chunkStart + index;
-          form.append("files", file);
-          form.append("client_file_ids", clientFileId(file, uploadIndex));
-          form.append("upload_indexes", String(uploadIndex));
-        });
-        latestBatch = await api<Batch>(`/api/batches/${initializedBatch.id}/items`, { method: "POST", body: form });
+        setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 보관함 업로드 중`);
+        const uploaded = await uploadLibraryFiles(chunk);
+        uploadedDocuments.push(...uploaded);
         uploadedCount += chunk.length;
-        setBatches((current) => [latestBatch, ...current.filter((item) => item.id !== latestBatch.id)].slice(0, 12));
-        setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 업로드 중`);
+        setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 보관함 업로드 중`);
       }
-      const batch = await api<Batch>(`/api/batches/${initializedBatch.id}/start`, { method: "POST" });
+      const batch = await api<Batch>("/api/batches/from-documents", {
+        method: "POST",
+        body: JSON.stringify({
+          schema_id: selectedSchema.id,
+          document_ids: uploadedDocuments.map((item) => item.document_id)
+        })
+      });
       if (!batch) throw new Error("배치 작업을 생성하지 못했습니다.");
       setBatches((current) => [batch, ...current.filter((item) => item.id !== batch.id)].slice(0, 12));
       setActiveBatchId(batch.id);
@@ -2331,8 +2383,43 @@ export default function App() {
     setMode(nextMode);
   }
 
+  async function handleLibraryRunSelection(target: "raw" | "key-info" | "classifier" | "required-checker" | "workflow", documents: LibraryDocument[]) {
+    if (!documents.length) return;
+    if (target === "raw") {
+      await runRawFromLibraryDocument(documents[0]);
+      return;
+    }
+    setSelectedLibraryDocuments(documents);
+    setBatchFiles([]);
+    setDraftBatchIndex(0);
+    navigateMode(target);
+  }
+
+  async function runRawFromLibraryDocument(libraryDocument: LibraryDocument) {
+    setBusy("원문 데이터 추출 중");
+    setError(null);
+    try {
+      const created = await api<RawExtraction>("/api/raw-extractions/from-document", {
+        method: "POST",
+        body: JSON.stringify({
+          document_id: libraryDocument.document_id,
+          include_images: rawOptions.includeImages,
+          include_formulas: rawOptions.includeFormulas
+        })
+      });
+      setRawExtraction(created);
+      setRecentRawExtractions((items) => [created, ...items.filter((item) => item.id !== created.id)].slice(0, 12));
+      navigateMode("raw");
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function modeTitle(currentMode: AppMode) {
     if (currentMode === "home") return "Document Automation Workspace";
+    if (currentMode === "documents") return "문서 보관함";
     if (currentMode === "raw") return "원문 데이터 추출";
     if (currentMode === "classifier") return "문서 분류";
     if (currentMode === "required-checker") return "필수 항목 확인";
@@ -2440,6 +2527,7 @@ export default function App() {
 
       {mode === "home" ? (
         <HomeScreen
+          onDocuments={() => navigateMode("documents")}
           onRaw={() => navigateMode("raw")}
           onKie={() => navigateMode("key-info")}
           onClassifier={() => navigateMode("classifier")}
@@ -2451,6 +2539,11 @@ export default function App() {
           kieBatches={batches}
           classificationBatches={homeClassificationBatches}
           requiredBatches={homeRequiredBatches}
+        />
+      ) : mode === "documents" ? (
+        <DocumentLibraryScreen
+          uploadChunkFiles={uploadChunkFiles}
+          onRunSelected={(target, documents) => void handleLibraryRunSelection(target, documents)}
         />
       ) : mode === "raw" ? (
         <RawWorkspace
@@ -2473,12 +2566,16 @@ export default function App() {
           leftPanePercent={leftPanePercent}
           uploadMaxBatchFiles={uploadMaxBatchFiles}
           uploadChunkFiles={uploadChunkFiles}
+          initialLibraryDocuments={selectedLibraryDocuments}
+          onConsumeInitialLibraryDocuments={() => setSelectedLibraryDocuments([])}
           onResize={startResize}
         />
       ) : mode === "workflow" ? (
         <WorkflowBuilder
           uploadMaxBatchFiles={uploadMaxBatchFiles}
           uploadChunkFiles={uploadChunkFiles}
+          initialLibraryDocuments={selectedLibraryDocuments}
+          onConsumeInitialLibraryDocuments={() => setSelectedLibraryDocuments([])}
           onCreateSchema={() => navigateMode("key-info")}
           onCreateClassifier={() => navigateMode("classifier")}
           onCreateChecklist={() => navigateMode("required-checker")}
@@ -2495,8 +2592,10 @@ export default function App() {
             {!document ? (
               <KieUploadPanel
                 selectedFiles={batchFiles}
+                selectedDocuments={selectedLibraryDocuments}
                 selectedFileUrl={selectedDraftUrl}
                 selectedFileIndex={draftBatchIndex}
+                uploadChunkFiles={uploadChunkFiles}
                 regions={assignedSchemaRegions}
                 showRegions={assignedRegionsVisible}
                 message={batchMessage}
@@ -2508,9 +2607,16 @@ export default function App() {
                 activeSchemaMessage={activeSchemaSummary.message}
                 onSelectFile={setDraftBatchIndex}
                 onSelectFiles={selectKieUploadFiles}
+                onSelectDocuments={(documents) => {
+                  setSelectedLibraryDocuments(documents);
+                  setBatchFiles([]);
+                  setDraftBatchIndex(0);
+                  setBatchMessage(documents.length ? `${documents.length.toLocaleString()}개 보관 문서를 선택했습니다.` : null);
+                }}
                 onShowRegions={setRegionsVisible}
                 onClearFiles={() => {
                   setBatchFiles([]);
+                  setSelectedLibraryDocuments([]);
                   setDraftBatchIndex(0);
                   setBatchMessage(null);
                 }}
@@ -2815,6 +2921,7 @@ export default function App() {
           maxCompletionTokens={vlmMaxCompletionTokens}
           topP={vlmTopP}
           serviceTier={vlmServiceTier}
+          workflowMaxWorkers={workflowMaxWorkers}
           vlmMaxConcurrentRequests={vlmMaxConcurrentRequests}
           kieFieldGroupSize={kieFieldGroupSize}
           settingsMessage={settingsMessage}
@@ -2827,6 +2934,7 @@ export default function App() {
           onMaxCompletionTokens={setVlmMaxCompletionTokens}
           onTopP={setVlmTopP}
           onServiceTier={setVlmServiceTier}
+          onWorkflowMaxWorkers={setWorkflowMaxWorkers}
           onVlmMaxConcurrentRequests={setVlmMaxConcurrentRequests}
           onKieFieldGroupSize={setKieFieldGroupSize}
           onSave={() => void saveVlmSettings()}
@@ -2873,6 +2981,7 @@ function UtilityModal(props: { title: string; eyebrow: string; children: ReactNo
 }
 
 function HomeScreen(props: {
+  onDocuments: () => void;
   onRaw: () => void;
   onKie: () => void;
   onClassifier: () => void;
@@ -2934,6 +3043,18 @@ function HomeScreen(props: {
         <h3>필요한 작업을 바로 실행하거나 워크플로우에 연결하세요</h3>
       </div>
       <section className="feature-grid">
+        <button className="feature-card active-feature" onClick={props.onDocuments}>
+          <span className="feature-icon"><FolderOpen size={26} /></span>
+          <div className="feature-heading">
+            <strong>문서 보관함</strong>
+            <span>Document Library</span>
+          </div>
+          <span>업로드와 변환을 백그라운드에서 처리하고 준비된 문서를 모든 작업에서 재사용합니다.</span>
+          <div className="feature-points">
+            <small>폴더 구조 유지</small>
+            <small>준비되면 실행</small>
+          </div>
+        </button>
         <button className="feature-card active-feature" onClick={props.onRaw}>
           <span className="feature-icon"><FileUp size={26} /></span>
           <div className="feature-heading">
@@ -3303,8 +3424,10 @@ function RawWorkspace(props: {
 
 function KieUploadPanel(props: {
   selectedFiles: File[];
+  selectedDocuments: LibraryDocument[];
   selectedFileUrl: string | null;
   selectedFileIndex: number;
+  uploadChunkFiles: number;
   regions: SchemaRegion[];
   showRegions: boolean;
   message: string | null;
@@ -3316,13 +3439,16 @@ function KieUploadPanel(props: {
   activeSchemaMessage: string | null;
   onSelectFile: (index: number) => void;
   onSelectFiles: (files: FileList | File[] | null) => void;
+  onSelectDocuments: (documents: LibraryDocument[]) => void;
   onShowRegions: (show: boolean) => void;
   onClearFiles: () => void;
   onRunBatch: () => void;
 }) {
   const selectedFile = props.selectedFiles[props.selectedFileIndex] ?? props.selectedFiles[0] ?? null;
+  const selectedDocument = props.selectedDocuments[props.selectedFileIndex] ?? props.selectedDocuments[0] ?? null;
   const selectedUrl = props.selectedFileUrl;
-  const canRun = props.selectedFiles.length === 1 || (props.selectedFiles.length > 1 && props.activeSchemaReady);
+  const selectedCount = props.selectedFiles.length || props.selectedDocuments.length;
+  const canRun = selectedCount === 1 || (selectedCount > 1 && props.activeSchemaReady);
 
   async function onUnifiedDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
@@ -3360,10 +3486,19 @@ function KieUploadPanel(props: {
       <div className="pane-header">
         <div>
           <p className="eyebrow">핵심 정보 업로드</p>
-          <h2>{selectedFile ? fileDisplayName(selectedFile) : "파일 또는 폴더 업로드"}</h2>
-          <small>{props.selectedFiles.length ? `${props.selectedFiles.length}개 파일 선택됨` : "파일 또는 폴더를 선택하세요"}</small>
+          <h2>{selectedFile ? fileDisplayName(selectedFile) : selectedDocument ? selectedDocument.filename : "파일 또는 폴더 업로드"}</h2>
+          <small>{selectedCount ? `${selectedCount.toLocaleString()}개 문서 선택됨` : "파일, 폴더 또는 보관함 문서를 선택하세요"}</small>
         </div>
-        {props.selectedFiles.length > 0 && (
+        <div className="toolbar">
+          <DocumentPickerButton
+            selectedDocuments={props.selectedDocuments}
+            uploadChunkFiles={props.uploadChunkFiles}
+            onSelected={(documents) => {
+              props.onSelectDocuments(documents);
+            }}
+          />
+        </div>
+        {selectedCount > 0 && (
           <div className="toolbar">
             <button
               type="button"
@@ -3408,6 +3543,8 @@ function KieUploadPanel(props: {
             )}
             <KieDraftPreview file={selectedFile} previewUrl={selectedUrl} regions={props.regions} showRegions={props.showRegions} />
           </div>
+        ) : props.selectedDocuments.length ? (
+          <LibraryDocumentSelectionPreview documents={props.selectedDocuments} onClear={props.onClearFiles} />
         ) : (
           <>
             <SampleUploadPreview />
@@ -3461,6 +3598,36 @@ function KieDraftPreview(props: {
       <FileUp size={28} />
       <strong>{fileDisplayName(props.file)}</strong>
       <span>실행 후 PDF/page preview로 확인됩니다.</span>
+    </div>
+  );
+}
+
+function LibraryDocumentSelectionPreview(props: {
+  documents: LibraryDocument[];
+  onClear: () => void;
+}) {
+  return (
+    <div className="library-selection-preview">
+      <div className="library-selection-head">
+        <div>
+          <strong>{props.documents.length.toLocaleString()}개 보관 문서 선택됨</strong>
+          <span>준비 완료 문서는 즉시 실행되고, 변환 중인 문서는 준비되면 실행됩니다.</span>
+        </div>
+        <button type="button" className="secondary compact" onClick={props.onClear}>
+          <X size={14} />
+          비우기
+        </button>
+      </div>
+      <div className="library-selection-list">
+        {props.documents.slice(0, 20).map((document) => (
+          <div key={document.document_id} className={`library-selection-row ${document.status}`}>
+            <FileJson size={15} />
+            <span>{document.filename}</span>
+            <small>{statusLabel(document.status)}</small>
+          </div>
+        ))}
+        {props.documents.length > 20 && <div className="muted">+ {props.documents.length - 20}개 더 있음</div>}
+      </div>
     </div>
   );
 }
@@ -3740,6 +3907,7 @@ function SettingsDialog(props: {
   maxCompletionTokens: string;
   topP: string;
   serviceTier: string;
+  workflowMaxWorkers: string;
   vlmMaxConcurrentRequests: string;
   kieFieldGroupSize: string;
   settingsMessage: string | null;
@@ -3752,6 +3920,7 @@ function SettingsDialog(props: {
   onMaxCompletionTokens: (value: string) => void;
   onTopP: (value: string) => void;
   onServiceTier: (value: string) => void;
+  onWorkflowMaxWorkers: (value: string) => void;
   onVlmMaxConcurrentRequests: (value: string) => void;
   onKieFieldGroupSize: (value: string) => void;
   onSave: () => void;
@@ -3830,13 +3999,25 @@ function SettingsDialog(props: {
             <input value={props.serviceTier} placeholder="비워두기" disabled={!settingsWritable} onChange={(event) => props.onServiceTier(event.target.value)} />
           </SettingsField>
           <SettingsField
-            label="VLM 동시 요청 수"
-            help="높이면 처리량은 늘 수 있지만 DB connection과 VLM rate limit 부담도 같이 증가합니다. 대량 실행 중에는 8부터 단계적으로 올리세요."
+            label="문서 처리 작업 수"
+            help="이미지 준비, DB 저장, 워크플로우 진행 같은 로컬 작업 수입니다. 대량 처리 기본값은 16입니다."
+          >
+            <input
+              inputMode="numeric"
+              value={props.workflowMaxWorkers}
+              placeholder="16"
+              disabled={!settingsWritable}
+              onChange={(event) => props.onWorkflowMaxWorkers(event.target.value)}
+            />
+          </SettingsField>
+          <SettingsField
+            label="AI 동시 요청 수"
+            help="Gemini/OpenAI로 동시에 보내는 요청 수입니다. RPM/TPM/timeout을 보며 조절하세요. 기본값은 128입니다."
           >
             <input
               inputMode="numeric"
               value={props.vlmMaxConcurrentRequests}
-              placeholder="8"
+              placeholder="128"
               disabled={!settingsWritable}
               onChange={(event) => props.onVlmMaxConcurrentRequests(event.target.value)}
             />

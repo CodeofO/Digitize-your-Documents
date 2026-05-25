@@ -3,6 +3,7 @@
   <p><b>수작업으로 반복하던 문서 분류, 필수 항목 확인, 핵심 정보 추출, 결과 정리를 하나의 자동화 흐름으로 연결하는 문서 업무 자동화 앱입니다.</b></p>
   <p>
     <code>Workflow Builder</code>
+    <code>Document Library</code>
     <code>Document Classifier</code>
     <code>Required Field Checker</code>
     <code>Key Information Extractor</code>
@@ -32,11 +33,20 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 
 | Module | Purpose |
 | --- | --- |
+| Document Library | 파일/폴더를 먼저 보관함에 올리고, 백그라운드 변환 후 모든 모듈과 워크플로우에서 재사용합니다. |
 | Workflow Builder | 문서 입력, 분류, 분기, 추출, 필수 항목 확인, 병합, export 노드를 연결합니다. |
 | Document Classifier | 사용자가 정의한 class 후보와 `unknown` 기준으로 문서를 분류합니다. |
 | Required Field Checker | 성명, 날짜, 서명, 체크박스 등 필수 항목의 존재 여부를 확인합니다. |
 | Key Information Extractor | 저장된 schema 기준으로 field, value, confidence, evidence를 추출합니다. |
 | Raw Data Extractor | PDF, Office 문서, 이미지의 preview와 원문 데이터를 생성합니다. |
+
+## Document Library
+
+- 홈의 `문서 보관함`에서 파일 또는 폴더를 계속 추가할 수 있습니다.
+- 업로드 대기열은 현재 업로드가 진행 중이어도 다음 파일/폴더를 받아 순서대로 처리합니다.
+- 보관함은 원본 파일, 상대 경로, 변환 상태, page image/meta를 관리합니다.
+- `ready` 문서는 즉시 실행되고, `queued`/`preprocessing` 문서는 “준비되면 실행” 상태로 모듈/워크플로우 작업에 연결됩니다.
+- 문서 삭제는 원본과 page image payload만 삭제하고, 과거 결과 row와 실행 기록은 보존합니다.
 
 ## Workflow Builder
 
@@ -45,8 +55,9 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 ![Workflow Builder result view](assets/readme/workflow-builder-results.png)
 
 - React Flow 캔버스에서 문서 처리 모듈을 연결합니다.
-- `업로드` 버튼 하나로 파일과 폴더 업로드를 모두 지원하고, 파일명과 상대 경로 기준으로 안정적으로 정렬합니다.
-- 업로드는 chunk 단위로 등록하고, 업로드가 끝난 뒤 workflow 실행을 시작합니다.
+- `업로드`로 새 문서를 보관함에 추가하거나, `문서 보관함`에서 기존 문서를 선택해 실행합니다.
+- 새 업로드는 먼저 보관함에 저장되고, workflow run은 보관함 document id를 참조합니다.
+- 보관함 문서를 선택하면 업로드를 반복하지 않고 같은 원본 payload를 재사용합니다.
 - 새로고침이나 네트워크 끊김 후에는 `이어가기`로 같은 원본을 다시 선택해 남은 항목만 업로드할 수 있습니다.
 - 실행 중에는 `계속 처리`, `일시중단`, `이어가기`, `재시작`, `대기열 추가`, `중단·정리`로 상태를 제어합니다.
 - `대기열 추가`는 업로드된 원본 문서를 복사하지 않고 다음 workflow run을 `waiting` 상태로 등록하며, 앞선 run이 끝나면 자동으로 시작합니다.
@@ -56,14 +67,14 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 
 ## Common Ingestion Pipeline
 
-모든 batch 계열 모듈은 같은 ingestion 흐름을 사용합니다.
+신규 UX의 기본 입력 경로는 문서 보관함입니다. 기존 `init -> items -> start` multipart API는 호환성과 업로드 이어가기를 위해 유지합니다.
 
 | Step | Description |
 | --- | --- |
-| `init` | run 또는 batch owner를 만들고 전체 파일 수를 기록합니다. |
-| `items` | chunk 파일을 등록합니다. 파일 하나 처리 후 즉시 commit하여 중간 상태를 UI에 반영합니다. |
-| `preprocess` | 원본은 보존하고 preview/VLM 입력용 이미지는 긴 변 제한 JPEG로 생성합니다. |
-| `start` | 전체 업로드가 끝난 run/batch만 실행합니다. ready item만 queue로 넘깁니다. |
+| `library upload` | `/api/library/uploads`가 원본 파일을 저장하고 document conversion job을 등록합니다. |
+| `conversion` | 백그라운드 worker가 PDF/page image/meta를 만들고 document를 `ready`로 바꿉니다. |
+| `from-documents` | 모듈/워크플로우는 `document_ids`만 받아 batch/run item을 만듭니다. |
+| `ready dispatch` | 이미 ready인 문서는 즉시 실행하고, 변환 중인 문서는 준비 후 자동 실행합니다. |
 | `summary` | polling은 summary endpoint로 counter만 가져오고, 상세 화면에서만 item page를 조회합니다. |
 
 공통 상태는 `uploading`, `preprocessing`, `waiting`, `running`, `paused`, `completed`, `needs_review`, `completed_with_errors`, `failed`, `canceled`를 사용합니다.
@@ -102,15 +113,18 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | Area | Endpoint |
 | --- | --- |
 | System status | `GET /api/system/status` |
-| Workflow upload | `POST /api/workflows/{workflow_id}/runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
+| Document library | `POST /api/library/uploads`, `GET /api/documents`, `GET /api/library/tree`, `DELETE /api/documents/{document_id}` |
+| Workflow from library | `POST /api/workflows/{workflow_id}/runs/from-documents` |
+| Workflow upload legacy | `POST /api/workflows/{workflow_id}/runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
 | Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart`, `POST /api/workflow-runs/{run_id}/retry-failed` |
 | Workflow queue | `POST /api/workflow-runs/{run_id}/enqueue`, `POST /api/workflow-runs/{run_id}/cancel-waiting`, `POST /api/workflow-runs/{run_id}/start` |
-| Batch upload | `POST /api/batches/init`, `POST /api/batches/{batch_id}/items`, `POST /api/batches/{batch_id}/start` |
-| Classification batch | `POST /api/classification-batches/init`, `POST /api/classification-batches/{batch_id}/items`, `POST /api/classification-batches/{batch_id}/start` |
-| Required check batch | `POST /api/required-field-check-batches/init`, `POST /api/required-field-check-batches/{batch_id}/items`, `POST /api/required-field-check-batches/{batch_id}/start` |
+| KIE from library | `POST /api/batches/from-documents` |
+| Classification from library | `POST /api/classification-batches/from-documents` |
+| Required check from library | `POST /api/required-field-check-batches/from-documents` |
+| Legacy batch upload | `POST /api/batches/init`, `POST /api/batches/{batch_id}/items`, `POST /api/batches/{batch_id}/start` |
 | Summary polling | `GET /api/workflow-runs/{run_id}/summary`, `GET /api/batches/{batch_id}/summary` 계열 |
 
-기존 단일 multipart API는 호환성용으로 유지하고 내부에서 같은 ingestion 흐름을 사용합니다.
+기존 단일 `/api/documents` multipart API는 호환성용으로 즉시 전처리 완료 계약을 유지합니다. 보관함 대량 업로드 API가 백그라운드 conversion queue를 사용합니다.
 
 ## Stack
 
@@ -153,9 +167,10 @@ VLM_MODEL_NAME=mock-vlm
 | --- | --- | --- |
 | `UPLOAD_CHUNK_FILES` | `10` | frontend가 system status에서 읽는 chunk 파일 수 |
 | `PREPROCESS_MAX_WORKERS` | `2` | 문서 전처리 동시성 |
+| `WORKFLOW_MAX_WORKERS` | `16` | 문서별 workflow local 작업 동시성 |
 | `DOCUMENT_PAGE_MAX_LONG_EDGE` | `3000` | preview/VLM용 JPEG 긴 변 제한 |
 | `DOCUMENT_PAGE_JPEG_QUALITY` | `88` | preview/VLM용 JPEG 품질 |
-| `VLM_MAX_CONCURRENT_REQUESTS` | `8` | workflow, batch, KIE field-group VLM 동시 실행 수 |
+| `VLM_MAX_CONCURRENT_REQUESTS` | `128` | provider로 나가는 AI 동시 요청 수 |
 | `DATABASE_POOL_SIZE` | `64` | SQLAlchemy DB connection pool 크기 |
 | `DATABASE_MAX_OVERFLOW` | `0` | pool 크기를 넘는 임시 connection 허용 수 |
 | `DATABASE_POOL_TIMEOUT_SECONDS` | `60` | DB connection 대기 timeout |

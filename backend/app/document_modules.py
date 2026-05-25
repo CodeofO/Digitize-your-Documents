@@ -1,11 +1,11 @@
+import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from app.audit import log_audit_event
-from app.config import get_settings
+from app.concurrency import run_workflow_blocking
 from app.database import SessionLocal
 from app.extraction import DocumentPageSnapshot, DocumentSnapshot, _crop_region_image, _mask_region_image
 from app.models import (
@@ -22,7 +22,18 @@ from app.models import (
 from app.prompts.required_checker import cropped_required_region_label, full_page_required_label, masked_required_region_label
 from app.schemas import ClassCandidate, RequiredFieldItem, SchemaRegion
 from app.storage import scratch_dir_for_ref
-from app.vlm import classify_document_with_vlm, check_required_fields_with_vlm, format_vlm_exception
+from app.vlm import (
+    check_required_fields_with_vlm,
+    check_required_fields_with_vlm_async,
+    classify_document_with_vlm,
+    classify_document_with_vlm_async,
+    format_vlm_exception,
+    run_sync_with_vlm_limit_async,
+)
+
+
+_ORIGINAL_CLASSIFY_DOCUMENT_WITH_VLM = classify_document_with_vlm
+_ORIGINAL_CHECK_REQUIRED_FIELDS_WITH_VLM = check_required_fields_with_vlm
 
 
 TERMINAL_MODULE_JOB_STATUSES = {"completed", "needs_review", "failed", "canceled"}
@@ -45,37 +56,59 @@ class RequiredFieldContext:
 
 
 def run_classification_job(job_id: str) -> None:
+    asyncio.run(run_classification_job_async(job_id))
+
+
+async def run_classification_job_async(job_id: str) -> None:
     try:
-        context = _prepare_classification_job(job_id)
+        context = await run_workflow_blocking(_prepare_classification_job, job_id)
         if not context:
             return
-        raw_values = classify_document_with_vlm(
+        raw_values = await _call_classify_document_with_vlm_async(
             context.classes,
             context.allow_unknown,
             [page.image_path for page in context.document.pages],
         )
-        _save_classification_result(job_id, context, raw_values)
+        await run_workflow_blocking(_save_classification_result, job_id, context, raw_values)
     except Exception as exc:
-        _mark_classification_job_failed(job_id, format_vlm_exception(exc))
+        await run_workflow_blocking(_mark_classification_job_failed, job_id, format_vlm_exception(exc))
 
 
 def run_classification_batch(batch_id: str, job_ids: list[str]) -> None:
-    _run_parallel_batch(job_ids, run_classification_job, _mark_classification_job_failed, lambda: _finalize_classification_batch(batch_id))
+    asyncio.run(
+        _run_parallel_batch_async(
+            job_ids,
+            run_classification_job_async,
+            _mark_classification_job_failed,
+            lambda: _finalize_classification_batch(batch_id),
+        ),
+    )
 
 
 def run_required_field_check_job(job_id: str) -> None:
+    asyncio.run(run_required_field_check_job_async(job_id))
+
+
+async def run_required_field_check_job_async(job_id: str) -> None:
     try:
-        context = _prepare_required_field_job(job_id)
+        context = await run_workflow_blocking(_prepare_required_field_job, job_id)
         if not context:
             return
-        raw_values = _check_required_fields_grouped(context, job_id)
-        _save_required_field_result(job_id, context, raw_values)
+        raw_values = await _check_required_fields_grouped_async(context, job_id)
+        await run_workflow_blocking(_save_required_field_result, job_id, context, raw_values)
     except Exception as exc:
-        _mark_required_field_job_failed(job_id, format_vlm_exception(exc))
+        await run_workflow_blocking(_mark_required_field_job_failed, job_id, format_vlm_exception(exc))
 
 
 def run_required_field_check_batch(batch_id: str, job_ids: list[str]) -> None:
-    _run_parallel_batch(job_ids, run_required_field_check_job, _mark_required_field_job_failed, lambda: _finalize_required_field_batch(batch_id))
+    asyncio.run(
+        _run_parallel_batch_async(
+            job_ids,
+            run_required_field_check_job_async,
+            _mark_required_field_job_failed,
+            lambda: _finalize_required_field_batch(batch_id),
+        ),
+    )
 
 
 def classification_result_to_dict(result: ClassificationResult) -> dict[str, Any]:
@@ -104,31 +137,28 @@ def required_field_result_to_dict(result: RequiredFieldCheckResult) -> dict[str,
     }
 
 
-def _run_parallel_batch(job_ids: list[str], runner, failer, finalizer) -> None:
+async def _run_parallel_batch_async(job_ids: list[str], runner, failer, finalizer) -> None:
     if not job_ids:
-        finalizer()
+        await run_workflow_blocking(finalizer)
         return
-    max_workers = max(1, min(get_settings().vlm_max_concurrent_requests, len(job_ids)))
-    submitted_job_ids: set[str] = set()
     try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for job_id in job_ids:
-                future = executor.submit(runner, job_id)
-                futures[future] = job_id
-                submitted_job_ids.add(job_id)
-            for future in as_completed(futures):
-                job_id = futures[future]
-                try:
-                    future.result()
-                except Exception as exc:
-                    failer(job_id, f"Batch worker failed: {exc}")
+        results = await asyncio.gather(*(runner(job_id) for job_id in job_ids), return_exceptions=True)
+        for job_id, result in zip(job_ids, results, strict=True):
+            if isinstance(result, Exception):
+                await run_workflow_blocking(failer, job_id, f"Batch worker failed: {result}")
     except Exception as exc:
-        for job_id in set(job_ids) - submitted_job_ids:
-            failer(job_id, f"Batch worker did not start job: {exc}")
+        for job_id in job_ids:
+            await run_workflow_blocking(failer, job_id, f"Batch worker did not start job: {exc}")
         raise
     finally:
-        finalizer()
+        await run_workflow_blocking(finalizer)
+
+
+def _run_parallel_batch(job_ids: list[str], runner, failer, finalizer) -> None:
+    async def _runner(job_id: str) -> None:
+        await run_workflow_blocking(runner, job_id)
+
+    asyncio.run(_run_parallel_batch_async(job_ids, _runner, failer, finalizer))
 
 
 def _prepare_classification_job(job_id: str) -> ClassificationContext | None:
@@ -254,29 +284,28 @@ def _save_required_field_result(job_id: str, context: RequiredFieldContext, raw_
 
 
 def _check_required_fields_grouped(context: RequiredFieldContext, job_id: str) -> dict[str, Any]:
-    requests = _build_required_field_requests(context.document, context.items, context.regions, job_id)
+    return asyncio.run(_check_required_fields_grouped_async(context, job_id))
+
+
+async def _check_required_fields_grouped_async(context: RequiredFieldContext, job_id: str) -> dict[str, Any]:
+    requests = await run_workflow_blocking(_build_required_field_requests, context.document, context.items, context.regions, job_id)
     if not requests:
         return {"overall_status": "complete", "items": []}
     if len(requests) == 1:
         request = requests[0]
-        return check_required_fields_with_vlm(request["items"], request["regions"], image_inputs=request["image_inputs"])
+        return await _call_check_required_fields_with_vlm_async(request["items"], request["regions"], image_inputs=request["image_inputs"])
 
-    settings = get_settings()
-    max_workers = max(1, min(settings.vlm_max_concurrent_requests, len(requests)))
-    results: list[dict[str, Any] | None] = [None] * len(requests)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                check_required_fields_with_vlm,
+    results = await asyncio.gather(
+        *[
+            _call_check_required_fields_with_vlm_async(
                 request["items"],
                 request["regions"],
                 None,
                 request["image_inputs"],
-            ): index
-            for index, request in enumerate(requests)
-        }
-        for future in as_completed(futures):
-            results[futures[future]] = future.result()
+            )
+            for request in requests
+        ],
+    )
 
     merged_items: list[dict[str, Any]] = []
     for result in results:
@@ -285,6 +314,27 @@ def _check_required_fields_grouped(context: RequiredFieldContext, job_id: str) -
         result_items = result.get("items") if isinstance(result.get("items"), list) else []
         merged_items.extend(item for item in result_items if isinstance(item, dict))
     return {"overall_status": _required_overall_from_items(merged_items, context.items), "items": merged_items}
+
+
+async def _call_classify_document_with_vlm_async(
+    classes: list[ClassCandidate],
+    allow_unknown: bool,
+    image_paths: list[str],
+) -> dict[str, Any]:
+    if classify_document_with_vlm is not _ORIGINAL_CLASSIFY_DOCUMENT_WITH_VLM:
+        return await run_sync_with_vlm_limit_async(classify_document_with_vlm, classes, allow_unknown, image_paths)
+    return await classify_document_with_vlm_async(classes, allow_unknown, image_paths)
+
+
+async def _call_check_required_fields_with_vlm_async(
+    items: list[RequiredFieldItem],
+    regions: list[SchemaRegion],
+    image_paths: list[str] | None = None,
+    image_inputs: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    if check_required_fields_with_vlm is not _ORIGINAL_CHECK_REQUIRED_FIELDS_WITH_VLM:
+        return await run_sync_with_vlm_limit_async(check_required_fields_with_vlm, items, regions, image_paths=image_paths, image_inputs=image_inputs)
+    return await check_required_fields_with_vlm_async(items, regions, image_paths=image_paths, image_inputs=image_inputs)
 
 
 def _build_required_field_requests(
@@ -466,6 +516,13 @@ def _finalize_module_batch(model, batch_id: str) -> None:
             batch.completed_at = datetime.utcnow()
             db.commit()
             return
+        active = [job for job in jobs if job.status in {"queued", "running", "waiting_for_document"}]
+        if active:
+            batch.status = "running"
+            batch.completed_at = None
+            db.commit()
+            return
+
         for job in [job for job in jobs if job.status not in TERMINAL_MODULE_JOB_STATUSES]:
             job.status = "failed"
             job.error_message = "Batch worker finished before this job reached a terminal status"

@@ -45,11 +45,13 @@ def _run_lightweight_migrations() -> None:
 
     column_specs = {
         "documents": [
+            ("library_path", "VARCHAR"),
             ("error_message", "TEXT"),
             ("document_type", "VARCHAR"),
             ("language", "VARCHAR"),
             ("ai_summary", "TEXT"),
             ("recommendation_reasoning", "TEXT"),
+            ("deleted_at", "DATETIME"),
         ],
         "schemas": [
             ("schema_json", "TEXT"),
@@ -83,6 +85,7 @@ def _run_lightweight_migrations() -> None:
             ("queue_order", "INTEGER"),
             ("upload_duration_ms", "INTEGER"),
             ("inference_duration_ms", "INTEGER"),
+            ("started_at", "DATETIME"),
             ("inference_started_at", "DATETIME"),
             ("execution_generation", "INTEGER NOT NULL DEFAULT 0"),
         ],

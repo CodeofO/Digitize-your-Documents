@@ -1,8 +1,8 @@
+import asyncio
 import csv
 import io
 import json
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -10,10 +10,17 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
-from app.config import get_settings
+from app.concurrency import run_workflow_blocking
 from app.database import SessionLocal
-from app.document_modules import classification_result_to_dict, required_field_result_to_dict, run_classification_job, run_required_field_check_job
-from app.extraction import result_to_dict, run_extraction_job
+from app.document_modules import (
+    classification_result_to_dict,
+    required_field_result_to_dict,
+    run_classification_job,
+    run_classification_job_async,
+    run_required_field_check_job,
+    run_required_field_check_job_async,
+)
+from app.extraction import result_to_dict, run_extraction_job, run_extraction_job_async
 from app.models import (
     ClassificationJob,
     DocumentClassifier,
@@ -34,6 +41,10 @@ WORKFLOW_QUEUE_ADVANCE_STATUSES = {"completed", "completed_with_errors", "needs_
 
 
 class WorkflowPaused(RuntimeError):
+    pass
+
+
+class WorkflowStopped(RuntimeError):
     pass
 
 
@@ -119,6 +130,7 @@ def workflow_run_to_read(run: WorkflowRun, *, include_items: bool = True) -> dic
         "inference_duration_ms": run.inference_duration_ms,
         "items": [workflow_run_item_to_read(item) for item in items] if include_items else [],
         "created_at": run.created_at,
+        "started_at": run.started_at,
         "completed_at": run.completed_at,
     }
 
@@ -159,6 +171,33 @@ def validate_workflow_definition(definition: dict[str, Any], db: Session) -> Wor
 
 
 def run_workflow_run(run_id: str, execution_generation: int | None = None) -> None:
+    asyncio.run(run_workflow_run_async(run_id, execution_generation))
+
+
+async def run_workflow_run_async(run_id: str, execution_generation: int | None = None) -> None:
+    prepared = await run_workflow_blocking(_prepare_workflow_run_execution, run_id, execution_generation)
+    if not prepared:
+        return
+    graph, item_ids, generation = prepared
+    results = await asyncio.gather(
+        *(_run_workflow_item_async(item_id, graph, generation) for item_id in item_ids),
+        return_exceptions=True,
+    )
+    for item_id, result in zip(item_ids, results, strict=True):
+        if isinstance(result, Exception):
+            await run_workflow_blocking(
+                _mark_workflow_item_failed,
+                item_id,
+                f"Workflow worker failed: {result}",
+                execution_generation=generation,
+            )
+    await run_workflow_blocking(_finalize_workflow_run, run_id, generation)
+
+
+def _prepare_workflow_run_execution(
+    run_id: str,
+    execution_generation: int | None = None,
+) -> tuple[WorkflowGraph, list[str], int] | None:
     db = SessionLocal()
     try:
         run = db.get(WorkflowRun, run_id)
@@ -179,36 +218,16 @@ def run_workflow_run(run_id: str, execution_generation: int | None = None) -> No
             _fail_run(db, run, str(exc))
             return
         run.status = "running"
+        run.started_at = run.started_at or datetime.utcnow()
         db.commit()
         item_ids = [
             item.id
             for item in sorted(run.items, key=_workflow_item_sort_key)
             if item.status == "queued" and item.execution_generation == generation
         ]
+        return graph, item_ids, generation
     finally:
         db.close()
-
-    max_workers = max(1, min(get_settings().vlm_max_concurrent_requests, len(item_ids)))
-    submitted_item_ids: set[str] = set()
-    try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for item_id in item_ids:
-                future = executor.submit(_run_workflow_item, item_id, graph, generation)
-                futures[future] = item_id
-                submitted_item_ids.add(item_id)
-            for future in as_completed(futures):
-                item_id = futures[future]
-                try:
-                    future.result()
-                except Exception as exc:
-                    _mark_workflow_item_failed(item_id, f"Workflow worker failed: {exc}", execution_generation=generation)
-    except Exception as exc:
-        for item_id in set(item_ids) - submitted_item_ids:
-            _mark_workflow_item_failed(item_id, f"Workflow worker did not start item: {exc}", execution_generation=generation)
-        raise
-
-    _finalize_workflow_run(run_id, generation)
 
 
 def workflow_run_export_payload(run: WorkflowRun) -> dict[str, Any]:
@@ -293,6 +312,178 @@ def _run_workflow_item(item_id: str, graph: WorkflowGraph, execution_generation:
         db.rollback()
         duration = _elapsed_ms(inference_started_at) if "inference_started_at" in locals() else None
         _mark_workflow_item_failed(item_id, str(exc), db=db, inference_duration_ms=duration, execution_generation=execution_generation)
+    finally:
+        db.close()
+
+
+async def _run_workflow_item_async(item_id: str, graph: WorkflowGraph, execution_generation: int) -> None:
+    inference_started_at: datetime | None = None
+    try:
+        started = await run_workflow_blocking(_begin_workflow_item, item_id, execution_generation)
+        if not started:
+            return
+        inference_started_at = started["inference_started_at"]
+        result = await _execute_graph_for_item_async(item_id, started["document_id"], started["filename"], graph, execution_generation)
+        await run_workflow_blocking(_finish_workflow_item, item_id, execution_generation, inference_started_at, result)
+    except (WorkflowPaused, WorkflowStopped):
+        return
+    except Exception as exc:
+        duration = _elapsed_ms(inference_started_at) if inference_started_at else None
+        await run_workflow_blocking(
+            _mark_workflow_item_failed,
+            item_id,
+            str(exc),
+            inference_duration_ms=duration,
+            execution_generation=execution_generation,
+        )
+
+
+def _begin_workflow_item(item_id: str, execution_generation: int) -> dict[str, Any] | None:
+    db = SessionLocal()
+    try:
+        item = db.get(WorkflowRunItem, item_id)
+        if not item:
+            return None
+        run = db.get(WorkflowRun, item.run_id)
+        if run and run.status == "paused":
+            return None
+        if not run or run.execution_generation != execution_generation or item.execution_generation != execution_generation:
+            return None
+        if item.status != "queued":
+            return None
+        inference_started_at = datetime.utcnow()
+        item.status = "running"
+        item.error_message = None
+        item.result_json = _json_dumps(
+            {
+                "document_id": item.document_id,
+                "filename": item.filename,
+                "node_results": {},
+                "branch_path": None,
+                "path_node_ids": [],
+                "completed_node_ids": [],
+                "current_node_id": None,
+                "current_node_kind": None,
+                "current_node_label": None,
+            },
+        )
+        db.commit()
+        return {
+            "document_id": item.document_id,
+            "filename": item.filename,
+            "inference_started_at": inference_started_at,
+        }
+    finally:
+        db.close()
+
+
+def _finish_workflow_item(
+    item_id: str,
+    execution_generation: int,
+    inference_started_at: datetime,
+    result: dict[str, Any],
+) -> None:
+    db = SessionLocal()
+    try:
+        item = db.get(WorkflowRunItem, item_id)
+        if not item:
+            return
+        run = db.get(WorkflowRun, item.run_id)
+        if not run or run.execution_generation != execution_generation or item.execution_generation != execution_generation:
+            db.rollback()
+            return
+        if run.status == "paused" or item.status == "paused":
+            raise WorkflowPaused()
+        if run.status == "canceled" or item.status == "canceled":
+            raise WorkflowStopped()
+        item.status = result["status"]
+        item.error_message = result.get("error_message")
+        item.inference_duration_ms = _elapsed_ms(inference_started_at)
+        item.result_json = _json_dumps(result)
+        item.completed_at = datetime.utcnow()
+        log_audit_event(
+            db,
+            entity_type="workflow_run_item",
+            entity_id=item.id,
+            action=item.status,
+            message=f"Workflow item finished with status {item.status}",
+            metadata={"document_id": item.document_id, "workflow_run_id": item.run_id},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _save_workflow_item_progress_by_id(
+    item_id: str,
+    execution_generation: int,
+    *,
+    node_results: dict[str, Any],
+    branch_path: str | None,
+    visited: list[str],
+    completed_node_ids: list[str],
+    current_node_id: str | None = None,
+    current_node_kind: str | None = None,
+    current_node_label: str | None = None,
+) -> None:
+    db = SessionLocal()
+    try:
+        item = db.get(WorkflowRunItem, item_id)
+        if not item:
+            return
+        run = db.get(WorkflowRun, item.run_id)
+        if not run or run.execution_generation != execution_generation or item.execution_generation != execution_generation:
+            return
+        _save_workflow_item_progress(
+            db,
+            item,
+            node_results=node_results,
+            branch_path=branch_path,
+            visited=visited,
+            completed_node_ids=completed_node_ids,
+            current_node_id=current_node_id,
+            current_node_kind=current_node_kind,
+            current_node_label=current_node_label,
+        )
+    finally:
+        db.close()
+
+
+def _ensure_workflow_item_active(
+    item_id: str,
+    execution_generation: int,
+    *,
+    node_results: dict[str, Any],
+    branch_path: str | None,
+    visited: list[str],
+    completed_node_ids: list[str],
+    current_node_id: str | None,
+) -> None:
+    db = SessionLocal()
+    try:
+        item = db.get(WorkflowRunItem, item_id)
+        if not item:
+            raise WorkflowStopped()
+        run = db.get(WorkflowRun, item.run_id)
+        if not run or run.execution_generation != execution_generation or item.execution_generation != execution_generation:
+            raise WorkflowStopped()
+        if run.status == "canceled" or item.status == "canceled":
+            raise WorkflowStopped()
+        if run.status == "paused" or item.status == "paused":
+            item.status = "paused"
+            item.error_message = "Paused by user"
+            _save_workflow_item_progress(
+                db,
+                item,
+                node_results=node_results,
+                branch_path=branch_path,
+                visited=visited,
+                completed_node_ids=completed_node_ids,
+                current_node_id=current_node_id,
+                current_node_kind=None,
+                current_node_label=None,
+            )
+            raise WorkflowPaused()
     finally:
         db.close()
 
@@ -542,6 +733,196 @@ def _execute_graph_for_item(db: Session, item: WorkflowRunItem, graph: WorkflowG
     }
 
 
+_ORIGINAL_EXECUTE_GRAPH_FOR_ITEM = _execute_graph_for_item
+
+
+def _execute_graph_for_item_compat(item_id: str, graph: WorkflowGraph) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        item = db.get(WorkflowRunItem, item_id)
+        if not item:
+            raise WorkflowStopped()
+        return _execute_graph_for_item(db, item, graph)
+    finally:
+        db.close()
+
+
+async def _execute_graph_for_item_async(
+    item_id: str,
+    document_id: str,
+    filename: str,
+    graph: WorkflowGraph,
+    execution_generation: int,
+) -> dict[str, Any]:
+    if _execute_graph_for_item is not _ORIGINAL_EXECUTE_GRAPH_FOR_ITEM:
+        return await run_workflow_blocking(_execute_graph_for_item_compat, item_id, graph)
+
+    input_node_id = _single_node_id(graph, "input")
+    current_id = _single_next_node_id(graph, input_node_id)
+    node_results: dict[str, Any] = {}
+    visited: list[str] = []
+    completed_node_ids: list[str] = []
+    branch_path: str | None = None
+    status = "completed"
+    error_message: str | None = None
+
+    async def ensure_active(node_id: str | None) -> None:
+        await run_workflow_blocking(
+            _ensure_workflow_item_active,
+            item_id,
+            execution_generation,
+            node_results=node_results,
+            branch_path=branch_path,
+            visited=visited,
+            completed_node_ids=completed_node_ids,
+            current_node_id=node_id,
+        )
+
+    async def save_progress(node_id: str | None = None, kind: str | None = None, label: str | None = None) -> None:
+        await run_workflow_blocking(
+            _save_workflow_item_progress_by_id,
+            item_id,
+            execution_generation,
+            node_results=node_results,
+            branch_path=branch_path,
+            visited=visited,
+            completed_node_ids=completed_node_ids,
+            current_node_id=node_id,
+            current_node_kind=kind,
+            current_node_label=label,
+        )
+
+    while current_id:
+        await ensure_active(current_id)
+        if current_id in visited:
+            raise RuntimeError("Workflow cycle detected during execution")
+        visited.append(current_id)
+        node = graph.nodes[current_id]
+        kind = _node_kind(node)
+        await save_progress(current_id, kind, _node_label(node))
+        if kind == "classifier":
+            if _execute_classifier_node is not _ORIGINAL_EXECUTE_CLASSIFIER_NODE:
+                node_result = await run_workflow_blocking(_execute_node_compat, item_id, document_id, node, _execute_classifier_node)
+                node_results[current_id] = node_result
+                await ensure_active(current_id)
+                if node_result["status"] == "failed":
+                    status = "failed"
+                    error_message = node_result.get("error_message")
+                    break
+                completed_node_ids.append(current_id)
+                await save_progress()
+                current_id = _single_next_node_id(graph, current_id)
+                continue
+            classifier_id = _node_config_value(node, "classifier_id")
+            job_id = await run_workflow_blocking(_create_classification_job, document_id, classifier_id)
+            node_results[current_id] = {"kind": "classifier", "status": "running", "job_id": job_id, "classifier_id": classifier_id}
+            await save_progress(current_id, kind, _node_label(node))
+            await ensure_active(current_id)
+            await run_classification_job_async(job_id)
+            await ensure_active(current_id)
+            node_result = await run_workflow_blocking(_classification_node_result, job_id, classifier_id)
+            node_results[current_id] = node_result
+            if node_result["status"] == "failed":
+                status = "failed"
+                error_message = node_result.get("error_message")
+                break
+            completed_node_ids.append(current_id)
+            await save_progress()
+            current_id = _single_next_node_id(graph, current_id)
+            continue
+        if kind == "branch":
+            branch_edge = _select_branch_edge(graph, current_id, node_results)
+            if not branch_edge:
+                branch_path = _branch_candidate_key(node_results)
+                node_results[current_id] = {
+                    "kind": kind,
+                    "status": "completed",
+                    "branch_key": branch_path,
+                    "downstream_skipped": True,
+                }
+                completed_node_ids.append(current_id)
+                break
+            branch_path = _branch_edge_key(branch_edge)
+            node_results[current_id] = {"kind": kind, "status": "completed", "branch_key": branch_path}
+            completed_node_ids.append(current_id)
+            await save_progress()
+            current_id = branch_edge["target"]
+            continue
+        if kind == "kie":
+            schema_id = _node_config_value(node, "schema_id")
+            job_id = await run_workflow_blocking(_create_extraction_job, document_id, schema_id)
+            node_results[current_id] = {"kind": "kie", "status": "running", "job_id": job_id, "schema_id": schema_id}
+            await save_progress(current_id, kind, _node_label(node))
+            await ensure_active(current_id)
+            await run_extraction_job_async(job_id)
+            await ensure_active(current_id)
+            node_result = await run_workflow_blocking(_kie_node_result, job_id, schema_id)
+            node_results[current_id] = node_result
+            if node_result["status"] == "failed":
+                status = "failed"
+                error_message = node_result.get("error_message")
+                break
+            if node_result["status"] == "needs_review":
+                status = "needs_review"
+            completed_node_ids.append(current_id)
+            await save_progress()
+            current_id = _single_next_node_id(graph, current_id)
+            continue
+        if kind == "required-checker":
+            checklist_id = _node_config_value(node, "checklist_id")
+            job_id = await run_workflow_blocking(_create_required_job, document_id, checklist_id)
+            node_results[current_id] = {
+                "kind": "required-checker",
+                "status": "running",
+                "job_id": job_id,
+                "checklist_id": checklist_id,
+            }
+            await save_progress(current_id, kind, _node_label(node))
+            await ensure_active(current_id)
+            await run_required_field_check_job_async(job_id)
+            await ensure_active(current_id)
+            node_result = await run_workflow_blocking(_required_node_result, job_id, checklist_id)
+            node_results[current_id] = node_result
+            if node_result["status"] == "failed":
+                status = "failed"
+                error_message = node_result.get("error_message")
+                break
+            overall = node_result.get("required_check", {}).get("overall_status")
+            if node_result["status"] == "needs_review" or overall in {"incomplete", "needs_review"}:
+                status = "needs_review"
+            completed_node_ids.append(current_id)
+            await save_progress()
+            current_id = _single_next_node_id(graph, current_id)
+            continue
+        if kind == "merge":
+            node_results[current_id] = {"kind": kind, "status": "completed"}
+            completed_node_ids.append(current_id)
+            await save_progress()
+            current_id = _single_next_node_id(graph, current_id)
+            continue
+        if kind == "export":
+            node_results[current_id] = {"kind": kind, "status": "completed"}
+            completed_node_ids.append(current_id)
+            break
+        current_id = _single_next_node_id(graph, current_id)
+
+    summary = _workflow_summary(node_results, branch_path)
+    return {
+        "document_id": document_id,
+        "filename": filename,
+        "status": status,
+        "error_message": error_message,
+        "branch_path": branch_path,
+        "path_node_ids": visited,
+        "completed_node_ids": completed_node_ids,
+        "current_node_id": None,
+        "current_node_kind": None,
+        "current_node_label": None,
+        "node_results": node_results,
+        **summary,
+    }
+
+
 def _raise_if_workflow_paused(
     db: Session,
     item: WorkflowRunItem,
@@ -567,6 +948,153 @@ def _raise_if_workflow_paused(
             current_node_label=None,
         )
         raise WorkflowPaused()
+
+
+def _create_classification_job(document_id: str, classifier_id: str) -> str:
+    db = SessionLocal()
+    try:
+        job = ClassificationJob(document_id=document_id, classifier_id=classifier_id, status="queued")
+        db.add(job)
+        db.flush()
+        log_audit_event(
+            db,
+            entity_type="classification_job",
+            entity_id=job.id,
+            action="queued",
+            message="Queued workflow classification job",
+            metadata={"document_id": document_id, "classifier_id": classifier_id},
+        )
+        db.commit()
+        return job.id
+    finally:
+        db.close()
+
+
+def _classification_node_result(job_id: str, classifier_id: str) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        loaded = db.get(ClassificationJob, job_id)
+        if not loaded:
+            return {"kind": "classifier", "status": "failed", "job_id": job_id, "error_message": "Classification job disappeared"}
+        if loaded.status == "failed":
+            return {
+                "kind": "classifier",
+                "status": "failed",
+                "job_id": loaded.id,
+                "result_id": loaded.result_id,
+                "error_message": loaded.error_message,
+            }
+        output = classification_result_to_dict(loaded.result) if loaded.result else None
+        classification = output["corrected_output"] if output and output.get("corrected_output") else output.get("validated_output") if output else {}
+        return {
+            "kind": "classifier",
+            "status": loaded.status,
+            "job_id": loaded.id,
+            "result_id": loaded.result_id,
+            "classifier_id": classifier_id,
+            "classification": classification,
+            "result": output,
+        }
+    finally:
+        db.close()
+
+
+def _create_extraction_job(document_id: str, schema_id: str) -> str:
+    db = SessionLocal()
+    try:
+        job = ExtractionJob(document_id=document_id, schema_id=schema_id, schema_version=1, status="queued")
+        db.add(job)
+        db.flush()
+        log_audit_event(
+            db,
+            entity_type="extraction_job",
+            entity_id=job.id,
+            action="queued",
+            message="Queued workflow KIE job",
+            metadata={"document_id": document_id, "schema_id": schema_id},
+        )
+        db.commit()
+        return job.id
+    finally:
+        db.close()
+
+
+def _kie_node_result(job_id: str, schema_id: str) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        loaded = db.get(ExtractionJob, job_id)
+        if not loaded:
+            return {"kind": "kie", "status": "failed", "job_id": job_id, "error_message": "Extraction job disappeared"}
+        if loaded.status == "failed":
+            return {
+                "kind": "kie",
+                "status": "failed",
+                "job_id": loaded.id,
+                "result_id": loaded.result_id,
+                "error_message": loaded.error_message,
+            }
+        output = result_to_dict(loaded.result) if loaded.result else None
+        payload = output["corrected_output"] if output and output.get("corrected_output") else output.get("validated_output") if output else {}
+        return {
+            "kind": "kie",
+            "status": loaded.status,
+            "job_id": loaded.id,
+            "result_id": loaded.result_id,
+            "schema_id": schema_id,
+            "values": payload.get("values", {}),
+            "result": output,
+        }
+    finally:
+        db.close()
+
+
+def _create_required_job(document_id: str, checklist_id: str) -> str:
+    db = SessionLocal()
+    try:
+        job = RequiredFieldCheckJob(document_id=document_id, checklist_id=checklist_id, status="queued")
+        db.add(job)
+        db.flush()
+        log_audit_event(
+            db,
+            entity_type="required_field_check_job",
+            entity_id=job.id,
+            action="queued",
+            message="Queued workflow required field check job",
+            metadata={"document_id": document_id, "checklist_id": checklist_id},
+        )
+        db.commit()
+        return job.id
+    finally:
+        db.close()
+
+
+def _required_node_result(job_id: str, checklist_id: str) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        loaded = db.get(RequiredFieldCheckJob, job_id)
+        if not loaded:
+            return {"kind": "required-checker", "status": "failed", "job_id": job_id, "error_message": "Required check job disappeared"}
+        if loaded.status == "failed":
+            return {
+                "kind": "required-checker",
+                "status": "failed",
+                "job_id": loaded.id,
+                "result_id": loaded.result_id,
+                "error_message": loaded.error_message,
+            }
+        output = required_field_result_to_dict(loaded.result) if loaded.result else None
+        payload = output["corrected_output"] if output and output.get("corrected_output") else output.get("validated_output") if output else {}
+        return {
+            "kind": "required-checker",
+            "status": loaded.status,
+            "job_id": loaded.id,
+            "result_id": loaded.result_id,
+            "checklist_id": checklist_id,
+            "required_check": payload,
+            "result": output,
+        }
+    finally:
+        db.close()
 
 
 def _execute_classifier_node(db: Session, document_id: str, node: dict[str, Any]) -> dict[str, Any]:
@@ -689,6 +1217,22 @@ def _execute_required_node(db: Session, document_id: str, node: dict[str, Any]) 
     }
 
 
+_ORIGINAL_EXECUTE_CLASSIFIER_NODE = _execute_classifier_node
+_ORIGINAL_EXECUTE_KIE_NODE = _execute_kie_node
+_ORIGINAL_EXECUTE_REQUIRED_NODE = _execute_required_node
+
+
+def _execute_node_compat(item_id: str, document_id: str, node: dict[str, Any], executor) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        item = db.get(WorkflowRunItem, item_id)
+        if not item:
+            raise WorkflowStopped()
+        return executor(db, document_id, node)
+    finally:
+        db.close()
+
+
 def _finalize_workflow_run(run_id: str, execution_generation: int | None = None) -> None:
     dispatch_next: tuple[str, int] | None = None
     db = SessionLocal()
@@ -709,7 +1253,7 @@ def _finalize_workflow_run(run_id: str, execution_generation: int | None = None)
             _accumulate_run_inference_duration(run, now)
             db.commit()
             return
-        elif any(status in {"queued", "running", "preprocessing"} for status in statuses):
+        elif any(status in {"queued", "running", "preprocessing", "waiting_for_document"} for status in statuses):
             run.status = "running"
             run.completed_at = None
             db.commit()
@@ -757,6 +1301,7 @@ def _activate_next_waiting_workflow_run(db: Session, completed_run: WorkflowRun,
     next_run.status = "running"
     next_run.completed_at = None
     next_run.error_message = None
+    next_run.started_at = next_run.started_at or now
     next_run.inference_started_at = now
     for item in next_run.items:
         if item.status == "queued":
@@ -1099,7 +1644,7 @@ def _workflow_run_status(run: WorkflowRun, items: list[WorkflowRunItem]) -> str:
         return "uploading"
     if not statuses:
         return run.status
-    if any(status == "preprocessing" for status in statuses):
+    if any(status in {"preprocessing", "waiting_for_document"} for status in statuses):
         return "preprocessing"
     if any(status == "running" for status in statuses):
         return "running"
@@ -1125,7 +1670,7 @@ def _workflow_item_sort_key(item: WorkflowRunItem) -> tuple[int, int, str, str]:
 def _workflow_run_counters(run: WorkflowRun, items: list[WorkflowRunItem]) -> dict[str, Any]:
     statuses = [item.status for item in items]
     terminal_count = sum(1 for status in statuses if status in WORKFLOW_TERMINAL_STATUSES)
-    preprocessing_count = sum(1 for status in statuses if status == "preprocessing")
+    preprocessing_count = sum(1 for status in statuses if status in {"preprocessing", "waiting_for_document"})
     queued_count = sum(1 for status in statuses if status == "queued")
     running_count = sum(1 for status in statuses if status == "running")
     canceled_count = sum(1 for status in statuses if status == "canceled")

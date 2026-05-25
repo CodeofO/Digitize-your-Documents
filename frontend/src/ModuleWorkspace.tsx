@@ -21,6 +21,7 @@ import {
 import { ChangeEvent, CSSProperties, DragEvent, PointerEvent, UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
+import { DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "./DocumentLibrary";
 
 const MODULE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const MODULE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
@@ -42,6 +43,9 @@ type DocumentPage = {
 type UploadedDocument = {
   document_id: string;
   filename: string;
+  library_path?: string | null;
+  status?: string;
+  error_message?: string | null;
   page_count: number;
   pages: DocumentPage[];
 };
@@ -191,6 +195,8 @@ type ModuleWorkspaceProps = {
   leftPanePercent: number;
   uploadMaxBatchFiles: number;
   uploadChunkFiles: number;
+  initialLibraryDocuments?: LibraryDocument[];
+  onConsumeInitialLibraryDocuments?: () => void;
   onResize: (event: PointerEvent<HTMLButtonElement>) => void;
 };
 
@@ -368,7 +374,15 @@ function ModuleBatchExportButton(props: {
   );
 }
 
-export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, uploadChunkFiles, onResize }: ModuleWorkspaceProps) {
+export function ModuleWorkspace({
+  kind,
+  leftPanePercent,
+  uploadMaxBatchFiles,
+  uploadChunkFiles,
+  initialLibraryDocuments = [],
+  onConsumeInitialLibraryDocuments,
+  onResize
+}: ModuleWorkspaceProps) {
   const isClassifier = kind === "classifier";
   const title = isClassifier ? "문서 분류" : "필수 항목 확인";
   const configLabel = isClassifier ? "분류 설정" : "체크리스트";
@@ -379,6 +393,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
   const [checklistDraft, setChecklistDraft] = useState<RequiredFieldChecklist>(() => defaultChecklist());
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [selectedLibraryDocuments, setSelectedLibraryDocuments] = useState<LibraryDocument[]>([]);
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [document, setDocument] = useState<UploadedDocument | null>(null);
   const [activePage, setActivePage] = useState(0);
@@ -396,6 +411,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
   const activeBatchItem = activeBatch?.items.find((item) => item.id === activeBatchItemId) ?? activeBatch?.items[0] ?? null;
   const activeImageUrl = document?.pages[activePage]?.image_url ? `${API_BASE}${document.pages[activePage].image_url}` : null;
   const selectedFile = selectedFiles[selectedFileIndex] ?? selectedFiles[0] ?? null;
+  const selectedLibraryDocument = selectedLibraryDocuments[selectedFileIndex] ?? selectedLibraryDocuments[0] ?? null;
   const regions = isClassifier ? [] : checklistDraft.regions;
   const currentJob = isClassifier ? classificationJob : requiredJob;
   const terminalBatch = activeBatch ? ["completed", "completed_with_errors", "failed", "canceled"].includes(activeBatch.status) : true;
@@ -404,6 +420,17 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
   useEffect(() => {
     void refreshModule();
   }, [kind]);
+
+  useEffect(() => {
+    if (!initialLibraryDocuments.length) return;
+    setSelectedLibraryDocuments(initialLibraryDocuments);
+    setSelectedFiles([]);
+    setDocument(null);
+    setActiveBatchId(null);
+    setActiveBatchItemId(null);
+    setMessage(`${initialLibraryDocuments.length.toLocaleString()}개 보관 문서를 선택했습니다.`);
+    onConsumeInitialLibraryDocuments?.();
+  }, [initialLibraryDocuments, onConsumeInitialLibraryDocuments]);
 
   useEffect(() => {
     if (!activeBatchId || terminalBatch) return;
@@ -547,19 +574,38 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
   }
 
   async function run() {
-    if (!selectedFiles.length && !document) {
+    if (!selectedFiles.length && !selectedLibraryDocuments.length && !document) {
       setError("실행할 파일을 업로드하세요.");
       return;
     }
-    setBusy(selectedFiles.length > 1 ? "배치 작업을 생성하는 중" : "문서를 처리하는 중");
+    const sourceCount = selectedFiles.length || selectedLibraryDocuments.length;
+    setBusy(sourceCount > 1 ? "배치 작업을 생성하는 중" : "문서를 처리하는 중");
     setError(null);
     setMessage(null);
     try {
       const configId = await saveActiveConfig();
-      if (selectedFiles.length > 1) {
-        await runBatch(configId);
+      if (selectedLibraryDocuments.length) {
+        if (selectedLibraryDocuments.length > 1) {
+          await runBatchFromDocuments(configId, selectedLibraryDocuments);
+        } else {
+          const sourceDocument = await api<UploadedDocument>(`/api/documents/${selectedLibraryDocuments[0].document_id}`);
+          setDocument(sourceDocument);
+          setActivePage(0);
+          setSelectedLibraryDocuments([]);
+          await runSingle(configId, sourceDocument.document_id);
+        }
+      } else if (selectedFiles.length) {
+        const uploadedDocuments = await uploadSelectedFilesToLibrary();
+        if (uploadedDocuments.length > 1) {
+          await runBatchFromDocuments(configId, uploadedDocuments);
+        } else {
+          const sourceDocument = await api<UploadedDocument>(`/api/documents/${uploadedDocuments[0].document_id}`);
+          setDocument(sourceDocument);
+          setActivePage(0);
+          await runSingle(configId, sourceDocument.document_id);
+        }
       } else {
-        const sourceDocument = selectedFiles[0] ? await uploadDocument(selectedFiles[0]) : document;
+        const sourceDocument = document;
         if (!sourceDocument) throw new Error("실행할 문서가 없습니다.");
         setDocument(sourceDocument);
         setActivePage(0);
@@ -570,6 +616,24 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
     } finally {
       setBusy(null);
     }
+  }
+
+  async function uploadSelectedFilesToLibrary() {
+    const uploadFiles = sortUploadFiles(selectedFiles);
+    if (!uploadFiles.length) return [];
+    const uploadedDocuments: LibraryDocument[] = [];
+    let uploadedCount = 0;
+    for (let chunkStart = 0; chunkStart < uploadFiles.length; chunkStart += uploadChunkFiles) {
+      const chunk = uploadFiles.slice(chunkStart, chunkStart + uploadChunkFiles);
+      setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 보관함 업로드 중`);
+      const uploaded = await uploadLibraryFiles(chunk);
+      uploadedDocuments.push(...uploaded);
+      uploadedCount += chunk.length;
+      setBusy(`${uploadedCount.toLocaleString()} / ${uploadFiles.length.toLocaleString()} 문서 보관함 업로드 중`);
+    }
+    setSelectedFiles([]);
+    setSelectedFileIndex(0);
+    return uploadedDocuments;
   }
 
   async function runSingle(configId: string, documentId: string) {
@@ -639,6 +703,25 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
     setMessage(
       `${batch.total_count}개 파일의 배치 작업을 시작했습니다.`
     );
+    if (batch.items[0]) await openBatchItem(batch.items[0]);
+  }
+
+  async function runBatchFromDocuments(configId: string, documents: LibraryDocument[]) {
+    const path = isClassifier ? "/api/classification-batches/from-documents" : "/api/required-field-check-batches/from-documents";
+    const batch = await api<ModuleBatch>(path, {
+      method: "POST",
+      body: JSON.stringify({
+        [isClassifier ? "classifier_id" : "checklist_id"]: configId,
+        document_ids: documents.map((item) => item.document_id)
+      })
+    });
+    setBatches((items) => [batch, ...items.filter((item) => item.id !== batch.id)].slice(0, 12));
+    setActiveBatchId(batch.id);
+    setActiveBatchItemId(batch.items[0]?.id ?? null);
+    setSelectedLibraryDocuments([]);
+    setSelectedFiles([]);
+    setSelectedFileIndex(0);
+    setMessage(`${batch.total_count}개 보관 문서의 배치 작업을 시작했습니다. 변환 중인 문서는 준비되면 자동 실행됩니다.`);
     if (batch.items[0]) await openBatchItem(batch.items[0]);
   }
 
@@ -751,6 +834,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
       return;
     }
     setSelectedFiles(supported);
+    setSelectedLibraryDocuments([]);
     setSelectedFileIndex(0);
     setError(null);
     setMessage(supported.length ? `${supported.length}개 파일을 선택했습니다.` : null);
@@ -787,12 +871,24 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
       >
         <section className="document-pane module-document-pane">
           <ModuleUploadHeader
-            title={document?.filename ?? selectedFile?.name ?? title}
-            selectedCount={selectedFiles.length}
+            title={document?.filename ?? selectedFile?.name ?? selectedLibraryDocument?.filename ?? title}
+            selectedCount={selectedFiles.length || selectedLibraryDocuments.length}
+            selectedDocuments={selectedLibraryDocuments}
+            uploadChunkFiles={uploadChunkFiles}
+            onSelectDocuments={(documents) => {
+              setSelectedLibraryDocuments(documents);
+              setSelectedFiles([]);
+              setDocument(null);
+              setActiveBatchId(null);
+              setActiveBatchItemId(null);
+              setSelectedFileIndex(0);
+              setMessage(documents.length ? `${documents.length.toLocaleString()}개 보관 문서를 선택했습니다.` : null);
+            }}
             onRun={() => void run()}
-            runDisabled={Boolean(busy) || (!selectedFiles.length && !document)}
+            runDisabled={Boolean(busy) || (!selectedFiles.length && !selectedLibraryDocuments.length && !document)}
             onClear={() => {
               setSelectedFiles([]);
+              setSelectedLibraryDocuments([]);
               setDocument(null);
               setClassificationJob(null);
               setRequiredJob(null);
@@ -814,6 +910,8 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
             </div>
           ) : document ? (
             <ModuleDocumentPreview document={document} activePage={activePage} activeImageUrl={activeImageUrl} regions={regions} showRegions={showRegions} onPage={setActivePage} />
+          ) : selectedLibraryDocuments.length ? (
+            <LibraryDocumentSelectionPreview documents={selectedLibraryDocuments} onClear={() => setSelectedLibraryDocuments([])} />
           ) : (
             <ModuleUploadDropzone
               selectedFiles={selectedFiles}
@@ -864,7 +962,7 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
               <button type="button" className="secondary" onClick={() => void saveActiveConfig()}>
                 저장
               </button>
-              <button type="button" className="primary" disabled={Boolean(busy) || (!selectedFiles.length && !document)} onClick={() => void run()}>
+              <button type="button" className="primary" disabled={Boolean(busy) || (!selectedFiles.length && !selectedLibraryDocuments.length && !document)} onClick={() => void run()}>
                 <Play size={16} />
                 실행
               </button>
@@ -928,6 +1026,9 @@ export function ModuleWorkspace({ kind, leftPanePercent, uploadMaxBatchFiles, up
 function ModuleUploadHeader(props: {
   title: string;
   selectedCount: number;
+  selectedDocuments: LibraryDocument[];
+  uploadChunkFiles: number;
+  onSelectDocuments: (documents: LibraryDocument[]) => void;
   runDisabled: boolean;
   onRun: () => void;
   onClear: () => void;
@@ -940,6 +1041,11 @@ function ModuleUploadHeader(props: {
         <small>{props.selectedCount ? `${props.selectedCount}개 파일 선택됨` : "파일 또는 폴더를 선택하세요"}</small>
       </div>
       <div className="toolbar">
+        <DocumentPickerButton
+          selectedDocuments={props.selectedDocuments}
+          uploadChunkFiles={props.uploadChunkFiles}
+          onSelected={props.onSelectDocuments}
+        />
         <button type="button" className="primary" disabled={props.runDisabled} onClick={props.onRun}>
           <Play size={16} />
           실행
@@ -992,6 +1098,36 @@ function ModuleUploadDropzone(props: {
           <ModuleUploadPicker onSelectFiles={props.onSelectFiles} />
         </>
       )}
+    </div>
+  );
+}
+
+function LibraryDocumentSelectionPreview(props: {
+  documents: LibraryDocument[];
+  onClear: () => void;
+}) {
+  return (
+    <div className="library-selection-preview">
+      <div className="library-selection-head">
+        <div>
+          <strong>{props.documents.length.toLocaleString()}개 보관 문서 선택됨</strong>
+          <span>준비 완료 문서는 즉시 실행되고, 변환 중인 문서는 준비되면 실행됩니다.</span>
+        </div>
+        <button type="button" className="secondary compact" onClick={props.onClear}>
+          <X size={14} />
+          비우기
+        </button>
+      </div>
+      <div className="library-selection-list">
+        {props.documents.slice(0, 20).map((document) => (
+          <div key={document.document_id} className={`library-selection-row ${document.status}`}>
+            <FileJson size={15} />
+            <span>{document.filename}</span>
+            <small>{libraryDocumentStatusLabel(document.status)}</small>
+          </div>
+        ))}
+        {props.documents.length > 20 && <div className="muted">+ {props.documents.length - 20}개 더 있음</div>}
+      </div>
     </div>
   );
 }
@@ -1724,6 +1860,17 @@ function moduleStatusLabel(status: string | null | undefined) {
     needs_review: "검토 필요"
   };
   return status ? labels[status] ?? status : "대기 중";
+}
+
+function libraryDocumentStatusLabel(status: string | null | undefined) {
+  const labels: Record<string, string> = {
+    ready: "준비 완료",
+    queued: "변환 대기",
+    preprocessing: "변환 중",
+    failed: "실패",
+    deleted: "원본 삭제"
+  };
+  return status ? labels[status] ?? status : "대기";
 }
 
 function classificationStatusLabel(status: ClassificationOutput["status"]) {

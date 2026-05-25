@@ -170,6 +170,7 @@ class DocumentPageRead(BaseModel):
 class DocumentRead(BaseModel):
     document_id: str
     filename: str
+    library_path: str | None = None
     mime_type: str
     size_bytes: int
     page_count: int
@@ -181,6 +182,52 @@ class DocumentRead(BaseModel):
     recommendation_reasoning: str | None = None
     pages: list[DocumentPageRead]
     created_at: datetime
+    deleted_at: datetime | None = None
+
+
+class DocumentBatchUploadRead(BaseModel):
+    documents: list[DocumentRead]
+
+
+class DocumentTreeFolderRead(BaseModel):
+    path: str
+    name: str
+    parent: str | None = None
+    total_count: int = 0
+    ready_count: int = 0
+    converting_count: int = 0
+    failed_count: int = 0
+    deleted_count: int = 0
+
+
+class DocumentTreeRead(BaseModel):
+    folders: list[DocumentTreeFolderRead]
+
+
+class DocumentSelectionRequest(BaseModel):
+    document_ids: list[str] = Field(min_length=1, max_length=10000)
+
+
+class BatchFromDocumentsRequest(DocumentSelectionRequest):
+    schema_id: str
+
+
+class ClassificationBatchFromDocumentsRequest(DocumentSelectionRequest):
+    classifier_id: str
+
+
+class RequiredFieldCheckBatchFromDocumentsRequest(DocumentSelectionRequest):
+    checklist_id: str
+
+
+class WorkflowRunFromDocumentsRequest(DocumentSelectionRequest):
+    pass
+
+
+class RawExtractionFromDocumentRequest(BaseModel):
+    document_id: str
+    include_images: bool = True
+    include_formulas: bool = False
 
 
 class RawExtractionRead(BaseModel):
@@ -206,6 +253,7 @@ class VlmSettingsRead(BaseModel):
     max_completion_tokens: str | None
     top_p: str | None
     service_tier: str | None
+    workflow_max_workers: int
     vlm_max_concurrent_requests: int
     kie_field_group_size: int
     has_api_key: bool
@@ -223,7 +271,8 @@ class VlmSettingsUpdate(BaseModel):
     max_completion_tokens: str | None = None
     top_p: str | None = None
     service_tier: str | None = None
-    vlm_max_concurrent_requests: int | None = Field(default=None, ge=1, le=64)
+    workflow_max_workers: int | None = Field(default=None, ge=1, le=128)
+    vlm_max_concurrent_requests: int | None = Field(default=None, ge=1, le=512)
     kie_field_group_size: int | None = Field(default=None, ge=1, le=20)
 
 
@@ -647,6 +696,7 @@ class SystemStatusRead(BaseModel):
     upload_max_batch_files: int
     upload_chunk_files: int
     preprocess_max_workers: int
+    workflow_max_workers: int
     vlm_max_concurrent_requests: int
     document_page_max_long_edge: int
     document_page_jpeg_quality: int
@@ -814,6 +864,7 @@ class WorkflowRunRead(BaseModel):
     inference_duration_ms: int | None = None
     items: list[WorkflowRunItemRead]
     created_at: datetime
+    started_at: datetime | None = None
     completed_at: datetime | None
 
 
