@@ -65,6 +65,7 @@ assets/*
 !assets/readme/
 assets/readme/*
 !assets/readme/*.png
+!assets/readme/*.mp4
 !assets/readme-src/
 assets/readme-src/*
 !assets/readme-src/*.html

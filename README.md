@@ -15,6 +15,14 @@
 
 ## Demo
 
+### 시연 영상
+
+<video src="assets/readme/시연영상.mp4" controls title="Document Automation Workspace 시연 영상"></video>
+
+[시연 영상 보기](assets/readme/시연영상.mp4)
+
+### 외부 데모 실행
+
 외부 데모는 production과 같은 단일 서버 구성을 띄운 뒤 ngrok HTTPS URL로 확인합니다.
 
 ```bash
