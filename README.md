@@ -29,6 +29,8 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 
 ## Features
 
+### 단일 모듈 실행과 워크플로우 연결
+
 ![Core modules](assets/readme/core-modules.png)
 
 | Module | Purpose |
@@ -56,7 +58,11 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 
 ## Workflow Builder
 
+### 워크플로우 빌더
+
 ![Workflow Builder](assets/readme/workflow-builder.png)
+
+### 워크플로우 빌더: 결과 검토
 
 ![Workflow Builder result view](assets/readme/workflow-builder-results.png)
 
@@ -65,9 +71,9 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 - 새 업로드는 먼저 보관함에 저장되고, workflow run은 보관함 document id를 참조합니다.
 - 보관함 문서를 선택하면 업로드를 반복하지 않고 같은 원본 payload를 재사용합니다.
 - 새로고침이나 네트워크 끊김 후에는 `이어가기`로 같은 원본을 다시 선택해 남은 항목만 업로드할 수 있습니다.
-- 실행 중에는 `추론 일시중단`, `이어하기`, `같은 문서로 다시 실행`, `실행 예약`, `추론 중단`으로 상태를 제어합니다.
+- 실행 중에는 `추론 일시중단`, `이어하기`, `실행 예약`, `추론 중단`으로 상태를 제어합니다.
 - 워크플로우 중단은 보관함 문서를 삭제하지 않고 진행 중인 추론만 멈춥니다. 원본 삭제는 문서 보관함에서만 수행합니다.
-- `대기열 추가`는 업로드된 원본 문서를 복사하지 않고 다음 workflow run을 `waiting` 상태로 등록하며, 앞선 run이 끝나면 자동으로 시작합니다.
+- `실행 예약`은 업로드된 원본 문서를 복사하지 않고 다음 workflow run을 `waiting` 상태로 등록하며, 앞선 run이 끝나면 자동으로 시작합니다.
 - 진행 상태는 `업로드됨`, `전처리`, `실행 중`, `대기`, `완료/검토/실패` counter로 분리해 표시합니다.
 - 결과 화면은 문서 목록 스크롤 위치를 유지하고, 상세 결과에서 문서 이미지와 module output을 함께 검수합니다.
 - 결과 CSV/JSON에는 문서별 `upload_duration_ms`, `inference_duration_ms`가 포함됩니다.
@@ -86,18 +92,13 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 
 공통 상태는 `uploading`, `preprocessing`, `waiting`, `running`, `paused`, `completed`, `needs_review`, `completed_with_errors`, `failed`, `canceled`를 사용합니다.
 
-## Recovery Controls
+## Detailed Docs
 
-| Control | Behavior |
+| Topic | Link |
 | --- | --- |
-| `추론 중단` | 실행 기록과 보관함 문서는 남기고 현재 workflow inference만 취소합니다. |
-| `계속 처리` | 업로드가 끝났지만 아직 실행되지 않은 run/batch를 시작합니다. |
-| `이어가기` | 새로고침 등으로 끊긴 업로드에서 같은 원본을 재선택해 누락 파일만 등록합니다. |
-| `일시중단` | 업로드된 문서는 보존하고, 새 item 실행을 멈춥니다. 진행 중인 VLM 호출은 현재 item까지만 마무리합니다. |
-| `같은 문서로 다시 실행` | 보관함의 같은 document id를 재사용해 현재 workflow snapshot으로 새 run을 만듭니다. |
-| `대기열 추가` | 업로드된 원본은 공유하고 새 workflow snapshot을 `waiting` run으로 추가합니다. 이전 run이 `completed`, `needs_review`, `completed_with_errors`가 되면 다음 대기 run을 자동 시작합니다. |
-| `대기 취소` | 아직 시작하지 않은 `waiting` run만 취소하며 공유 문서는 삭제하지 않습니다. |
-| `실패 재시도` | 결과 상세 화면에서 실패한 문서만 다시 queue에 넣고, 성공한 문서는 그대로 보존합니다. |
+| Recovery controls | [docs/recovery-controls.md](docs/recovery-controls.md) |
+| API shape | [docs/api-shape.md](docs/api-shape.md) |
+| Production hosting | [docs/deployment.md](docs/deployment.md) |
 
 ## Input / Output
 
@@ -113,25 +114,7 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | KIE | field, value, normalized value, confidence, evidence |
 | Classification | class name, confidence, reason, evidence |
 | Required Check | item별 present/missing/uncertain/not_applicable |
-| Workflow Export | branch별 union-column CSV/JSON, upload/inference duration |
-
-## API Shape
-
-| Area | Endpoint |
-| --- | --- |
-| System status | `GET /api/system/status` |
-| Document library | `POST /api/library/uploads`, `GET /api/documents`, `GET /api/documents/ids`, `POST /api/documents/selection`, `POST /api/documents/delete`, `GET /api/library/tree`, `POST /api/library/folders`, `POST /api/library/copy`, `POST /api/library/move`, `DELETE /api/documents/{document_id}` |
-| Workflow from library | `POST /api/workflows/{workflow_id}/runs/from-documents` |
-| Workflow upload legacy | `POST /api/workflows/{workflow_id}/runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
-| Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart`, `POST /api/workflow-runs/{run_id}/retry-failed` |
-| Workflow queue | `POST /api/workflow-runs/{run_id}/enqueue`, `POST /api/workflow-runs/{run_id}/cancel-waiting`, `POST /api/workflow-runs/{run_id}/start` |
-| KIE from library | `POST /api/batches/from-documents` |
-| Classification from library | `POST /api/classification-batches/from-documents` |
-| Required check from library | `POST /api/required-field-check-batches/from-documents` |
-| Legacy batch upload | `POST /api/batches/init`, `POST /api/batches/{batch_id}/items`, `POST /api/batches/{batch_id}/start` |
-| Summary polling | `GET /api/workflow-runs/{run_id}/summary`, `GET /api/batches/{batch_id}/summary` 계열 |
-
-기존 단일 `/api/documents` multipart API는 호환성용으로 즉시 전처리 완료 계약을 유지합니다. 보관함 대량 업로드 API가 백그라운드 conversion queue를 사용합니다.
+| Workflow Export | branch별 union-column CSV/JSON/XLSX, upload/inference duration |
 
 ## Stack
 
@@ -182,59 +165,13 @@ VLM_MODEL_NAME=mock-vlm
 | `DATABASE_MAX_OVERFLOW` | `0` | pool 크기를 넘는 임시 connection 허용 수 |
 | `DATABASE_POOL_TIMEOUT_SECONDS` | `60` | DB connection 대기 timeout |
 | `UPLOAD_MAX_BATCH_FILES` | `10000` | 한 번에 업로드할 수 있는 batch 파일 수 |
+| `UPLOAD_RETENTION_HOURS` | `24` | 업로드 문서 보존 시간 |
 
 Workflow local blocking work는 `WORKFLOW_MAX_WORKERS` 크기의 전용 executor 큐로 제한합니다. 대량 문서 실행에서 worker 대기 자체가 Python default threadpool을 점유하지 않도록 하기 위한 구조입니다.
 
 Workflow 화면의 `처리 중`은 workflow item이 모듈 단계에 진입한 문서 수입니다. 실제 provider 동시 호출 수는 별도 KPI인 `AI 요청 중 / AI 요청 한도`, provider 호출 대기는 `AI 요청 대기`로 표시됩니다. async VLM 호출은 `VLM_TIMEOUT_SECONDS` 안에 완료되지 않으면 실패/재시도 경로로 수렴합니다.
-| `UPLOAD_RETENTION_HOURS` | `24` | 업로드 문서 보존 시간 |
 
 운영에서 5,000장 이상 대량 처리를 자주 실행한다면 SQLite보다 Postgres 사용을 권장합니다.
-
-## Production Hosting
-
-기본 배포 방식은 frontend 정적 호스팅과 backend API 분리 배포입니다. 단일 서버 fallback도 지원합니다.
-
-| Env | Description |
-| --- | --- |
-| `APP_ENV=production` | production mode |
-| `ACCESS_CONTROL_MODE=shared_secret` | 공유 접근 코드 기반 접근 제어 |
-| `APP_ACCESS_SECRET` | 외부 접근 코드 |
-| `SESSION_SECRET_KEY` | HttpOnly session cookie 서명 키 |
-| `CORS_ALLOWED_ORIGINS` | frontend origin allowlist |
-| `DATABASE_URL` | SQLite 또는 Postgres URL |
-| `STORAGE_BACKEND=local` | local persistent volume 저장 |
-| `SERVE_FRONTEND=true` | FastAPI가 `frontend/dist`를 직접 서빙 |
-
-```bash
-cd frontend
-npm run build
-
-APP_ENV=production \
-ACCESS_CONTROL_MODE=shared_secret \
-APP_ACCESS_SECRET=<shared-code> \
-SESSION_SECRET_KEY=<session-secret> \
-DATABASE_URL=sqlite:////data/document-automation.db \
-DOCUMENT_STORAGE_DIR=/data/documents \
-RAW_STORAGE_DIR=/data/raw \
-PROCESSING_TMP_DIR=/data/processing \
-UPLOAD_RETENTION_HOURS=24 \
-SERVE_FRONTEND=true \
-FRONTEND_DIST_DIR="$(pwd)/dist" \
-../.venv/bin/python -m uvicorn app.main:app --app-dir ../backend --host 0.0.0.0 --port 8000
-```
-
-세부 배포 절차는 [docs/deployment.md](docs/deployment.md)에 정리되어 있습니다.
-
-## README Media
-
-README 이미지는 `assets/readme-src/*.html`에서 관리합니다. 워크플로우 빌더 이미지는 로컬 웹 UI를 직접 캡처한 화면을 사용하고, 나머지는 같은 스타일의 HTML artboard를 `assets/readme/*.png`로 렌더링합니다.
-
-## Test
-
-```bash
-npm run build --prefix frontend
-.venv/bin/python -m pytest backend -q
-```
 
 ## Repository
 

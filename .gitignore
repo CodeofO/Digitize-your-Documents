@@ -56,7 +56,9 @@ frontend/src/*
 # Operator documentation and final README media.
 !docs/
 docs/*
+!docs/api-shape.md
 !docs/deployment.md
+!docs/recovery-controls.md
 !docs/readme-media.html
 !assets/
 assets/*
