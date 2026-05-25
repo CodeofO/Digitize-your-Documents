@@ -61,6 +61,7 @@ Document Automation Workspace는 사람이 대량 문서에서 반복적으로 �
 | D5 | 워크플로우/모듈의 신규 업로드도 먼저 보관함에 저장한 뒤 document id 기준으로 실행 |
 | D6 | `/api/documents` 단일 업로드는 기존 테스트/호환성을 위해 즉시 전처리 완료 계약 유지 |
 | D7 | `WORKFLOW_MAX_WORKERS`와 `VLM_MAX_CONCURRENT_REQUESTS`를 분리하고, AI 동시 요청은 async semaphore로 통제 |
+| D8 | 문서 보관함에 빈 폴더, 전체 선택, 파일/폴더 복사, 파일/폴더 이동, 잘라내기/붙여넣기 기능 추가 |
 
 ### 1.3 문서 보관함 기준 구조
 
@@ -70,9 +71,12 @@ Document Automation Workspace는 사람이 대량 문서에서 반복적으로 �
 
 - 원본 파일 저장
 - 상대 경로 `library_path` 저장
+- 명시적 빈 폴더 `DocumentLibraryFolder` 저장
 - `DocumentConversionJob` queue로 page image/meta 생성
 - `ready`, `queued`, `preprocessing`, `failed`, `deleted` 상태 관리
 - 원본 삭제 시 과거 결과와 실행 기록은 보존하고 storage payload만 제거
+- 파일/폴더 복사는 새 `Document`와 새 storage payload를 만들며 원본과 payload를 공유하지 않는다.
+- 파일/폴더 이동은 `library_path`와 명시적 폴더 path를 변경하며 원본 payload는 유지한다.
 
 모듈/워크플로우 실행 정책:
 
@@ -81,6 +85,7 @@ Document Automation Workspace는 사람이 대량 문서에서 반복적으로 �
 - `queued/preprocessing` 문서는 `waiting_for_document`로 저장하고, 변환 완료 시 자동으로 활성화한다.
 - `failed/deleted` 문서는 신규 실행 대상으로 거부한다.
 - 기존 multipart upload API는 이어가기/호환용으로 유지하되, 신규 UI의 기본 경로는 보관함이다.
+- workflow run의 `discard`는 보관함 문서를 삭제하지 않고 추론 실행만 취소한다. 원본 삭제는 문서 보관함의 명시적 삭제 액션으로만 수행한다.
 
 ## 2. Raw Data Extractor
 

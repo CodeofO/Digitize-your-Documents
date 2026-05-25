@@ -204,6 +204,27 @@ class DocumentTreeRead(BaseModel):
     folders: list[DocumentTreeFolderRead]
 
 
+class DocumentLibraryCreateFolderRequest(BaseModel):
+    folder_path: str = Field(min_length=1, max_length=1000)
+
+
+class DocumentLibraryClipboardRequest(BaseModel):
+    document_ids: list[str] = Field(default_factory=list, max_length=10000)
+    folder_paths: list[str] = Field(default_factory=list, max_length=1000)
+    target_folder: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_targets(self) -> "DocumentLibraryClipboardRequest":
+        if not self.document_ids and not self.folder_paths:
+            raise ValueError("document_ids or folder_paths is required")
+        return self
+
+
+class DocumentLibraryActionRead(BaseModel):
+    documents: list[DocumentRead] = Field(default_factory=list)
+    folders: list[DocumentTreeFolderRead] = Field(default_factory=list)
+
+
 class DocumentSelectionRequest(BaseModel):
     document_ids: list[str] = Field(min_length=1, max_length=10000)
 

@@ -52,6 +52,14 @@ class DocumentConversionJob(Base):
     document: Mapped[Document] = relationship()
 
 
+class DocumentLibraryFolder(Base):
+    __tablename__ = "document_library_folders"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("library_folder"))
+    path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
 class DocumentPage(Base):
     __tablename__ = "document_pages"
 

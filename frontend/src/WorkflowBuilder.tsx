@@ -594,7 +594,7 @@ export function WorkflowBuilder({
 
   async function stopStartingRun() {
     workflowStartCancelRequestedRef.current = true;
-    setRunStartMessage("업로드 삭제 중");
+    setRunStartMessage("시작 중단 중");
     workflowStartAbortRef.current?.abort();
     const runId = workflowStartRunIdRef.current || activeRunId;
     if (!runId) {
@@ -878,7 +878,7 @@ export function WorkflowBuilder({
       const run = await api<WorkflowRun>(`/api/workflow-runs/${runId}/discard`, { method: "POST" });
       upsertRun(run);
       focusWorkflowRun(run.id, false);
-      setMessage("워크플로우 실행 기록만 남기고 업로드 산출물을 정리했습니다.");
+      setMessage("워크플로우 추론을 중단했습니다. 문서는 보관함에 유지됩니다.");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 실행을 중단하지 못했습니다.");
     }
@@ -1089,7 +1089,6 @@ export function WorkflowBuilder({
               <WorkflowRunPreparingDock
                 fileCount={runStartFileCount || files.length}
                 message={runStartMessage ?? "작업 준비 중"}
-                onPause={() => void pauseStartingRun()}
                 onDiscard={() => void stopStartingRun()}
               />
             ) : activeRun ? (
@@ -1585,8 +1584,8 @@ function WorkflowRunProgressDock(props: {
             </button>
           )}
           {workflowRunCanRestart(props.run) && (
-            <button type="button" className="secondary" onClick={props.onRestart} title="기존 추론은 중지하고 업로드된 문서로 현재 워크플로우를 새로 실행합니다.">
-              <Play size={15} /> 현재 문서로 새 실행
+            <button type="button" className="secondary" onClick={props.onRestart} title="문서 보관함의 같은 문서로 현재 캔버스 워크플로우를 새 실행으로 만듭니다.">
+              <Play size={15} /> 같은 문서로 다시 실행
             </button>
           )}
           {workflowRunCanStartWaiting(props.run) && props.canStartWaiting !== false && (
@@ -1601,7 +1600,7 @@ function WorkflowRunProgressDock(props: {
           )}
           {workflowRunCanDiscard(props.run) && (
             <button type="button" className="secondary danger-outline" onClick={props.onDiscard}>
-              <X size={15} /> 업로드 삭제
+              <X size={15} /> 추론 중단
             </button>
           )}
         </div>
@@ -1614,7 +1613,6 @@ function WorkflowRunProgressDock(props: {
 function WorkflowRunPreparingDock(props: {
   fileCount: number;
   message: string;
-  onPause: () => void;
   onDiscard: () => void;
 }) {
   return (
@@ -1630,11 +1628,8 @@ function WorkflowRunPreparingDock(props: {
           <span><strong>{props.fileCount.toLocaleString()}</strong> 준비 중</span>
         </div>
         <div className="workflow-progress-dock-actions">
-          <button type="button" className="secondary" onClick={props.onPause}>
-            <Pause size={15} /> 일시중단
-          </button>
           <button type="button" className="secondary danger-outline" onClick={props.onDiscard}>
-            <X size={15} /> 업로드 삭제
+            <X size={15} /> 시작 중단
           </button>
         </div>
       </div>
@@ -1845,8 +1840,8 @@ function WorkflowRunResults(props: {
             </button>
           )}
           {props.onRestart && workflowRunCanRestart(props.run) && (
-            <button type="button" className="secondary" onClick={props.onRestart} title="기존 추론은 중지하고 업로드된 문서로 새 실행을 만듭니다.">
-              <Play size={15} /> 현재 문서로 새 실행
+            <button type="button" className="secondary" onClick={props.onRestart} title="문서 보관함의 같은 문서로 현재 캔버스 워크플로우를 새 실행으로 만듭니다.">
+              <Play size={15} /> 같은 문서로 다시 실행
             </button>
           )}
           {props.onStartWaiting && workflowRunCanStartWaiting(props.run) && (
@@ -1866,7 +1861,7 @@ function WorkflowRunResults(props: {
           )}
           {props.onDiscard && workflowRunCanDiscard(props.run) && (
             <button type="button" className="secondary danger-outline" onClick={props.onDiscard}>
-              <X size={15} /> 업로드 삭제
+              <X size={15} /> 추론 중단
             </button>
           )}
         </div>
@@ -1983,7 +1978,8 @@ function workflowRunCanPause(run: WorkflowRun) {
 function workflowRunCanRestart(run: WorkflowRun) {
   if (run.status === "waiting") return false;
   const uploadedCount = run.uploaded_count ?? run.items.length;
-  return run.status !== "canceled" && run.items.length > 0 && (uploadedCount === run.total_count || run.status === "paused");
+  const restartableStatus = ["paused", "completed", "completed_with_errors", "needs_review", "failed", "canceled"].includes(run.status);
+  return restartableStatus && run.items.length > 0 && (uploadedCount === run.total_count || run.status === "paused");
 }
 
 function workflowRunCanRetryFailed(run: WorkflowRun) {

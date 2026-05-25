@@ -1,13 +1,17 @@
 import {
   Check,
   CheckSquare,
+  Clipboard,
   ClipboardList,
+  Copy,
   FileText,
+  FolderPlus,
   FolderOpen,
   Loader2,
   Play,
   Plus,
   Search,
+  Scissors,
   Sparkles,
   Trash2,
   UploadCloud,
@@ -48,14 +52,26 @@ type LibraryUploadResponse = {
   documents: LibraryDocument[];
 };
 
+type LibraryActionResponse = {
+  documents: LibraryDocument[];
+  folders: LibraryFolder[];
+};
+
 type UploadQueueItem = {
   id: string;
   label: string;
   files: File[];
+  targetFolder: string;
   status: "pending" | "uploading" | "completed" | "failed";
   uploadedCount: number;
   error: string | null;
 };
+
+type LibraryClipboard = {
+  mode: "copy" | "cut";
+  documentIds: string[];
+  folderPaths: string[];
+} | null;
 
 type LibraryActionTarget = "raw" | "key-info" | "classifier" | "required-checker" | "workflow";
 
@@ -146,12 +162,17 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
   const [status, setStatus] = useState("");
   const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [operationBusy, setOperationBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [clipboard, setClipboard] = useState<LibraryClipboard>(null);
+  const [selectedDocumentCache, setSelectedDocumentCache] = useState<Record<string, LibraryDocument>>({});
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const processingQueueRef = useRef(false);
   const selectedSet = useMemo(() => new Set(props.selectedIds), [props.selectedIds]);
-  const selectedDocuments = documents.filter((document) => selectedSet.has(document.document_id));
+  const selectableDocuments = documents.filter((document) => !["deleted", "failed"].includes(document.status));
+  const allVisibleSelected = selectableDocuments.length > 0 && selectableDocuments.every((document) => selectedSet.has(document.document_id));
   const pendingUploadCount = uploadQueue.filter((item) => item.status === "pending" || item.status === "uploading").length;
   const hasConvertingDocuments = documents.some((document) => ["queued", "preprocessing"].includes(document.status));
 
@@ -188,6 +209,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
       ]);
       setDocuments(loadedDocuments);
       setFolders(tree.folders);
+      rememberDocuments(loadedDocuments);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -195,8 +217,20 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     }
   }
 
+  function rememberDocuments(incoming: LibraryDocument[]) {
+    if (!incoming.length) return;
+    setSelectedDocumentCache((current) => {
+      const next = { ...current };
+      incoming.forEach((document) => {
+        next[document.document_id] = document;
+      });
+      return next;
+    });
+  }
+
   function toggleDocument(document: LibraryDocument) {
     if (document.status === "deleted" || document.status === "failed") return;
+    rememberDocuments([document]);
     const next = selectedSet.has(document.document_id)
       ? props.selectedIds.filter((id) => id !== document.document_id)
       : [...props.selectedIds, document.document_id];
@@ -205,6 +239,133 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
 
   function clearSelection() {
     props.onSelectedIds([]);
+  }
+
+  async function selectAllDocuments() {
+    setError(null);
+    setNotice(null);
+    try {
+      const params = libraryQueryParams();
+      params.set("limit", "20000");
+      const ids = await api<string[]>(`/api/documents/ids?${params.toString()}`);
+      const next = allVisibleSelected ? [] : Array.from(new Set([...props.selectedIds, ...ids]));
+      props.onSelectedIds(next);
+      if (!allVisibleSelected && ids.length) {
+        rememberDocuments(documents.filter((document) => ids.includes(document.document_id)));
+      }
+      setNotice(allVisibleSelected ? "현재 목록 선택을 해제했습니다." : `${ids.length.toLocaleString()}개 문서를 선택했습니다.`);
+      if (!ids.length) setNotice("선택할 문서가 없습니다.");
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function resolveSelectedDocuments() {
+    const cached = props.selectedIds.map((id) => selectedDocumentCache[id]).filter(Boolean);
+    if (cached.length === props.selectedIds.length) return cached;
+    const response = await api<LibraryUploadResponse>("/api/documents/selection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: props.selectedIds })
+    });
+    rememberDocuments(response.documents);
+    const byId = new Map(response.documents.map((document) => [document.document_id, document]));
+    return props.selectedIds.map((id) => selectedDocumentCache[id] ?? byId.get(id)).filter(Boolean) as LibraryDocument[];
+  }
+
+  async function runSelected(target: LibraryActionTarget) {
+    setError(null);
+    try {
+      const documentsToRun = await resolveSelectedDocuments();
+      props.onRunSelected?.(target, documentsToRun);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function applySelection() {
+    setError(null);
+    try {
+      const documentsToApply = await resolveSelectedDocuments();
+      props.onApply?.(documentsToApply);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  function copySelected(mode: "copy" | "cut") {
+    if (!props.selectedIds.length) return;
+    setClipboard({ mode, documentIds: props.selectedIds, folderPaths: [] });
+    setNotice(`${props.selectedIds.length.toLocaleString()}개 문서를 ${mode === "copy" ? "복사" : "이동"} 대상으로 잡았습니다.`);
+  }
+
+  function copyActiveFolder(mode: "copy" | "cut") {
+    if (!activeFolder) {
+      setError("먼저 왼쪽에서 폴더를 선택하세요.");
+      return;
+    }
+    setClipboard({ mode, documentIds: [], folderPaths: [activeFolder] });
+    setNotice(`"${activeFolder}" 폴더를 ${mode === "copy" ? "복사" : "이동"} 대상으로 잡았습니다.`);
+  }
+
+  async function pasteClipboard() {
+    if (!clipboard) return;
+    setOperationBusy(true);
+    setError(null);
+    try {
+      const response = await api<LibraryActionResponse>(`/api/library/${clipboard.mode === "copy" ? "copy" : "move"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          document_ids: clipboard.documentIds,
+          folder_paths: clipboard.folderPaths,
+          target_folder: activeFolder
+        })
+      });
+      rememberDocuments(response.documents);
+      setFolders(response.folders);
+      if (clipboard.mode === "cut") {
+        setClipboard(null);
+        props.onSelectedIds([]);
+      }
+      setNotice(`${clipboard.mode === "copy" ? "복사" : "이동"} 완료: ${response.documents.length.toLocaleString()}개 문서`);
+      await refreshLibrary({ silent: true });
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setOperationBusy(false);
+    }
+  }
+
+  async function createFolder() {
+    const name = window.prompt("새 폴더 이름");
+    const folderName = normalizeLibraryPath(name ?? "");
+    if (!folderName) return;
+    const folderPath = activeFolder ? `${activeFolder}/${folderName}` : folderName;
+    setOperationBusy(true);
+    setError(null);
+    try {
+      const tree = await api<{ folders: LibraryFolder[] }>("/api/library/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder_path: folderPath })
+      });
+      setFolders(tree.folders);
+      setActiveFolder(normalizeLibraryPath(folderPath));
+      setNotice(`"${folderPath}" 폴더를 만들었습니다.`);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setOperationBusy(false);
+    }
+  }
+
+  function libraryQueryParams() {
+    const params = new URLSearchParams();
+    if (activeFolder) params.set("library_path", activeFolder);
+    if (query.trim()) params.set("q", query.trim());
+    if (status) params.set("status", status);
+    return params;
   }
 
   function enqueueFiles(files: File[], label: string) {
@@ -217,8 +378,9 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     }
     const item: UploadQueueItem = {
       id: `upload_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      label,
+      label: activeFolder ? `${label} → ${activeFolder}` : label,
       files: supported,
+      targetFolder: activeFolder,
       status: "pending",
       uploadedCount: 0,
       error: null
@@ -238,7 +400,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
       const chunkSize = Math.max(1, props.uploadChunkFiles ?? DEFAULT_LIBRARY_UPLOAD_CHUNK_FILES);
       for (let start = 0; start < item.files.length; start += chunkSize) {
         const chunk = item.files.slice(start, start + chunkSize);
-        const response = await uploadLibraryFiles(chunk);
+        const response = await uploadLibraryFiles(chunk, item.targetFolder);
         uploadedDocuments.push(...response);
         uploadedCount += chunk.length;
         setUploadQueue((current) =>
@@ -246,6 +408,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
         );
         setDocuments((current) => mergeDocuments(response, current));
       }
+      rememberDocuments(uploadedDocuments);
       setUploadQueue((current) =>
         current.map((candidate) => (candidate.id === itemId ? { ...candidate, status: "completed", uploadedCount } : candidate))
       );
@@ -290,8 +453,11 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     }
   }
 
-  const folderButtons = folders.filter((folder) => folder.path || folder.total_count);
+  const folderButtons = folders.filter((folder) => folder.path);
   const rootFolder = folders.find((folder) => folder.path === "");
+  const clipboardLabel = clipboard
+    ? `${clipboard.documentIds.length + clipboard.folderPaths.length}개 ${clipboard.mode === "copy" ? "복사" : "이동"} 준비됨`
+    : "";
 
   return (
     <section className={props.mode === "screen" ? "document-library-panel full" : "document-library-panel compact"}>
@@ -339,13 +505,31 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
 
       <div className="document-library-body">
         <aside className="document-library-folders">
-          <button type="button" className={activeFolder === "" ? "active" : ""} onClick={() => setActiveFolder("")}>
+          <div className="document-library-folder-tools">
+            <button type="button" className="secondary compact" disabled={operationBusy} onClick={() => void createFolder()}>
+              <FolderPlus size={14} />
+              새 폴더
+            </button>
+            <button type="button" className="secondary compact" disabled={!activeFolder || operationBusy} onClick={() => copyActiveFolder("copy")}>
+              <Copy size={14} />
+              폴더 복사
+            </button>
+            <button type="button" className="secondary compact" disabled={!activeFolder || operationBusy} onClick={() => copyActiveFolder("cut")}>
+              <Scissors size={14} />
+              폴더 이동
+            </button>
+            <button type="button" className="secondary compact" disabled={!clipboard || operationBusy} onClick={() => void pasteClipboard()}>
+              <Clipboard size={14} />
+              붙여넣기
+            </button>
+          </div>
+          <button type="button" className={`document-library-folder-button ${activeFolder === "" ? "active" : ""}`} onClick={() => setActiveFolder("")}>
             <FolderOpen size={16} />
             <span>전체 문서</span>
             <small>{rootFolder?.total_count ?? documents.length}</small>
           </button>
           {folderButtons.map((folder) => (
-            <button key={folder.path || "root"} type="button" className={activeFolder === folder.path ? "active" : ""} onClick={() => setActiveFolder(folder.path)}>
+            <button key={folder.path || "root"} type="button" className={`document-library-folder-button ${activeFolder === folder.path ? "active" : ""}`} onClick={() => setActiveFolder(folder.path)}>
               <FolderOpen size={16} />
               <span>{folder.path || "문서 보관함"}</span>
               <small>{folder.total_count}</small>
@@ -355,15 +539,38 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
 
         <div className="document-library-main">
           <div className="document-library-selection-bar">
-            <span>{props.selectedIds.length ? `${props.selectedIds.length.toLocaleString()}개 선택됨` : "문서를 선택하면 작업으로 보낼 수 있습니다."}</span>
+            <span>
+              {props.selectedIds.length ? `${props.selectedIds.length.toLocaleString()}개 선택됨` : "문서를 선택하면 작업으로 보낼 수 있습니다."}
+              {clipboardLabel ? ` · ${clipboardLabel}` : ""}
+            </span>
             <div>
+              <button type="button" className="secondary compact" disabled={loading || operationBusy || !selectableDocuments.length} onClick={() => void selectAllDocuments()}>
+                <CheckSquare size={14} />
+                {allVisibleSelected ? "전체 해제" : "전체 선택"}
+              </button>
               {props.selectedIds.length > 0 && (
                 <button type="button" className="secondary compact" onClick={clearSelection}>
                   선택 해제
                 </button>
               )}
+              {props.selectedIds.length > 0 && (
+                <>
+                  <button type="button" className="secondary compact" disabled={operationBusy} onClick={() => copySelected("copy")}>
+                    <Copy size={14} />
+                    복사
+                  </button>
+                  <button type="button" className="secondary compact" disabled={operationBusy} onClick={() => copySelected("cut")}>
+                    <Scissors size={14} />
+                    이동
+                  </button>
+                </>
+              )}
+              <button type="button" className="secondary compact" disabled={!clipboard || operationBusy} onClick={() => void pasteClipboard()}>
+                <Clipboard size={14} />
+                붙여넣기
+              </button>
               {props.onApply && (
-                <button type="button" className="primary compact" disabled={!selectedDocuments.length} onClick={() => props.onApply?.(selectedDocuments)}>
+                <button type="button" className="primary compact" disabled={!props.selectedIds.length} onClick={() => void applySelection()}>
                   <Check size={14} />
                   선택 적용
                 </button>
@@ -373,30 +580,30 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
 
           {props.mode === "screen" && props.onRunSelected && (
             <div className="document-library-actions">
-              <button type="button" disabled={!selectedDocuments.length} onClick={() => props.onRunSelected?.("workflow", selectedDocuments)}>
+              <button type="button" disabled={!props.selectedIds.length} onClick={() => void runSelected("workflow")}>
                 <Play size={15} />
                 워크플로우로 실행
               </button>
-              <button type="button" disabled={!selectedDocuments.length} onClick={() => props.onRunSelected?.("key-info", selectedDocuments)}>
+              <button type="button" disabled={!props.selectedIds.length} onClick={() => void runSelected("key-info")}>
                 <Sparkles size={15} />
                 핵심 정보 추출
               </button>
-              <button type="button" disabled={!selectedDocuments.length} onClick={() => props.onRunSelected?.("classifier", selectedDocuments)}>
+              <button type="button" disabled={!props.selectedIds.length} onClick={() => void runSelected("classifier")}>
                 <ClipboardList size={15} />
                 문서 분류
               </button>
-              <button type="button" disabled={!selectedDocuments.length} onClick={() => props.onRunSelected?.("required-checker", selectedDocuments)}>
+              <button type="button" disabled={!props.selectedIds.length} onClick={() => void runSelected("required-checker")}>
                 <CheckSquare size={15} />
                 필수 항목 확인
               </button>
-              <button type="button" disabled={selectedDocuments.length !== 1} onClick={() => props.onRunSelected?.("raw", selectedDocuments)}>
+              <button type="button" disabled={props.selectedIds.length !== 1} onClick={() => void runSelected("raw")}>
                 <FileText size={15} />
                 원문 추출
               </button>
             </div>
           )}
 
-          {(error || loading) && (
+          {(error || notice || loading || operationBusy) && (
             <div className="document-library-message">
               {loading && (
                 <span>
@@ -404,6 +611,13 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
                   보관함을 불러오는 중
                 </span>
               )}
+              {operationBusy && (
+                <span>
+                  <Loader2 size={15} className="spin" />
+                  보관함 작업 처리 중
+                </span>
+              )}
+              {notice && <span>{notice}</span>}
               {error && <span className="module-error">{error}</span>}
             </div>
           )}
@@ -467,11 +681,11 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
   );
 }
 
-export async function uploadLibraryFiles(files: File[]): Promise<LibraryDocument[]> {
+export async function uploadLibraryFiles(files: File[], targetFolder = ""): Promise<LibraryDocument[]> {
   const form = new FormData();
   files.forEach((file) => {
     form.append("files", file);
-    form.append("library_paths", libraryPathForFile(file));
+    form.append("library_paths", normalizeLibraryPath([targetFolder, libraryPathForFile(file)].filter(Boolean).join("/")));
   });
   const response = await api<LibraryUploadResponse>("/api/library/uploads", { method: "POST", body: form });
   return response.documents;

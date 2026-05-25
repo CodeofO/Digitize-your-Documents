@@ -1,5 +1,33 @@
 # 오류 기록
 
+## 2026-05-25 - 문서 보관함 폴더 복사/이동 중 pending folder 중복 insert
+
+### 증상
+
+- 폴더 복사 또는 이동 테스트에서 `UNIQUE constraint failed: document_library_folders.path`가 발생했다.
+- 같은 요청 안에서 `검수 copy`, `완료/검수 copy` 같은 폴더 path가 두 번 insert되었다.
+
+### 영향
+
+- 폴더 copy/move API가 500으로 실패할 수 있었다.
+- 문서 row와 storage copy가 진행된 뒤 flush 단계에서 실패하므로 사용자에게는 보관함 조작이 불안정하게 보인다.
+
+### 원인
+
+- SQLAlchemy session의 `autoflush=False` 설정 때문에 아직 DB에 flush되지 않은 `DocumentLibraryFolder` pending row를 query로 찾지 못했다.
+- 이동 중 기존 folder row의 path를 바꾼 dirty row도 query에는 이전 DB 값으로 보였다.
+
+### 수정
+
+- `_ensure_library_folder_records()`가 DB query만 보지 않고 `db.new`, `db.dirty`의 `DocumentLibraryFolder.path`도 함께 확인하도록 보강했다.
+- 폴더 복사/이동 테스트에 명시적 폴더, 문서 복사, 폴더 복사, 폴더 이동, 원본 삭제 후 복사본 조회를 포함했다.
+
+### 검증
+
+- `.venv/bin/pytest backend/tests/test_api.py::test_document_library_select_copy_move_and_folder_operations -q` 통과
+- `.venv/bin/pytest backend/tests/test_api.py -q` 통과: `92 passed`
+- `npm run build --prefix frontend` 통과
+
 ## 2026-05-25 - 문서 보관함 전환 중 `/api/documents` 즉시 전처리 계약 회귀
 
 ### 증상

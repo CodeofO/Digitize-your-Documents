@@ -5685,7 +5685,7 @@ pre {
   padding: 12px;
 }
 
-.document-library-folders button {
+.document-library-folder-button {
   align-items: center;
   background: transparent;
   border: 1px solid transparent;
@@ -5699,10 +5699,23 @@ pre {
   width: 100%;
 }
 
-.document-library-folders button.active {
+.document-library-folder-button.active {
   background: #ffffff;
   border-color: var(--tds-blue-200);
   color: var(--tds-blue-700);
+}
+
+.document-library-folder-tools {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 8px;
+}
+
+.document-library-folder-tools button {
+  justify-content: center;
+  min-height: 34px;
+  white-space: nowrap;
 }
 
 .document-library-folders span {

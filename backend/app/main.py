@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from uuid import uuid4
 
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,6 +65,7 @@ from app.models import (
     ClassificationResult,
     Document,
     DocumentClassifier,
+    DocumentLibraryFolder,
     DocumentPage,
     ExportPreset,
     ExtractionJob,
@@ -96,6 +98,9 @@ from app.schemas import (
     ClassificationResultRead,
     DocumentPageRead,
     DocumentBatchUploadRead,
+    DocumentLibraryActionRead,
+    DocumentLibraryClipboardRequest,
+    DocumentLibraryCreateFolderRequest,
     DocumentRead,
     DocumentSelectionRequest,
     DocumentTreeRead,
@@ -549,26 +554,71 @@ def list_documents(
     include_deleted: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> list[DocumentRead]:
-    query = db.query(Document)
-    if not include_deleted:
-        query = query.filter(Document.status != "deleted")
-    if status:
-        query = query.filter(Document.status == status)
-    if q:
-        pattern = f"%{q.strip()}%"
-        query = query.filter((Document.filename.ilike(pattern)) | (Document.library_path.ilike(pattern)))
-    if library_path:
-        normalized_path = _normalize_library_path(library_path)
-        if normalized_path:
-            query = query.filter(Document.library_path.ilike(f"{normalized_path}/%"))
-        else:
-            query = query.filter((Document.library_path.is_(None)) | (Document.library_path == "") | (~Document.library_path.contains("/")))
+    query = _document_library_query(db, include_deleted=include_deleted, status=status, q=q, library_path=library_path)
     documents = query.order_by(Document.created_at.desc(), Document.id.desc()).offset(offset).limit(limit).all()
     return [_document_read(document) for document in documents]
 
 
+@app.get("/api/documents/ids", response_model=list[str])
+def list_document_ids(
+    limit: int = Query(default=10000, ge=1, le=20000),
+    q: str | None = Query(default=None),
+    library_path: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    include_deleted: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> list[str]:
+    query = _document_library_query(db, include_deleted=include_deleted, status=status, q=q, library_path=library_path)
+    rows = query.order_by(Document.created_at.desc(), Document.id.desc()).with_entities(Document.id).limit(limit).all()
+    return [row[0] for row in rows]
+
+
+@app.post("/api/documents/selection", response_model=DocumentBatchUploadRead)
+def get_selected_documents(payload: DocumentSelectionRequest, db: Session = Depends(get_db)) -> DocumentBatchUploadRead:
+    documents = _selected_library_documents(db, list(dict.fromkeys(payload.document_ids)))
+    return DocumentBatchUploadRead(documents=[_document_read(document) for document in documents])
+
+
 @app.get("/api/library/tree", response_model=DocumentTreeRead)
 def get_document_library_tree(include_deleted: bool = Query(default=False), db: Session = Depends(get_db)) -> DocumentTreeRead:
+    return _document_tree_read(db, include_deleted=include_deleted)
+
+
+@app.post("/api/library/folders", response_model=DocumentTreeRead)
+def create_library_folder(payload: DocumentLibraryCreateFolderRequest, db: Session = Depends(get_db)) -> DocumentTreeRead:
+    folder_path = _normalize_library_path(payload.folder_path)
+    if not folder_path:
+        raise HTTPException(status_code=422, detail="Folder path is required")
+    _ensure_library_folder_records(db, folder_path)
+    log_audit_event(
+        db,
+        entity_type="document_library_folder",
+        entity_id=folder_path,
+        action="created",
+        message=f"Created document library folder {folder_path}",
+        metadata={"path": folder_path},
+    )
+    db.commit()
+    return _document_tree_read(db)
+
+
+@app.post("/api/library/move", response_model=DocumentLibraryActionRead)
+def move_library_entries(payload: DocumentLibraryClipboardRequest, db: Session = Depends(get_db)) -> DocumentLibraryActionRead:
+    result = _move_library_entries(payload, db)
+    db.commit()
+    return result
+
+
+@app.post("/api/library/copy", response_model=DocumentLibraryActionRead)
+def copy_library_entries(payload: DocumentLibraryClipboardRequest, db: Session = Depends(get_db)) -> DocumentLibraryActionRead:
+    result, conversion_job_ids = _copy_library_entries(payload, db)
+    db.commit()
+    for conversion_job_id in conversion_job_ids:
+        _enqueue_document_conversion_job(conversion_job_id)
+    return result
+
+
+def _document_tree_read(db: Session, *, include_deleted: bool = False) -> DocumentTreeRead:
     query = db.query(Document)
     if not include_deleted:
         query = query.filter(Document.status != "deleted")
@@ -594,18 +644,21 @@ def get_document_library_tree(include_deleted: bool = Query(default=False), db: 
         return folders[normalized]
 
     ensure_folder("")
+    for explicit_folder in db.query(DocumentLibraryFolder).order_by(DocumentLibraryFolder.path.asc()).all():
+        ensure_folder(explicit_folder.path)
+
     for document in documents:
-        folder_path = _library_folder_path(document.library_path)
-        folder = ensure_folder(folder_path)
-        folder["total_count"] += 1
-        if document.status == "ready":
-            folder["ready_count"] += 1
-        elif document.status in DOCUMENT_CONVERTING_STATUSES:
-            folder["converting_count"] += 1
-        elif document.status == "deleted":
-            folder["deleted_count"] += 1
-        elif document.status == "failed":
-            folder["failed_count"] += 1
+        for folder_path in _library_folder_ancestors(_library_folder_path(document.library_path)):
+            folder = ensure_folder(folder_path)
+            folder["total_count"] += 1
+            if document.status == "ready":
+                folder["ready_count"] += 1
+            elif document.status in DOCUMENT_CONVERTING_STATUSES:
+                folder["converting_count"] += 1
+            elif document.status == "deleted":
+                folder["deleted_count"] += 1
+            elif document.status == "failed":
+                folder["failed_count"] += 1
     return DocumentTreeRead(folders=[DocumentTreeFolderRead(**folders[path]) for path in sorted(folders)])
 
 
@@ -2083,27 +2136,19 @@ def discard_workflow_run(run_id: str, db: Session = Depends(get_db)) -> Workflow
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
-    document_ids = [item.document_id for item in run.items]
     if run.status == "waiting":
         _cancel_waiting_workflow_run(run, db)
         db.commit()
         db.refresh(run)
         return WorkflowRunRead(**workflow_run_to_read(run))
-    item_count = len(run.items)
-    deletable_document_ids = _unshared_workflow_document_ids(run, document_ids, db)
-    for item in list(run.items):
-        db.delete(item)
-    _delete_document_payloads(deletable_document_ids, db)
-    run.status = "canceled"
-    run.error_message = "Stopped and discarded uploaded payloads"
-    run.completed_at = datetime.utcnow()
+    _stop_workflow_run_without_deleting_documents(run, "Stopped by user; library documents were kept", db)
     log_audit_event(
         db,
         entity_type="workflow_run",
         entity_id=run.id,
         action="discarded",
-        message=f"Discarded workflow run payloads for {item_count} item(s)",
-        metadata={"workflow_id": run.workflow_id, "discarded_count": item_count},
+        message="Stopped workflow run without deleting document library payloads",
+        metadata={"workflow_id": run.workflow_id, "kept_document_count": len(run.items)},
     )
     db.commit()
     db.refresh(run)
@@ -3510,6 +3555,348 @@ def _library_folder_path(path: str | None) -> str:
     if not normalized or "/" not in normalized:
         return ""
     return normalized.rsplit("/", 1)[0]
+
+
+def _library_folder_ancestors(path: str) -> list[str]:
+    normalized = _normalize_library_path(path)
+    if not normalized:
+        return [""]
+    parts = normalized.split("/")
+    ancestors = [""]
+    for index in range(1, len(parts) + 1):
+        ancestors.append("/".join(parts[:index]))
+    return ancestors
+
+
+def _library_basename(path: str | None, fallback: str) -> str:
+    normalized = _normalize_library_path(path)
+    if not normalized:
+        return fallback
+    return normalized.rsplit("/", 1)[-1] or fallback
+
+
+def _join_library_path(folder_path: str, name: str) -> str:
+    folder = _normalize_library_path(folder_path)
+    clean_name = _normalize_library_path(name).rsplit("/", 1)[-1] if name else ""
+    return f"{folder}/{clean_name}" if folder else clean_name
+
+
+def _document_library_query(
+    db: Session,
+    *,
+    include_deleted: bool = False,
+    status: str | None = None,
+    q: str | None = None,
+    library_path: str | None = None,
+):
+    query = db.query(Document)
+    if not include_deleted:
+        query = query.filter(Document.status != "deleted")
+    if status:
+        query = query.filter(Document.status == status)
+    if q:
+        pattern = f"%{q.strip()}%"
+        query = query.filter((Document.filename.ilike(pattern)) | (Document.library_path.ilike(pattern)))
+    if library_path is not None:
+        normalized_path = _normalize_library_path(library_path)
+        if normalized_path:
+            query = query.filter(Document.library_path.ilike(f"{normalized_path}/%"))
+        else:
+            query = query.filter((Document.library_path.is_(None)) | (Document.library_path == "") | (~Document.library_path.contains("/")))
+    return query
+
+
+def _ensure_library_folder_records(db: Session, folder_path: str) -> None:
+    for path in _library_folder_ancestors(folder_path):
+        if not path:
+            continue
+        if not _library_folder_record_exists(db, path):
+            db.add(DocumentLibraryFolder(path=path))
+
+
+def _library_folder_record_exists(db: Session, path: str) -> bool:
+    if any(isinstance(item, DocumentLibraryFolder) and item.path == path for item in db.new):
+        return True
+    if any(isinstance(item, DocumentLibraryFolder) and item.path == path for item in db.dirty):
+        return True
+    return db.query(DocumentLibraryFolder.id).filter(DocumentLibraryFolder.path == path).one_or_none() is not None
+
+
+def _normalize_library_clipboard_payload(payload: DocumentLibraryClipboardRequest) -> tuple[list[str], list[str], str]:
+    document_ids = list(dict.fromkeys(document_id for document_id in payload.document_ids if document_id))
+    folder_paths = list(dict.fromkeys(_normalize_library_path(path) for path in payload.folder_paths if _normalize_library_path(path)))
+    target_folder = _normalize_library_path(payload.target_folder)
+    if not document_ids and not folder_paths:
+        raise HTTPException(status_code=422, detail="document_ids or folder_paths is required")
+    return document_ids, folder_paths, target_folder
+
+
+def _folder_path_contains(folder_path: str, candidate: str) -> bool:
+    folder = _normalize_library_path(folder_path)
+    target = _normalize_library_path(candidate)
+    return bool(folder and (target == folder or target.startswith(f"{folder}/")))
+
+
+def _existing_library_folder_paths(db: Session) -> set[str]:
+    paths = {row[0] for row in db.query(DocumentLibraryFolder.path).all()}
+    for row in db.query(Document.library_path).filter(Document.status != "deleted", Document.library_path.isnot(None)).all():
+        folder_path = _library_folder_path(row[0])
+        paths.update(_library_folder_ancestors(folder_path))
+    paths.discard("")
+    return paths
+
+
+def _copy_name(name: str, attempt: int) -> str:
+    path = Path(name)
+    suffix = path.suffix
+    stem = path.name.removesuffix(suffix) if suffix else path.name
+    marker = "copy" if attempt == 1 else f"copy {attempt}"
+    return f"{stem} {marker}{suffix}"
+
+
+def _unique_library_document_path(db: Session, desired_path: str, *, exclude_document_ids: set[str] | None = None) -> str:
+    normalized = _normalize_library_path(desired_path)
+    folder = _library_folder_path(normalized)
+    name = _library_basename(normalized, "document")
+    excluded = exclude_document_ids or set()
+    candidate = normalized
+    attempt = 0
+    while True:
+        query = db.query(Document.id).filter(Document.status != "deleted", Document.library_path == candidate)
+        if excluded:
+            query = query.filter(~Document.id.in_(excluded))
+        if query.first() is None:
+            return candidate
+        attempt += 1
+        candidate = _join_library_path(folder, _copy_name(name, attempt))
+
+
+def _unique_library_folder_path(db: Session, desired_path: str, *, exclude_prefixes: set[str] | None = None) -> str:
+    normalized = _normalize_library_path(desired_path)
+    parent = _library_folder_path(normalized)
+    name = _library_basename(normalized, "folder")
+    excluded = exclude_prefixes or set()
+    existing_paths = _existing_library_folder_paths(db)
+    existing_paths = {
+        path
+        for path in existing_paths
+        if not any(path == excluded_path or path.startswith(f"{excluded_path}/") for excluded_path in excluded if excluded_path)
+    }
+    candidate = normalized
+    attempt = 0
+    while candidate in existing_paths:
+        attempt += 1
+        candidate = _join_library_path(parent, _copy_name(name, attempt))
+    return candidate
+
+
+def _documents_in_library_folder(db: Session, folder_path: str) -> list[Document]:
+    normalized = _normalize_library_path(folder_path)
+    if not normalized:
+        return []
+    return (
+        db.query(Document)
+        .filter(Document.status.notin_(["deleted", "failed"]), Document.library_path.ilike(f"{normalized}/%"))
+        .order_by(Document.library_path.asc(), Document.created_at.asc(), Document.id.asc())
+        .all()
+    )
+
+
+def _selected_library_documents(db: Session, document_ids: list[str]) -> list[Document]:
+    if not document_ids:
+        return []
+    documents = db.query(Document).filter(Document.id.in_(document_ids)).all()
+    by_id = {document.id: document for document in documents}
+    missing = [document_id for document_id in document_ids if document_id not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Document not found: {missing[0]}")
+    blocked = [document for document in documents if document.status in {"deleted", "failed"}]
+    if blocked:
+        raise HTTPException(status_code=409, detail=f"Document cannot be copied or moved: {blocked[0].filename}")
+    return [by_id[document_id] for document_id in document_ids]
+
+
+def _move_library_entries(payload: DocumentLibraryClipboardRequest, db: Session) -> DocumentLibraryActionRead:
+    document_ids, folder_paths, target_folder = _normalize_library_clipboard_payload(payload)
+    if target_folder:
+        _ensure_library_folder_records(db, target_folder)
+    moved_documents: list[Document] = []
+    moved_document_ids: set[str] = set()
+
+    for folder_path in folder_paths:
+        if _folder_path_contains(folder_path, target_folder):
+            raise HTTPException(status_code=409, detail="A folder cannot be moved into itself")
+        source_parent = _library_folder_path(folder_path)
+        if source_parent == target_folder:
+            new_folder_path = folder_path
+        else:
+            desired_folder_path = _join_library_path(target_folder, _library_basename(folder_path, "folder"))
+            new_folder_path = _unique_library_folder_path(db, desired_folder_path, exclude_prefixes={folder_path})
+        if new_folder_path != folder_path:
+            _move_library_folder_records(db, folder_path, new_folder_path)
+            for document in _documents_in_library_folder(db, folder_path):
+                suffix = _normalize_library_path(document.library_path).removeprefix(f"{folder_path}/")
+                document.library_path = _unique_library_document_path(db, _join_library_path(new_folder_path, suffix), exclude_document_ids={document.id})
+                moved_documents.append(document)
+                moved_document_ids.add(document.id)
+        _ensure_library_folder_records(db, new_folder_path)
+
+    for document in _selected_library_documents(db, document_ids):
+        if document.id in moved_document_ids:
+            continue
+        basename = _library_basename(document.library_path, document.filename)
+        document.library_path = _unique_library_document_path(db, _join_library_path(target_folder, basename), exclude_document_ids={document.id})
+        moved_documents.append(document)
+        moved_document_ids.add(document.id)
+
+    log_audit_event(
+        db,
+        entity_type="document_library",
+        entity_id=target_folder or "root",
+        action="moved",
+        message=f"Moved {len(moved_document_ids)} document(s) in the document library",
+        metadata={"target_folder": target_folder, "document_count": len(moved_document_ids), "folder_paths": folder_paths},
+    )
+    db.flush()
+    return DocumentLibraryActionRead(
+        documents=[_document_read(document) for document in moved_documents],
+        folders=_document_tree_read(db).folders,
+    )
+
+
+def _move_library_folder_records(db: Session, source_folder: str, target_folder: str) -> None:
+    source = _normalize_library_path(source_folder)
+    target = _normalize_library_path(target_folder)
+    rows = (
+        db.query(DocumentLibraryFolder)
+        .filter((DocumentLibraryFolder.path == source) | (DocumentLibraryFolder.path.ilike(f"{source}/%")))
+        .order_by(DocumentLibraryFolder.path.asc())
+        .all()
+    )
+    for row in rows:
+        suffix = row.path.removeprefix(source).lstrip("/")
+        row.path = _join_library_path(target, suffix) if suffix else target
+
+
+def _copy_library_entries(payload: DocumentLibraryClipboardRequest, db: Session) -> tuple[DocumentLibraryActionRead, list[str]]:
+    document_ids, folder_paths, target_folder = _normalize_library_clipboard_payload(payload)
+    if target_folder:
+        _ensure_library_folder_records(db, target_folder)
+    copied_documents: list[Document] = []
+    conversion_job_ids: list[str] = []
+
+    for folder_path in folder_paths:
+        if _folder_path_contains(folder_path, target_folder):
+            raise HTTPException(status_code=409, detail="A folder cannot be copied into itself")
+        desired_folder_path = _join_library_path(target_folder, _library_basename(folder_path, "folder"))
+        new_folder_path = _unique_library_folder_path(db, desired_folder_path)
+        _ensure_library_folder_records(db, new_folder_path)
+        for explicit_folder in sorted(
+            [path for path in _existing_library_folder_paths(db) if path == folder_path or path.startswith(f"{folder_path}/")]
+        ):
+            suffix = explicit_folder.removeprefix(folder_path).lstrip("/")
+            _ensure_library_folder_records(db, _join_library_path(new_folder_path, suffix) if suffix else new_folder_path)
+        for document in _documents_in_library_folder(db, folder_path):
+            suffix = _normalize_library_path(document.library_path).removeprefix(f"{folder_path}/")
+            copied_document, conversion_job_id = _copy_library_document(
+                document,
+                _unique_library_document_path(db, _join_library_path(new_folder_path, suffix)),
+                db,
+            )
+            copied_documents.append(copied_document)
+            if conversion_job_id:
+                conversion_job_ids.append(conversion_job_id)
+
+    for document in _selected_library_documents(db, document_ids):
+        basename = _library_basename(document.library_path, document.filename)
+        copied_document, conversion_job_id = _copy_library_document(
+            document,
+            _unique_library_document_path(db, _join_library_path(target_folder, basename)),
+            db,
+        )
+        copied_documents.append(copied_document)
+        if conversion_job_id:
+            conversion_job_ids.append(conversion_job_id)
+
+    log_audit_event(
+        db,
+        entity_type="document_library",
+        entity_id=target_folder or "root",
+        action="copied",
+        message=f"Copied {len(copied_documents)} document(s) in the document library",
+        metadata={"target_folder": target_folder, "document_count": len(copied_documents), "folder_paths": folder_paths},
+    )
+    db.flush()
+    return (
+        DocumentLibraryActionRead(
+            documents=[_document_read(document) for document in copied_documents],
+            folders=_document_tree_read(db).folders,
+        ),
+        conversion_job_ids,
+    )
+
+
+def _copy_library_document(source: Document, library_path: str, db: Session) -> tuple[Document, str | None]:
+    if source.status in {"deleted", "failed"}:
+        raise HTTPException(status_code=409, detail=f"Document cannot be copied: {source.filename}")
+    source_original = materialize_storage_ref(source.storage_path)
+    if not source_original.exists():
+        raise HTTPException(status_code=404, detail=f"Document payload is missing: {source.filename}")
+
+    local_dir = get_settings().resolved_storage_dir / uuid4().hex
+    local_dir.mkdir(parents=True, exist_ok=True)
+    original_suffix = source_original.suffix or Path(source.filename).suffix
+    local_original = local_dir / f"original{original_suffix or '.bin'}"
+    shutil.copy2(source_original, local_original)
+
+    copied = Document(
+        filename=source.filename,
+        mime_type=source.mime_type,
+        size_bytes=source.size_bytes,
+        page_count=0,
+        storage_path="",
+        library_path=_normalize_library_path(library_path) or source.filename,
+        status="queued" if source.status in DOCUMENT_CONVERTING_STATUSES else source.status,
+        error_message=None,
+        document_type=source.document_type,
+        language=source.language,
+        ai_summary=source.ai_summary,
+        recommendation_reasoning=source.recommendation_reasoning,
+    )
+    db.add(copied)
+    db.flush()
+    copied.storage_path = persist_artifact(local_original, f"documents/{copied.id}/original{local_original.suffix}")
+
+    if source.status == "ready":
+        page_dir = local_dir / "pages"
+        page_dir.mkdir(parents=True, exist_ok=True)
+        for page in source.pages:
+            source_page = materialize_storage_ref(page.image_path)
+            if not source_page.exists():
+                raise HTTPException(status_code=404, detail=f"Document page payload is missing: {source.filename}")
+            local_page = page_dir / source_page.name
+            if local_page.exists():
+                local_page = page_dir / f"page_{page.page_number:04d}{source_page.suffix or '.jpg'}"
+            shutil.copy2(source_page, local_page)
+            page_ref = persist_artifact(local_page, f"documents/{copied.id}/pages/{local_page.name}", _image_media_type(local_page))
+            db.add(
+                DocumentPage(
+                    document_id=copied.id,
+                    page_number=page.page_number,
+                    image_path=page_ref,
+                    width=page.width,
+                    height=page.height,
+                )
+            )
+        copied.page_count = source.page_count
+        return copied, None
+
+    copied.page_count = 0
+    copied.status = "queued"
+    job = DocumentConversionJob(document_id=copied.id, status="queued")
+    db.add(job)
+    db.flush()
+    return copied, job.id
 
 
 def _create_queued_library_document(file: UploadFile, db: Session, *, library_path: str | None = None) -> tuple[Document, str]:

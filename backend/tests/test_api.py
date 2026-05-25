@@ -733,6 +733,79 @@ def test_image_upload() -> None:
         assert any(item["document_id"] == document["document_id"] for item in documents)
 
 
+def test_document_library_select_copy_move_and_folder_operations() -> None:
+    from app.database import SessionLocal
+
+    with get_client() as client:
+        document = upload_png(client)
+        document_id = document["document_id"]
+
+        created_folder = client.post("/api/library/folders", json={"folder_path": "검수"})
+        assert created_folder.status_code == 200, created_folder.text
+        assert any(folder["path"] == "검수" for folder in created_folder.json()["folders"])
+
+        moved = client.post(
+            "/api/library/move",
+            json={"document_ids": [document_id], "target_folder": "검수"},
+        )
+        assert moved.status_code == 200, moved.text
+        moved_document = moved.json()["documents"][0]
+        assert moved_document["document_id"] == document_id
+        assert moved_document["library_path"] == "검수/invoice.png"
+
+        ids = client.get("/api/documents/ids?library_path=검수").json()
+        assert document_id in ids
+
+        db = SessionLocal()
+        try:
+            original_row = db.get(Document, document_id)
+            assert original_row is not None
+            original_storage_path = original_row.storage_path
+        finally:
+            db.close()
+
+        copied = client.post(
+            "/api/library/copy",
+            json={"document_ids": [document_id], "target_folder": "검수"},
+        )
+        assert copied.status_code == 200, copied.text
+        copied_document = copied.json()["documents"][0]
+        copied_document_id = copied_document["document_id"]
+        assert copied_document_id != document_id
+        assert copied_document["library_path"].startswith("검수/invoice copy")
+
+        db = SessionLocal()
+        try:
+            copied_row = db.get(Document, copied_document_id)
+            assert copied_row is not None
+            assert copied_row.storage_path != original_storage_path
+            assert copied_row.page_count == 1
+            assert len(copied_row.pages) == 1
+        finally:
+            db.close()
+
+        folder_copy = client.post(
+            "/api/library/copy",
+            json={"folder_paths": ["검수"], "target_folder": ""},
+        )
+        assert folder_copy.status_code == 200, folder_copy.text
+        assert any(item["library_path"].startswith("검수 copy/") for item in folder_copy.json()["documents"])
+
+        moved_folder = client.post(
+            "/api/library/move",
+            json={"folder_paths": ["검수 copy"], "target_folder": "완료"},
+        )
+        assert moved_folder.status_code == 200, moved_folder.text
+        assert any(item["library_path"].startswith("완료/검수 copy/") for item in moved_folder.json()["documents"])
+
+        deleted_original = client.delete(f"/api/documents/{document_id}")
+        assert deleted_original.status_code == 200, deleted_original.text
+        copied_payload = client.get(f"/api/documents/{copied_document_id}")
+        assert copied_payload.status_code == 200, copied_payload.text
+        page_response = client.get(copied_payload.json()["pages"][0]["image_url"])
+        assert page_response.status_code == 200
+
+
 def test_jpeg_upload_preserves_source_pixels_with_dpi_metadata() -> None:
     image = Image.new("RGB", (300, 420), (255, 255, 255))
     buffer = io.BytesIO()
@@ -2174,9 +2247,9 @@ def test_workflow_resume_and_discard_partial_upload(monkeypatch) -> None:
         assert discarded.status_code == 200, discarded.text
         payload = discarded.json()
         assert payload["status"] == "canceled"
-        assert payload["items"] == []
-        assert payload["uploaded_count"] == 0
-        assert client.get(f"/api/documents/{document_id}").status_code == 404
+        assert len(payload["items"]) == 2
+        assert payload["uploaded_count"] == 2
+        assert client.get(f"/api/documents/{document_id}").status_code == 200
 
 
 def test_workflow_items_preserve_upload_index_order(monkeypatch) -> None:

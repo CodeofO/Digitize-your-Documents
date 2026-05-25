@@ -45,6 +45,8 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 - 홈의 `문서 보관함`에서 파일 또는 폴더를 계속 추가할 수 있습니다.
 - 업로드 대기열은 현재 업로드가 진행 중이어도 다음 파일/폴더를 받아 순서대로 처리합니다.
 - 보관함은 원본 파일, 상대 경로, 변환 상태, page image/meta를 관리합니다.
+- 보관함은 빈 폴더 생성, 전체 선택, 복사, 이동, 잘라내기, 붙여넣기 흐름을 지원합니다.
+- 문서/폴더 복사는 원본 payload를 공유하지 않고 새 storage 경로와 새 document id를 만듭니다.
 - `ready` 문서는 즉시 실행되고, `queued`/`preprocessing` 문서는 “준비되면 실행” 상태로 모듈/워크플로우 작업에 연결됩니다.
 - 문서 삭제는 원본과 page image payload만 삭제하고, 과거 결과 row와 실행 기록은 보존합니다.
 
@@ -59,7 +61,8 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 - 새 업로드는 먼저 보관함에 저장되고, workflow run은 보관함 document id를 참조합니다.
 - 보관함 문서를 선택하면 업로드를 반복하지 않고 같은 원본 payload를 재사용합니다.
 - 새로고침이나 네트워크 끊김 후에는 `이어가기`로 같은 원본을 다시 선택해 남은 항목만 업로드할 수 있습니다.
-- 실행 중에는 `계속 처리`, `일시중단`, `이어가기`, `재시작`, `대기열 추가`, `중단·정리`로 상태를 제어합니다.
+- 실행 중에는 `추론 일시중단`, `이어하기`, `같은 문서로 다시 실행`, `실행 예약`, `추론 중단`으로 상태를 제어합니다.
+- 워크플로우 중단은 보관함 문서를 삭제하지 않고 진행 중인 추론만 멈춥니다. 원본 삭제는 문서 보관함에서만 수행합니다.
 - `대기열 추가`는 업로드된 원본 문서를 복사하지 않고 다음 workflow run을 `waiting` 상태로 등록하며, 앞선 run이 끝나면 자동으로 시작합니다.
 - 진행 상태는 `업로드됨`, `전처리`, `실행 중`, `대기`, `완료/검토/실패` counter로 분리해 표시합니다.
 - 결과 화면은 문서 목록 스크롤 위치를 유지하고, 상세 결과에서 문서 이미지와 module output을 함께 검수합니다.
@@ -83,11 +86,11 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 
 | Control | Behavior |
 | --- | --- |
-| `중단·정리` | 실행 기록은 남기고 업로드 파일, preview, 중간 결과 산출물을 정리합니다. |
+| `추론 중단` | 실행 기록과 보관함 문서는 남기고 현재 workflow inference만 취소합니다. |
 | `계속 처리` | 업로드가 끝났지만 아직 실행되지 않은 run/batch를 시작합니다. |
 | `이어가기` | 새로고침 등으로 끊긴 업로드에서 같은 원본을 재선택해 누락 파일만 등록합니다. |
 | `일시중단` | 업로드된 문서는 보존하고, 새 item 실행을 멈춥니다. 진행 중인 VLM 호출은 현재 item까지만 마무리합니다. |
-| `재시작` | 업로드된 원본은 유지하고 기존 추론 결과와 문서별 추론 시간을 초기화한 뒤 처음부터 다시 추론합니다. |
+| `같은 문서로 다시 실행` | 보관함의 같은 document id를 재사용해 현재 workflow snapshot으로 새 run을 만듭니다. |
 | `대기열 추가` | 업로드된 원본은 공유하고 새 workflow snapshot을 `waiting` run으로 추가합니다. 이전 run이 `completed`, `needs_review`, `completed_with_errors`가 되면 다음 대기 run을 자동 시작합니다. |
 | `대기 취소` | 아직 시작하지 않은 `waiting` run만 취소하며 공유 문서는 삭제하지 않습니다. |
 | `실패 재시도` | 결과 상세 화면에서 실패한 문서만 다시 queue에 넣고, 성공한 문서는 그대로 보존합니다. |
@@ -113,7 +116,7 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | Area | Endpoint |
 | --- | --- |
 | System status | `GET /api/system/status` |
-| Document library | `POST /api/library/uploads`, `GET /api/documents`, `GET /api/library/tree`, `DELETE /api/documents/{document_id}` |
+| Document library | `POST /api/library/uploads`, `GET /api/documents`, `GET /api/documents/ids`, `POST /api/documents/selection`, `GET /api/library/tree`, `POST /api/library/folders`, `POST /api/library/copy`, `POST /api/library/move`, `DELETE /api/documents/{document_id}` |
 | Workflow from library | `POST /api/workflows/{workflow_id}/runs/from-documents` |
 | Workflow upload legacy | `POST /api/workflows/{workflow_id}/runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
 | Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart`, `POST /api/workflow-runs/{run_id}/retry-failed` |
