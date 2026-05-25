@@ -1,5 +1,36 @@
 # 오류 기록
 
+## 2026-05-25 - 워크플로우 run이 `running` 0%에서 무한 대기
+
+### 증상
+
+- `/api/workflow-runs/{id}/summary` polling은 200을 반환하지만 UI는 `작업 진행 중 · 0%`에서 움직이지 않았다.
+- DB상 `workflow_runs.status=running`, `started_at`은 기록되어 있었지만 931개 `workflow_run_items`가 모두 `queued` 상태로 남아 있었다.
+- 즉 VLM 호출 지연이 아니라 item worker가 첫 문서도 시작하지 못한 상태였다.
+
+### 원인
+
+- `run_workflow_blocking()`이 `asyncio.to_thread(semaphore.acquire)`로 동시 작업 제한을 구현하고 있었다.
+- 대량 item coroutine이 한꺼번에 생성되면 semaphore를 기다리는 `acquire` 호출들이 Python default threadpool을 점유했다.
+- 정작 semaphore를 획득한 작업의 실제 DB/item 처리 함수가 threadpool에 들어가지 못해 release가 일어나지 않는 deadlock/starvation이 발생했다.
+
+### 수정
+
+- semaphore 대기를 default threadpool에 넣는 방식을 제거했다.
+- `WORKFLOW_MAX_WORKERS` 크기의 전용 `ThreadPoolExecutor`를 만들고 `loop.run_in_executor()` 큐로 blocking work를 보내도록 변경했다.
+- 큐가 동시 실행 수를 제한하므로 대기 작업이 worker thread를 점유하지 않는다.
+
+### 검증
+
+- `test_run_workflow_blocking_queues_without_threadpool_deadlock` 추가
+- `.venv/bin/pytest backend/tests/test_api.py -q` 통과: `93 passed`
+- `.venv/bin/python -m compileall backend/app` 통과
+- `git diff --check` 통과
+
+### 운영 메모
+
+- 이미 멈춘 run은 서버가 수정 코드를 로드한 뒤 `일시중단 -> 이어하기` 또는 `/api/workflow-runs/{id}/resume`으로 다시 dispatch해야 한다.
+
 ## 2026-05-25 - 문서 보관함 상태 메시지가 문서 영역을 밀어내는 문제
 
 ### 증상

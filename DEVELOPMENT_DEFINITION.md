@@ -91,6 +91,7 @@ Document Automation Workspace는 사람이 대량 문서에서 반복적으로 �
 - `failed/deleted` 문서는 신규 실행 대상으로 거부한다.
 - 기존 multipart upload API는 이어가기/호환용으로 유지하되, 신규 UI의 기본 경로는 보관함이다.
 - workflow run의 `discard`는 보관함 문서를 삭제하지 않고 추론 실행만 취소한다. 원본 삭제는 문서 보관함의 명시적 삭제 액션으로만 수행한다.
+- workflow local blocking work는 `WORKFLOW_MAX_WORKERS` 크기의 전용 `ThreadPoolExecutor` 큐로 제한한다. semaphore acquire를 default threadpool에 넣으면 대량 item 실행 시 acquire 대기 작업이 thread를 점유해 item 시작 전 deadlock이 발생할 수 있다.
 
 ## 2. Raw Data Extractor
 

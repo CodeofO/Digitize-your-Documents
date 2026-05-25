@@ -182,6 +182,8 @@ VLM_MODEL_NAME=mock-vlm
 | `DATABASE_MAX_OVERFLOW` | `0` | pool 크기를 넘는 임시 connection 허용 수 |
 | `DATABASE_POOL_TIMEOUT_SECONDS` | `60` | DB connection 대기 timeout |
 | `UPLOAD_MAX_BATCH_FILES` | `10000` | 한 번에 업로드할 수 있는 batch 파일 수 |
+
+Workflow local blocking work는 `WORKFLOW_MAX_WORKERS` 크기의 전용 executor 큐로 제한합니다. 대량 문서 실행에서 worker 대기 자체가 Python default threadpool을 점유하지 않도록 하기 위한 구조입니다.
 | `UPLOAD_RETENTION_HOURS` | `24` | 업로드 문서 보존 시간 |
 
 운영에서 5,000장 이상 대량 처리를 자주 실행한다면 SQLite보다 Postgres 사용을 권장합니다.

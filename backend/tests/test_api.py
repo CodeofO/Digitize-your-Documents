@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import io
 import json
 import os
@@ -74,6 +75,36 @@ def test_database_pool_defaults_to_64_connections() -> None:
     assert callable(pool_size)
     assert pool_size() == 64
     assert getattr(engine.pool, "_max_overflow", None) == 0
+
+
+def test_run_workflow_blocking_queues_without_threadpool_deadlock(monkeypatch) -> None:
+    from app.concurrency import run_workflow_blocking
+
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def blocking_work(index: int) -> int:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return index
+
+    async def run_many() -> list[int]:
+        tasks = [run_workflow_blocking(blocking_work, index) for index in range(80)]
+        return await asyncio.wait_for(asyncio.gather(*tasks), timeout=3)
+
+    try:
+        monkeypatch.setenv("WORKFLOW_MAX_WORKERS", "2")
+        get_settings.cache_clear()
+        assert asyncio.run(run_many()) == list(range(80))
+        assert max_active == 2
+    finally:
+        get_settings.cache_clear()
 
 
 def test_root_env_upsert_creates_vlm_settings(monkeypatch, tmp_path) -> None:
