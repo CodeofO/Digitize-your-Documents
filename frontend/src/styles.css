@@ -5756,6 +5756,25 @@ pre {
   font-size: 13px;
 }
 
+.document-library-selection-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  justify-content: flex-end;
+}
+
+.document-library-selection-group {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.document-library-selection-group + .document-library-selection-group {
+  border-left: 1px solid var(--tds-gray-200);
+  padding-left: 14px;
+}
+
 .document-library-actions {
   flex-wrap: wrap;
   justify-content: flex-start;

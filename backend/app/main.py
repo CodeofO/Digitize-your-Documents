@@ -579,6 +579,29 @@ def get_selected_documents(payload: DocumentSelectionRequest, db: Session = Depe
     return DocumentBatchUploadRead(documents=[_document_read(document) for document in documents])
 
 
+@app.post("/api/documents/delete", response_model=DocumentBatchUploadRead)
+def delete_selected_documents_from_library(payload: DocumentSelectionRequest, db: Session = Depends(get_db)) -> DocumentBatchUploadRead:
+    document_ids = list(dict.fromkeys(payload.document_ids))
+    documents = db.query(Document).filter(Document.id.in_(document_ids)).all()
+    by_id = {document.id: document for document in documents}
+    missing = [document_id for document_id in document_ids if document_id not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Document not found: {missing[0]}")
+    deleted_documents = [_delete_library_document_payload(by_id[document_id], db) for document_id in document_ids]
+    log_audit_event(
+        db,
+        entity_type="document",
+        entity_id="bulk",
+        action="bulk_deleted",
+        message=f"Deleted original payloads for {len(deleted_documents)} document(s)",
+        metadata={"document_ids": document_ids},
+    )
+    db.commit()
+    for document in deleted_documents:
+        db.refresh(document)
+    return DocumentBatchUploadRead(documents=[_document_read(document) for document in deleted_documents])
+
+
 @app.get("/api/library/tree", response_model=DocumentTreeRead)
 def get_document_library_tree(include_deleted: bool = Query(default=False), db: Session = Depends(get_db)) -> DocumentTreeRead:
     return _document_tree_read(db, include_deleted=include_deleted)
@@ -677,24 +700,17 @@ def delete_document_from_library(document_id: str, db: Session = Depends(get_db)
     document = db.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    if document.status != "deleted":
-        _delete_document_storage(document)
-        for page in list(document.pages):
-            db.delete(page)
-        document.page_count = 0
-        document.status = "deleted"
-        document.error_message = "Original document was deleted from the document library"
-        document.deleted_at = datetime.utcnow()
-        log_audit_event(
-            db,
-            entity_type="document",
-            entity_id=document.id,
-            action="deleted",
-            message="Deleted original document payload; historical results were kept",
-            metadata={"filename": document.filename, "library_path": document.library_path},
-        )
-        db.commit()
-        db.refresh(document)
+    _delete_library_document_payload(document, db)
+    log_audit_event(
+        db,
+        entity_type="document",
+        entity_id=document.id,
+        action="deleted",
+        message="Deleted original document payload; historical results were kept",
+        metadata={"filename": document.filename, "library_path": document.library_path},
+    )
+    db.commit()
+    db.refresh(document)
     return _document_read(document)
 
 
@@ -3897,6 +3913,19 @@ def _copy_library_document(source: Document, library_path: str, db: Session) -> 
     db.add(job)
     db.flush()
     return copied, job.id
+
+
+def _delete_library_document_payload(document: Document, db: Session) -> Document:
+    if document.status == "deleted":
+        return document
+    _delete_document_storage(document)
+    for page in list(document.pages):
+        db.delete(page)
+    document.page_count = 0
+    document.status = "deleted"
+    document.error_message = "Original document was deleted from the document library"
+    document.deleted_at = datetime.utcnow()
+    return document
 
 
 def _create_queued_library_document(file: UploadFile, db: Session, *, library_path: str | None = None) -> tuple[Document, str]:

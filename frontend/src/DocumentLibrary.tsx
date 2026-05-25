@@ -193,6 +193,41 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     void processQueueItem(nextItem.id);
   }, [uploadQueue]);
 
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (isEditableShortcutTarget(event.target)) return;
+      const modifier = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+      if (modifier && key === "a") {
+        event.preventDefault();
+        void selectAllDocuments();
+        return;
+      }
+      if (modifier && key === "c" && props.selectedIds.length) {
+        event.preventDefault();
+        copySelected("copy");
+        return;
+      }
+      if (modifier && key === "x" && props.selectedIds.length) {
+        event.preventDefault();
+        copySelected("cut");
+        return;
+      }
+      if (modifier && key === "v" && clipboard) {
+        event.preventDefault();
+        void pasteClipboard();
+        return;
+      }
+      if (!modifier && (event.key === "Delete" || event.key === "Backspace") && props.selectedIds.length) {
+        event.preventDefault();
+        void deleteSelectedDocuments();
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeFolder, clipboard, loading, operationBusy, props.selectedIds, query, status, selectableDocuments.length, allVisibleSelected]);
+
   async function refreshLibrary(options: { silent?: boolean } = {}) {
     if (!options.silent) {
       setLoading(true);
@@ -297,6 +332,44 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     if (!props.selectedIds.length) return;
     setClipboard({ mode, documentIds: props.selectedIds, folderPaths: [] });
     setNotice(`${props.selectedIds.length.toLocaleString()}개 문서를 ${mode === "copy" ? "복사" : "이동"} 대상으로 잡았습니다.`);
+  }
+
+  function confirmDeleteDocuments(count: number, label?: string) {
+    const target = label ? `"${label}"` : `${count.toLocaleString()}개 문서`;
+    return window.confirm(
+      `${target}의 원본 파일을 삭제합니다.\n\n삭제된 원본과 페이지 이미지는 복구할 수 없습니다. 과거 실행 기록과 추출 결과 row는 남습니다. 계속할까요?`
+    );
+  }
+
+  async function deleteSelectedDocuments() {
+    if (!props.selectedIds.length || operationBusy) return;
+    if (!confirmDeleteDocuments(props.selectedIds.length)) return;
+    setOperationBusy(true);
+    setError(null);
+    try {
+      const response = await api<LibraryUploadResponse>("/api/documents/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_ids: props.selectedIds })
+      });
+      const deletedIds = new Set(response.documents.map((document) => document.document_id));
+      setDocuments((current) => current.filter((document) => !deletedIds.has(document.document_id)));
+      setSelectedDocumentCache((current) => {
+        const next = { ...current };
+        deletedIds.forEach((id) => delete next[id]);
+        return next;
+      });
+      props.onSelectedIds(props.selectedIds.filter((id) => !deletedIds.has(id)));
+      if (clipboard?.documentIds.some((id) => deletedIds.has(id))) {
+        setClipboard(null);
+      }
+      setNotice(`${deletedIds.size.toLocaleString()}개 문서의 원본을 삭제했습니다.`);
+      await refreshLibrary({ silent: true });
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setOperationBusy(false);
+    }
   }
 
   function copyActiveFolder(mode: "copy" | "cut") {
@@ -442,6 +515,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
   }
 
   async function deleteDocument(document: LibraryDocument) {
+    if (!confirmDeleteDocuments(1, document.filename)) return;
     setError(null);
     try {
       const deleted = await api<LibraryDocument>(`/api/documents/${document.document_id}`, { method: "DELETE" });
@@ -543,38 +617,44 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
               {props.selectedIds.length ? `${props.selectedIds.length.toLocaleString()}개 선택됨` : "문서를 선택하면 작업으로 보낼 수 있습니다."}
               {clipboardLabel ? ` · ${clipboardLabel}` : ""}
             </span>
-            <div>
-              <button type="button" className="secondary compact" disabled={loading || operationBusy || !selectableDocuments.length} onClick={() => void selectAllDocuments()}>
-                <CheckSquare size={14} />
-                {allVisibleSelected ? "전체 해제" : "전체 선택"}
-              </button>
-              {props.selectedIds.length > 0 && (
-                <button type="button" className="secondary compact" onClick={clearSelection}>
-                  선택 해제
+            <div className="document-library-selection-actions">
+              <div className="document-library-selection-group">
+                <button type="button" className="secondary compact" disabled={loading || operationBusy || !selectableDocuments.length} onClick={() => void selectAllDocuments()} title="Command/Ctrl + A">
+                  <CheckSquare size={14} />
+                  {allVisibleSelected ? "전체 해제" : "전체 선택"}
                 </button>
-              )}
-              {props.selectedIds.length > 0 && (
-                <>
-                  <button type="button" className="secondary compact" disabled={operationBusy} onClick={() => copySelected("copy")}>
-                    <Copy size={14} />
-                    복사
+                {props.selectedIds.length > 0 && (
+                  <button type="button" className="secondary compact" onClick={clearSelection}>
+                    선택 해제
                   </button>
-                  <button type="button" className="secondary compact" disabled={operationBusy} onClick={() => copySelected("cut")}>
-                    <Scissors size={14} />
-                    이동
-                  </button>
-                </>
-              )}
-              <button type="button" className="secondary compact" disabled={!clipboard || operationBusy} onClick={() => void pasteClipboard()}>
-                <Clipboard size={14} />
-                붙여넣기
-              </button>
-              {props.onApply && (
-                <button type="button" className="primary compact" disabled={!props.selectedIds.length} onClick={() => void applySelection()}>
-                  <Check size={14} />
-                  선택 적용
+                )}
+              </div>
+              <div className="document-library-selection-group">
+                <button type="button" className="secondary compact" disabled={!props.selectedIds.length || operationBusy} onClick={() => copySelected("copy")} title="Command/Ctrl + C">
+                  <Copy size={14} />
+                  복사
                 </button>
-              )}
+                <button type="button" className="secondary compact" disabled={!props.selectedIds.length || operationBusy} onClick={() => copySelected("cut")} title="Command/Ctrl + X">
+                  <Scissors size={14} />
+                  이동
+                </button>
+                <button type="button" className="secondary compact" disabled={!clipboard || operationBusy} onClick={() => void pasteClipboard()} title="Command/Ctrl + V">
+                  <Clipboard size={14} />
+                  붙여넣기
+                </button>
+              </div>
+              <div className="document-library-selection-group">
+                <button type="button" className="secondary compact danger-outline" disabled={!props.selectedIds.length || operationBusy} onClick={() => void deleteSelectedDocuments()} title="Delete">
+                  <Trash2 size={14} />
+                  선택 삭제
+                </button>
+                {props.onApply && (
+                  <button type="button" className="primary compact" disabled={!props.selectedIds.length} onClick={() => void applySelection()}>
+                    <Check size={14} />
+                    선택 적용
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
@@ -756,6 +836,12 @@ function formatBytes(bytes: number) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "요청을 처리하지 못했습니다.";
+}
+
+function isEditableShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
 }
 
 function formatApiDetail(detail: unknown): string {

@@ -805,6 +805,11 @@ def test_document_library_select_copy_move_and_folder_operations() -> None:
         page_response = client.get(copied_payload.json()["pages"][0]["image_url"])
         assert page_response.status_code == 200
 
+        bulk_deleted = client.post("/api/documents/delete", json={"document_ids": [copied_document_id]})
+        assert bulk_deleted.status_code == 200, bulk_deleted.text
+        assert bulk_deleted.json()["documents"][0]["status"] == "deleted"
+        assert client.get(copied_payload.json()["pages"][0]["image_url"]).status_code == 410
+
 
 def test_jpeg_upload_preserves_source_pixels_with_dpi_metadata() -> None:
     image = Image.new("RGB", (300, 420), (255, 255, 255))

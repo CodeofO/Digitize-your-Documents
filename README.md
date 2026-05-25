@@ -47,6 +47,8 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 - 보관함은 원본 파일, 상대 경로, 변환 상태, page image/meta를 관리합니다.
 - 보관함은 빈 폴더 생성, 전체 선택, 복사, 이동, 잘라내기, 붙여넣기 흐름을 지원합니다.
 - 문서/폴더 복사는 원본 payload를 공유하지 않고 새 storage 경로와 새 document id를 만듭니다.
+- 선택 삭제는 확인 팝업 후 여러 문서의 원본 payload를 한 번에 삭제합니다.
+- 보관함에서는 `Command/Ctrl+A/C/X/V`와 `Delete` 단축키로 전체 선택, 복사, 이동, 붙여넣기, 선택 삭제를 실행할 수 있습니다.
 - `ready` 문서는 즉시 실행되고, `queued`/`preprocessing` 문서는 “준비되면 실행” 상태로 모듈/워크플로우 작업에 연결됩니다.
 - 문서 삭제는 원본과 page image payload만 삭제하고, 과거 결과 row와 실행 기록은 보존합니다.
 
@@ -116,7 +118,7 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 | Area | Endpoint |
 | --- | --- |
 | System status | `GET /api/system/status` |
-| Document library | `POST /api/library/uploads`, `GET /api/documents`, `GET /api/documents/ids`, `POST /api/documents/selection`, `GET /api/library/tree`, `POST /api/library/folders`, `POST /api/library/copy`, `POST /api/library/move`, `DELETE /api/documents/{document_id}` |
+| Document library | `POST /api/library/uploads`, `GET /api/documents`, `GET /api/documents/ids`, `POST /api/documents/selection`, `POST /api/documents/delete`, `GET /api/library/tree`, `POST /api/library/folders`, `POST /api/library/copy`, `POST /api/library/move`, `DELETE /api/documents/{document_id}` |
 | Workflow from library | `POST /api/workflows/{workflow_id}/runs/from-documents` |
 | Workflow upload legacy | `POST /api/workflows/{workflow_id}/runs/init`, `POST /api/workflow-runs/{run_id}/items`, `POST /api/workflow-runs/{run_id}/start` |
 | Workflow recovery | `POST /api/workflow-runs/{run_id}/discard`, `POST /api/workflow-runs/{run_id}/resume`, `POST /api/workflow-runs/{run_id}/pause`, `POST /api/workflow-runs/{run_id}/restart`, `POST /api/workflow-runs/{run_id}/retry-failed` |

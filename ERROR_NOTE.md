@@ -1,5 +1,24 @@
 # 오류 기록
 
+## 2026-05-25 - 문서 보관함 선택 삭제 안전장치
+
+### 배경
+
+- 전체 선택 후 다수 문서를 삭제할 방법이 필요했다.
+- 프론트에서 수천 개 문서를 개별 DELETE로 호출하면 중간 실패와 긴 대기 시간이 발생할 수 있다.
+
+### 조치
+
+- `POST /api/documents/delete` bulk 삭제 API를 추가했다.
+- 삭제는 document row를 제거하지 않고 원본 payload와 page image를 삭제한 뒤 `status=deleted`로 표시한다.
+- 보관함 UI에는 `선택 삭제` 버튼과 확인 팝업을 추가했다.
+- `Delete`/`Backspace` 단축키도 같은 확인 팝업을 거치도록 했다.
+
+### 검증
+
+- bulk 삭제 후 page image 요청이 410을 반환하는 회귀 테스트를 추가했다.
+- `.venv/bin/pytest backend/tests/test_api.py -q` 통과: `92 passed`
+
 ## 2026-05-25 - 문서 보관함 폴더 복사/이동 중 pending folder 중복 insert
 
 ### 증상
