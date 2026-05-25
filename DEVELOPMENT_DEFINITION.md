@@ -63,6 +63,7 @@ Document Automation Workspace는 사람이 대량 문서에서 반복적으로 �
 | D7 | `WORKFLOW_MAX_WORKERS`와 `VLM_MAX_CONCURRENT_REQUESTS`를 분리하고, AI 동시 요청은 async semaphore로 통제 |
 | D8 | 문서 보관함에 빈 폴더, 전체 선택, 파일/폴더 복사, 파일/폴더 이동, 잘라내기/붙여넣기 기능 추가 |
 | D9 | 문서 보관함에 선택 삭제 bulk API와 `Command/Ctrl+A/C/X/V`, `Delete` 단축키 추가 |
+| D10 | 문서 보관함 목록/아이콘 보기 전환, 넓은 문서 영역, 우측 상단 작업 알림, `Esc` 선택 해제 UX 추가 |
 
 ### 1.3 문서 보관함 기준 구조
 
@@ -79,6 +80,8 @@ Document Automation Workspace는 사람이 대량 문서에서 반복적으로 �
 - 파일/폴더 복사는 새 `Document`와 새 storage payload를 만들며 원본과 payload를 공유하지 않는다.
 - 파일/폴더 이동은 `library_path`와 명시적 폴더 path를 변경하며 원본 payload는 유지한다.
 - 선택 삭제는 `POST /api/documents/delete`로 여러 document payload를 한 번에 삭제한다. 실행 기록과 추출 결과 row는 유지한다.
+- UI는 목록 보기와 아이콘 보기를 모두 제공한다. 작업 진행/완료 메시지는 본문 중간 상태 바가 아니라 우측 상단 transient 알림으로 표시한다.
+- `Esc`는 현재 선택을 해제한다. `Command/Ctrl+A/C/X/V`와 `Delete`는 보관함 영역에서 파일 관리자식 선택/clipboard/삭제 동작으로 처리한다.
 
 모듈/워크플로우 실행 정책:
 

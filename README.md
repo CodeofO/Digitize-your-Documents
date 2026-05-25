@@ -48,7 +48,9 @@ NGROK_URL=https://your-domain.ngrok.app ACCESS_CODE=<shared-code> ./scripts/star
 - 보관함은 빈 폴더 생성, 전체 선택, 복사, 이동, 잘라내기, 붙여넣기 흐름을 지원합니다.
 - 문서/폴더 복사는 원본 payload를 공유하지 않고 새 storage 경로와 새 document id를 만듭니다.
 - 선택 삭제는 확인 팝업 후 여러 문서의 원본 payload를 한 번에 삭제합니다.
-- 보관함에서는 `Command/Ctrl+A/C/X/V`와 `Delete` 단축키로 전체 선택, 복사, 이동, 붙여넣기, 선택 삭제를 실행할 수 있습니다.
+- 보관함은 목록 보기와 아이콘 보기를 전환할 수 있으며, 문서 영역을 넓게 쓰도록 구성되어 있습니다.
+- 보관함에서는 `Command/Ctrl+A/C/X/V`, `Delete`, `Esc` 단축키로 전체 선택, 복사, 이동, 붙여넣기, 선택 삭제, 선택 해제를 실행할 수 있습니다.
+- 보관함 작업 진행/완료 상태는 본문을 밀어내지 않고 우측 상단 알림으로 표시됩니다.
 - `ready` 문서는 즉시 실행되고, `queued`/`preprocessing` 문서는 “준비되면 실행” 상태로 모듈/워크플로우 작업에 연결됩니다.
 - 문서 삭제는 원본과 page image payload만 삭제하고, 과거 결과 row와 실행 기록은 보존합니다.
 

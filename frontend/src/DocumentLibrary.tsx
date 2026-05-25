@@ -7,6 +7,8 @@ import {
   FileText,
   FolderPlus,
   FolderOpen,
+  LayoutGrid,
+  List as ListIcon,
   Loader2,
   Play,
   Plus,
@@ -74,6 +76,12 @@ type LibraryClipboard = {
 } | null;
 
 type LibraryActionTarget = "raw" | "key-info" | "classifier" | "required-checker" | "workflow";
+type LibraryViewMode = "list" | "icon";
+type LibraryToast = {
+  id: number;
+  message: string;
+  type: "info" | "success" | "error";
+};
 
 type DocumentLibraryPanelProps = {
   mode: "screen" | "picker";
@@ -163,13 +171,16 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
   const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [operationBusy, setOperationBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [operationLabel, setOperationLabel] = useState<string | null>(null);
+  const [, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<LibraryToast | null>(null);
+  const [viewMode, setViewMode] = useState<LibraryViewMode>("list");
   const [clipboard, setClipboard] = useState<LibraryClipboard>(null);
   const [selectedDocumentCache, setSelectedDocumentCache] = useState<Record<string, LibraryDocument>>({});
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const processingQueueRef = useRef(false);
+  const toastTimerRef = useRef<number | null>(null);
   const selectedSet = useMemo(() => new Set(props.selectedIds), [props.selectedIds]);
   const selectableDocuments = documents.filter((document) => !["deleted", "failed"].includes(document.status));
   const allVisibleSelected = selectableDocuments.length > 0 && selectableDocuments.every((document) => selectedSet.has(document.document_id));
@@ -203,6 +214,12 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
         void selectAllDocuments();
         return;
       }
+      if (!modifier && event.key === "Escape" && props.selectedIds.length) {
+        event.preventDefault();
+        clearSelection();
+        setToast(null);
+        return;
+      }
       if (modifier && key === "c" && props.selectedIds.length) {
         event.preventDefault();
         copySelected("copy");
@@ -228,6 +245,12 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeFolder, clipboard, loading, operationBusy, props.selectedIds, query, status, selectableDocuments.length, allVisibleSelected]);
 
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
   async function refreshLibrary(options: { silent?: boolean } = {}) {
     if (!options.silent) {
       setLoading(true);
@@ -247,9 +270,19 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
       rememberDocuments(loadedDocuments);
     } catch (err) {
       setError(errorMessage(err));
+      showToast(errorMessage(err), "error");
     } finally {
       if (!options.silent) setLoading(false);
     }
+  }
+
+  function showToast(message: string, type: LibraryToast["type"] = "info") {
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    setToast({ id: Date.now(), message, type });
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, type === "error" ? 4800 : 2400);
   }
 
   function rememberDocuments(incoming: LibraryDocument[]) {
@@ -278,7 +311,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
 
   async function selectAllDocuments() {
     setError(null);
-    setNotice(null);
+    setToast(null);
     try {
       const params = libraryQueryParams();
       params.set("limit", "20000");
@@ -288,10 +321,14 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
       if (!allVisibleSelected && ids.length) {
         rememberDocuments(documents.filter((document) => ids.includes(document.document_id)));
       }
-      setNotice(allVisibleSelected ? "현재 목록 선택을 해제했습니다." : `${ids.length.toLocaleString()}개 문서를 선택했습니다.`);
-      if (!ids.length) setNotice("선택할 문서가 없습니다.");
+      if (!ids.length) {
+        showToast("선택할 문서가 없습니다.");
+      } else {
+        showToast(allVisibleSelected ? "현재 목록 선택을 해제했습니다." : `${ids.length.toLocaleString()}개 문서를 선택했습니다.`);
+      }
     } catch (err) {
       setError(errorMessage(err));
+      showToast(errorMessage(err), "error");
     }
   }
 
@@ -315,6 +352,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
       props.onRunSelected?.(target, documentsToRun);
     } catch (err) {
       setError(errorMessage(err));
+      showToast(errorMessage(err), "error");
     }
   }
 
@@ -325,13 +363,14 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
       props.onApply?.(documentsToApply);
     } catch (err) {
       setError(errorMessage(err));
+      showToast(errorMessage(err), "error");
     }
   }
 
   function copySelected(mode: "copy" | "cut") {
     if (!props.selectedIds.length) return;
     setClipboard({ mode, documentIds: props.selectedIds, folderPaths: [] });
-    setNotice(`${props.selectedIds.length.toLocaleString()}개 문서를 ${mode === "copy" ? "복사" : "이동"} 대상으로 잡았습니다.`);
+    showToast(`${props.selectedIds.length.toLocaleString()}개 문서를 ${mode === "copy" ? "복사" : "이동"} 대상으로 잡았습니다.`);
   }
 
   function confirmDeleteDocuments(count: number, label?: string) {
@@ -345,6 +384,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     if (!props.selectedIds.length || operationBusy) return;
     if (!confirmDeleteDocuments(props.selectedIds.length)) return;
     setOperationBusy(true);
+    setOperationLabel("삭제가 진행중입니다");
     setError(null);
     try {
       const response = await api<LibraryUploadResponse>("/api/documents/delete", {
@@ -363,27 +403,31 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
       if (clipboard?.documentIds.some((id) => deletedIds.has(id))) {
         setClipboard(null);
       }
-      setNotice(`${deletedIds.size.toLocaleString()}개 문서의 원본을 삭제했습니다.`);
+      showToast(`${deletedIds.size.toLocaleString()}개 문서의 원본을 삭제했습니다.`, "success");
       await refreshLibrary({ silent: true });
     } catch (err) {
       setError(errorMessage(err));
+      showToast(errorMessage(err), "error");
     } finally {
       setOperationBusy(false);
+      setOperationLabel(null);
     }
   }
 
   function copyActiveFolder(mode: "copy" | "cut") {
     if (!activeFolder) {
       setError("먼저 왼쪽에서 폴더를 선택하세요.");
+      showToast("먼저 왼쪽에서 폴더를 선택하세요.", "error");
       return;
     }
     setClipboard({ mode, documentIds: [], folderPaths: [activeFolder] });
-    setNotice(`"${activeFolder}" 폴더를 ${mode === "copy" ? "복사" : "이동"} 대상으로 잡았습니다.`);
+    showToast(`"${activeFolder}" 폴더를 ${mode === "copy" ? "복사" : "이동"} 대상으로 잡았습니다.`);
   }
 
   async function pasteClipboard() {
     if (!clipboard) return;
     setOperationBusy(true);
+    setOperationLabel(`${clipboard.mode === "copy" ? "복사" : "이동"} 처리 중입니다`);
     setError(null);
     try {
       const response = await api<LibraryActionResponse>(`/api/library/${clipboard.mode === "copy" ? "copy" : "move"}`, {
@@ -401,12 +445,14 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
         setClipboard(null);
         props.onSelectedIds([]);
       }
-      setNotice(`${clipboard.mode === "copy" ? "복사" : "이동"} 완료: ${response.documents.length.toLocaleString()}개 문서`);
+      showToast(`${clipboard.mode === "copy" ? "복사" : "이동"} 완료: ${response.documents.length.toLocaleString()}개 문서`, "success");
       await refreshLibrary({ silent: true });
     } catch (err) {
       setError(errorMessage(err));
+      showToast(errorMessage(err), "error");
     } finally {
       setOperationBusy(false);
+      setOperationLabel(null);
     }
   }
 
@@ -416,6 +462,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     if (!folderName) return;
     const folderPath = activeFolder ? `${activeFolder}/${folderName}` : folderName;
     setOperationBusy(true);
+    setOperationLabel("폴더를 만드는 중입니다");
     setError(null);
     try {
       const tree = await api<{ folders: LibraryFolder[] }>("/api/library/folders", {
@@ -425,11 +472,13 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
       });
       setFolders(tree.folders);
       setActiveFolder(normalizeLibraryPath(folderPath));
-      setNotice(`"${folderPath}" 폴더를 만들었습니다.`);
+      showToast(`"${folderPath}" 폴더를 만들었습니다.`, "success");
     } catch (err) {
       setError(errorMessage(err));
+      showToast(errorMessage(err), "error");
     } finally {
       setOperationBusy(false);
+      setOperationLabel(null);
     }
   }
 
@@ -447,6 +496,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     );
     if (!supported.length) {
       setError("지원하는 문서 파일이 없습니다.");
+      showToast("지원하는 문서 파일이 없습니다.", "error");
       return;
     }
     const item: UploadQueueItem = {
@@ -460,6 +510,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     };
     setUploadQueue((current) => [...current, item]);
     setError(null);
+    showToast(`${supported.length.toLocaleString()}개 파일을 업로드 대기에 추가했습니다.`);
   }
 
   async function processQueueItem(itemId: string) {
@@ -494,6 +545,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
         )
       );
       setError(errorMessage(err));
+      showToast(errorMessage(err), "error");
     } finally {
       processingQueueRef.current = false;
     }
@@ -517,13 +569,20 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
   async function deleteDocument(document: LibraryDocument) {
     if (!confirmDeleteDocuments(1, document.filename)) return;
     setError(null);
+    setOperationBusy(true);
+    setOperationLabel("삭제가 진행중입니다");
     try {
       const deleted = await api<LibraryDocument>(`/api/documents/${document.document_id}`, { method: "DELETE" });
       setDocuments((current) => current.map((item) => (item.document_id === deleted.document_id ? deleted : item)));
       props.onSelectedIds(props.selectedIds.filter((id) => id !== document.document_id));
+      showToast(`"${document.filename}" 원본을 삭제했습니다.`, "success");
       await refreshLibrary({ silent: true });
     } catch (err) {
       setError(errorMessage(err));
+      showToast(errorMessage(err), "error");
+    } finally {
+      setOperationBusy(false);
+      setOperationLabel(null);
     }
   }
 
@@ -618,6 +677,16 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
               {clipboardLabel ? ` · ${clipboardLabel}` : ""}
             </span>
             <div className="document-library-selection-actions">
+              <div className="document-library-view-switch" aria-label="보기 방식">
+                <button type="button" className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")} title="목록 보기">
+                  <ListIcon size={14} />
+                  목록
+                </button>
+                <button type="button" className={viewMode === "icon" ? "active" : ""} onClick={() => setViewMode("icon")} title="아이콘 보기">
+                  <LayoutGrid size={14} />
+                  아이콘
+                </button>
+              </div>
               <div className="document-library-selection-group">
                 <button type="button" className="secondary compact" disabled={loading || operationBusy || !selectableDocuments.length} onClick={() => void selectAllDocuments()} title="Command/Ctrl + A">
                   <CheckSquare size={14} />
@@ -683,25 +752,6 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
             </div>
           )}
 
-          {(error || notice || loading || operationBusy) && (
-            <div className="document-library-message">
-              {loading && (
-                <span>
-                  <Loader2 size={15} className="spin" />
-                  보관함을 불러오는 중
-                </span>
-              )}
-              {operationBusy && (
-                <span>
-                  <Loader2 size={15} className="spin" />
-                  보관함 작업 처리 중
-                </span>
-              )}
-              {notice && <span>{notice}</span>}
-              {error && <span className="module-error">{error}</span>}
-            </div>
-          )}
-
           {uploadQueue.length > 0 && (
             <div className="document-upload-queue">
               <div>
@@ -723,7 +773,27 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
             </div>
           )}
 
-          <div className="document-library-list">
+          {(loading || operationBusy || toast) && (
+            <div className="document-library-feedback" aria-live="polite">
+              {(loading || operationBusy) && (
+                <div className="document-library-busy">
+                  <Loader2 size={15} className="spin" />
+                  {operationBusy ? operationLabel ?? "보관함 작업 처리 중입니다" : "보관함을 불러오는 중입니다"}
+                </div>
+              )}
+              {toast && (
+                <div
+                  key={toast.id}
+                  className={`document-library-toast ${toast.type}`}
+                  style={{ animationDuration: toast.type === "error" ? "4800ms" : "2400ms" }}
+                >
+                  {toast.message}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className={`document-library-list ${viewMode === "icon" ? "icon-view" : "list-view"}`}>
             {documents.length ? (
               documents.map((document) => (
                 <article key={document.document_id} className={`document-library-row ${document.status} ${selectedSet.has(document.document_id) ? "selected" : ""}`}>
