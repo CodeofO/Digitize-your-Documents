@@ -4,6 +4,7 @@
 # Repository entrypoints.
 !.gitignore
 !README.md
+!IMPROVEMENT_PLAN.md
 !docker-compose.hosting.example.yml
 
 # Runtime examples.
