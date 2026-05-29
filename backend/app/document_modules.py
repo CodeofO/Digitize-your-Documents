@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from app.audit import log_audit_event
-from app.concurrency import run_workflow_blocking
+from app.concurrency import gather_workflow_limited, run_workflow_blocking
 from app.database import SessionLocal
 from app.extraction import DocumentPageSnapshot, DocumentSnapshot, _crop_region_image, _mask_region_image
 from app.models import (
@@ -142,7 +142,7 @@ async def _run_parallel_batch_async(job_ids: list[str], runner, failer, finalize
         await run_workflow_blocking(finalizer)
         return
     try:
-        results = await asyncio.gather(*(runner(job_id) for job_id in job_ids), return_exceptions=True)
+        results = await gather_workflow_limited(job_ids, runner, return_exceptions=True)
         for job_id, result in zip(job_ids, results, strict=True):
             if isinstance(result, Exception):
                 await run_workflow_blocking(failer, job_id, f"Batch worker failed: {result}")

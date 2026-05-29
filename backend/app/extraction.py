@@ -9,7 +9,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 from app.audit import log_audit_event
-from app.concurrency import run_workflow_blocking
+from app.concurrency import gather_workflow_limited, run_workflow_blocking
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Document, ExtractionJob, ExtractionResult, Schema
@@ -88,7 +88,7 @@ async def run_batch_jobs_async(batch_id: str, job_ids: list[str]) -> None:
         await run_workflow_blocking(_finalize_batch, batch_id)
         return
     try:
-        results = await asyncio.gather(*(_run_batch_extraction_job_async(job_id) for job_id in job_ids), return_exceptions=True)
+        results = await gather_workflow_limited(job_ids, _run_batch_extraction_job_async, return_exceptions=True)
         for job_id, result in zip(job_ids, results, strict=True):
             if isinstance(result, Exception):
                 await run_workflow_blocking(_mark_job_failed, job_id, f"Batch worker failed: {result}")

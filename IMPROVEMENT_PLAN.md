@@ -31,6 +31,7 @@
 | 2026-05-29 | 완료 | Phase 2-6 운영 DB migration | `export_jobs`와 workflow/batch summary 조회 index를 Alembic `0002` migration으로 고정하고, 임시 SQLite DB에서 `alembic upgrade head`를 검증했다. |
 | 2026-05-29 | 완료 | Phase 1-1 Waiting run guard | queue 대기 중인 workflow run이 API 직접 호출로 `resume`/`pause`되어 순서 제어를 우회하지 못하도록 409 guard와 회귀 테스트를 추가했다. |
 | 2026-05-29 | 완료 | Phase 2-5 Export worker 복구 | FastAPI background task에만 의존하지 않도록 export worker를 lifespan에 추가하고, 서버 재시작으로 남은 `running` export job을 `queued`로 복구해 처리하도록 했다. |
+| 2026-05-29 | 완료 | Phase 2-4 VLM backlog 제한 | workflow/KIE batch/classification batch/required batch가 async job 전체를 한 번에 VLM 대기열로 밀어 넣지 않도록 `WORKFLOW_MAX_WORKERS` 기반 bounded gather를 적용하고, pause 후 대기열이 다음 run을 막지 않는 회귀 테스트를 추가했다. |
 
 ## Phase 1. 안정성 고정
 
@@ -178,7 +179,7 @@
 ## 당장 시작할 작업
 
 1. [부분 완료] Backend workflow 상태 전이 테스트 추가.
-2. [부분 완료] 1k 문서 mock run으로 summary polling, 실행 현황 정렬, VLM counter를 검증.
+2. [완료] 1k 문서 mock run으로 summary polling, 실행 현황 정렬, VLM counter와 대기열 backlog를 검증.
 3. [대기] 결과 검수 화면에서 `검토 필요` 중심 순회 UX 설계.
 4. [완료] Export를 background job으로 분리할지 설계안 작성 및 1차 구현.
 5. [대기] 은행서류 템플릿을 README, 카드뉴스, 데모 영상에서 일관되게 쓰도록 정리.

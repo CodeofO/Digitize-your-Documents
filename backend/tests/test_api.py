@@ -119,6 +119,29 @@ def test_run_workflow_blocking_queues_without_threadpool_deadlock(monkeypatch) -
         get_settings.cache_clear()
 
 
+def test_gather_workflow_limited_caps_async_tasks(monkeypatch) -> None:
+    from app.concurrency import gather_workflow_limited
+
+    active = 0
+    max_active = 0
+
+    async def async_work(index: int) -> int:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return index
+
+    try:
+        monkeypatch.setenv("WORKFLOW_MAX_WORKERS", "2")
+        get_settings.cache_clear()
+        assert asyncio.run(gather_workflow_limited(list(range(6)), async_work)) == list(range(6))
+        assert max_active == 2
+    finally:
+        get_settings.cache_clear()
+
+
 def test_async_vlm_limit_queues_without_threadpool_deadlock(monkeypatch) -> None:
     from app import vlm as vlm_module
 
@@ -571,6 +594,37 @@ def test_module_batch_workers_use_workflow_worker_limit(monkeypatch) -> None:
         get_settings.cache_clear()
 
 
+def test_module_batch_async_workers_use_workflow_worker_limit(monkeypatch) -> None:
+    from app import document_modules
+
+    active = 0
+    max_active = 0
+    finalized = False
+
+    async def fake_runner(_job_id: str) -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+
+    def fake_failer(_job_id: str, message: str) -> None:
+        raise AssertionError(message)
+
+    def fake_finalizer() -> None:
+        nonlocal finalized
+        finalized = True
+
+    monkeypatch.setenv("WORKFLOW_MAX_WORKERS", "2")
+    get_settings.cache_clear()
+    try:
+        asyncio.run(document_modules._run_parallel_batch_async(["job_1", "job_2", "job_3", "job_4"], fake_runner, fake_failer, fake_finalizer))
+        assert max_active == 2
+        assert finalized is True
+    finally:
+        get_settings.cache_clear()
+
+
 def test_extraction_batch_workers_use_workflow_worker_limit(monkeypatch) -> None:
     from app import extraction as extraction_module
 
@@ -594,6 +648,32 @@ def test_extraction_batch_workers_use_workflow_worker_limit(monkeypatch) -> None
     get_settings.cache_clear()
     try:
         extraction_module.run_batch_jobs("batch_1", ["job_1", "job_2", "job_3", "job_4"])
+        assert max_active == 2
+        assert finalized == ["batch_1"]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_extraction_batch_async_workers_use_workflow_worker_limit(monkeypatch) -> None:
+    from app import extraction as extraction_module
+
+    active = 0
+    max_active = 0
+    finalized: list[str] = []
+
+    async def fake_run_job(_job_id: str) -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+
+    monkeypatch.setenv("WORKFLOW_MAX_WORKERS", "2")
+    monkeypatch.setattr(extraction_module, "_run_batch_extraction_job_async", fake_run_job)
+    monkeypatch.setattr(extraction_module, "_finalize_batch", lambda batch_id: finalized.append(batch_id))
+    get_settings.cache_clear()
+    try:
+        asyncio.run(extraction_module.run_batch_jobs_async("batch_1", ["job_1", "job_2", "job_3", "job_4"]))
         assert max_active == 2
         assert finalized == ["batch_1"]
     finally:
@@ -3763,6 +3843,147 @@ def test_workflow_run_uses_workflow_worker_limit_for_blocking_work(monkeypatch) 
         os.environ.pop("VLM_MAX_CONCURRENT_REQUESTS", None)
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
+
+
+def test_workflow_async_scheduler_does_not_backlog_paused_run(monkeypatch) -> None:
+    from app import workflows as workflows_module
+    from app.database import SessionLocal, init_db
+    from app.models import WorkflowDefinition
+
+    definition = {
+        "nodes": [
+            {"id": "input", "data": {"kind": "input", "label": "Input"}},
+            {"id": "export", "data": {"kind": "export", "label": "Export"}},
+        ],
+        "edges": [{"id": "input-export", "source": "input", "target": "export"}],
+    }
+
+    init_db()
+    db = SessionLocal()
+    try:
+        workflow = WorkflowDefinition(
+            name=f"pause_backlog_workflow_{time.time_ns()}",
+            definition_json=json.dumps(definition),
+        )
+        db.add(workflow)
+        db.flush()
+        run = WorkflowRun(
+            workflow_id=workflow.id,
+            workflow_name=workflow.name,
+            workflow_definition_json=json.dumps(definition),
+            status="queued",
+            total_count=6,
+            execution_generation=1,
+        )
+        db.add(run)
+        db.flush()
+        for index in range(6):
+            document = Document(
+                filename=f"pause_backlog_{index}.png",
+                mime_type="image/png",
+                size_bytes=1,
+                page_count=1,
+                storage_path=f"/tmp/pause_backlog_{index}.png",
+                status="ready",
+            )
+            db.add(document)
+            db.flush()
+            db.add(
+                WorkflowRunItem(
+                    run_id=run.id,
+                    document_id=document.id,
+                    filename=document.filename,
+                    upload_index=index,
+                    status="queued",
+                    execution_generation=1,
+                )
+            )
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    started: list[str] = []
+    release: asyncio.Event | None = None
+
+    async def fake_execute_graph(
+        _item_id: str,
+        _document_id: str,
+        filename: str,
+        _graph,
+        _execution_generation: int,
+    ) -> dict[str, Any]:
+        started.append(filename)
+        assert release is not None
+        await release.wait()
+        return {
+            "document_id": _document_id,
+            "filename": filename,
+            "status": "completed",
+            "error_message": None,
+            "branch_path": None,
+            "path_node_ids": ["export"],
+            "completed_node_ids": ["export"],
+            "current_node_id": None,
+            "current_node_kind": None,
+            "current_node_label": None,
+            "node_results": {},
+            "classification": None,
+            "kie_values": {},
+            "required_overall_status": None,
+            "required_items": {},
+        }
+
+    monkeypatch.setattr(workflows_module, "_execute_graph_for_item_async", fake_execute_graph)
+
+    async def run_and_pause() -> None:
+        nonlocal release
+        release = asyncio.Event()
+        task = asyncio.create_task(workflows_module.run_workflow_run_async(run_id, 1))
+        for _ in range(100):
+            if len(started) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(started) == 2
+        await asyncio.sleep(0.03)
+        assert len(started) == 2
+
+        pause_db = SessionLocal()
+        try:
+            paused_run = pause_db.get(WorkflowRun, run_id)
+            assert paused_run is not None
+            paused_run.status = "paused"
+            paused_run.execution_generation = 2
+            now = datetime.utcnow()
+            for item in paused_run.items:
+                if item.status in {"queued", "running"}:
+                    item.status = "paused"
+                    item.error_message = "Paused by test"
+                    item.completed_at = now
+            pause_db.commit()
+        finally:
+            pause_db.close()
+
+        release.set()
+        await asyncio.wait_for(task, timeout=3)
+        assert len(started) == 2
+
+    try:
+        monkeypatch.setenv("WORKFLOW_MAX_WORKERS", "2")
+        get_settings.cache_clear()
+        asyncio.run(run_and_pause())
+    finally:
+        os.environ.pop("WORKFLOW_MAX_WORKERS", None)
+        get_settings.cache_clear()
+
+    db = SessionLocal()
+    try:
+        paused_run = db.get(WorkflowRun, run_id)
+        assert paused_run is not None
+        assert paused_run.status == "paused"
+        assert all(item.status == "paused" for item in paused_run.items)
+    finally:
+        db.close()
 
 
 def test_workflow_parallel_item_failure_does_not_stop_other_items(monkeypatch) -> None:

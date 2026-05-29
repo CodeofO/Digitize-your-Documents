@@ -12,7 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
-from app.concurrency import run_workflow_blocking
+from app.concurrency import gather_workflow_limited, run_workflow_blocking
 from app.database import SessionLocal
 from app.document_modules import (
     classification_result_to_dict,
@@ -223,8 +223,9 @@ async def run_workflow_run_async(run_id: str, execution_generation: int | None =
     if not prepared:
         return
     graph, item_ids, generation = prepared
-    results = await asyncio.gather(
-        *(_run_workflow_item_async(item_id, graph, generation) for item_id in item_ids),
+    results = await gather_workflow_limited(
+        item_ids,
+        lambda item_id: _run_workflow_item_async(item_id, graph, generation),
         return_exceptions=True,
     )
     for item_id, result in zip(item_ids, results, strict=True):
