@@ -600,6 +600,9 @@ export function WorkflowBuilder({
       if (!activeRunId && sortedRuns[0]) {
         focusWorkflowRun((sortedRuns.find((run) => workflowRunIsLive(run)) ?? sortedRuns[0]).id, false);
       }
+      if (activeWorkflowId && !loadedWorkflows.some((workflow) => workflow.id === activeWorkflowId)) {
+        setActiveWorkflowId("");
+      }
       if (!activeWorkflowId && !initialDraft && loadedWorkflows[0]) {
         loadWorkflowIntoCanvas(loadedWorkflows[0]);
       }
@@ -650,15 +653,34 @@ export function WorkflowBuilder({
       description: null,
       definition: serializeDefinition(nodes, edges)
     };
-    const saved = await api<WorkflowDefinition>(activeWorkflowId ? `/api/workflows/${activeWorkflowId}` : "/api/workflows", {
-      method: activeWorkflowId ? "PATCH" : "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+    const workflowKnownMissing = Boolean(activeWorkflowId && workflows.length && !workflows.some((workflow) => workflow.id === activeWorkflowId));
+    const shouldUpdateWorkflow = Boolean(activeWorkflowId && !workflowKnownMissing);
+    let saved: WorkflowDefinition;
+    try {
+      saved = await api<WorkflowDefinition>(shouldUpdateWorkflow ? `/api/workflows/${activeWorkflowId}` : "/api/workflows", {
+        method: shouldUpdateWorkflow ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    } catch (exc) {
+      if (!shouldUpdateWorkflow || !isWorkflowNotFoundError(exc)) {
+        throw exc;
+      }
+      setActiveWorkflowId("");
+      saved = await api<WorkflowDefinition>("/api/workflows", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    }
     setActiveWorkflowId(saved.id);
     setWorkflows((current) => [saved, ...current.filter((workflow) => workflow.id !== saved.id)]);
     setDraftSavedAt("저장됨");
     return saved;
+  }
+
+  function isWorkflowNotFoundError(exc: unknown) {
+    return exc instanceof Error && exc.message === "Workflow not found";
   }
 
   async function saveWorkflow() {
