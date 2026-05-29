@@ -36,11 +36,12 @@ import {
   RefreshCcw,
   Save,
   Sparkles,
+  Trash2,
   Unlink2,
   UploadCloud,
   X
 } from "lucide-react";
-import { ChangeEvent, CSSProperties, PointerEvent, UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent, UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 import { DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "./DocumentLibrary";
@@ -72,6 +73,14 @@ type WorkflowClassFilterOption = {
   count: number;
 };
 type WorkflowUploadSource = "files" | "folder";
+type WorkflowNodeContextMenu = {
+  left: number;
+  top: number;
+  flowPosition: { x: number; y: number };
+};
+type ReactFlowScreenProjector = {
+  screenToFlowPosition: (position: { x: number; y: number }) => { x: number; y: number };
+};
 
 type WorkflowNodeData = {
   kind: WorkflowNodeKind;
@@ -81,6 +90,7 @@ type WorkflowNodeData = {
   connectedBranchKeys?: string[];
   configSelect?: WorkflowNodeConfigSelect;
   onConfigChange?: (nodeId: string, key: string, value: string) => void;
+  onSelect?: (event: ReactMouseEvent, nodeId: string) => void;
 };
 
 type WorkflowNode = Node<WorkflowNodeData>;
@@ -291,12 +301,18 @@ export function WorkflowBuilder({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(initialDraft ? "복원됨" : null);
+  const [nodeContextMenu, setNodeContextMenu] = useState<WorkflowNodeContextMenu | null>(null);
   const workflowStartAbortRef = useRef<AbortController | null>(null);
   const workflowStartRunIdRef = useRef<string>("");
   const workflowStartCancelRequestedRef = useRef(false);
   const workflowResumeFileInputRef = useRef<HTMLInputElement | null>(null);
   const workflowResumeFolderInputRef = useRef<HTMLInputElement | null>(null);
   const workflowResumeRunIdRef = useRef<string>("");
+  const reactFlowInstanceRef = useRef<ReactFlowScreenProjector | null>(null);
+  const nodeContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const selectedNodeIdsRef = useRef<string[]>([]);
+  const shiftKeyPressedRef = useRef(false);
+  const ignoreNextNodeSelectChangeRef = useRef(false);
 
   const processingRun = runs.find((run) => workflowRunIsProcessing(run)) ?? null;
   const pausedRun = runs.find((run) => workflowRunIsPaused(run)) ?? null;
@@ -304,9 +320,13 @@ export function WorkflowBuilder({
   const liveRun = processingRun ?? pausedRun ?? runs.find((run) => workflowRunIsLive(run)) ?? null;
   const activeRun = selectedRun ?? liveRun ?? runs[0] ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
+  const selectedNodeIds = useMemo(
+    () => Array.from(new Set(nodes.filter((node) => node.selected || node.id === selectedNodeId).map((node) => node.id))),
+    [nodes, selectedNodeId]
+  );
   const canvasNodes = useMemo(
-    () => buildCanvasNodes(nodes, edges, schemas, classifiers, checklists, updateNodeConfig),
-    [nodes, edges, schemas, classifiers, checklists]
+    () => buildCanvasNodes(nodes, edges, schemas, classifiers, checklists, updateNodeConfig, onWorkflowNodeSelect, selectedNodeIds),
+    [nodes, edges, schemas, classifiers, checklists, selectedNodeIds]
   );
   const validation = useMemo(() => validateWorkflow(nodes, edges), [nodes, edges]);
   const runSidebarStyle = useMemo<CSSProperties>(() => ({ width: `${runSidebarWidth}px` }), [runSidebarWidth]);
@@ -380,8 +400,75 @@ export function WorkflowBuilder({
     return () => window.clearTimeout(timer);
   }, [activeWorkflowId, workflowName, nodes, edges, selectedNodeId]);
 
+  useEffect(() => {
+    if (!nodeContextMenu) return;
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      if (event.target instanceof globalThis.Node && nodeContextMenuRef.current?.contains(event.target)) return;
+      setNodeContextMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNodeContextMenu(null);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", closeNodeContextMenu);
+    window.addEventListener("scroll", closeNodeContextMenu, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", closeNodeContextMenu);
+      window.removeEventListener("scroll", closeNodeContextMenu, true);
+    };
+  }, [nodeContextMenu]);
+
+  useEffect(() => {
+    selectedNodeIdsRef.current = selectedNodeIds;
+  }, [selectedNodeIds]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Shift") shiftKeyPressedRef.current = true;
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Shift") shiftKeyPressedRef.current = false;
+    };
+    const onWindowBlur = () => {
+      shiftKeyPressedRef.current = false;
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onWindowBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onWindowBlur);
+    };
+  }, []);
+
   const onNodesChange = useCallback((changes: NodeChange<WorkflowNode>[]) => {
-    setNodes((current) => applyNodeChanges(changes, current));
+    setNodes((current) => {
+      if (changes.every((change) => change.type === "select") && (shiftKeyPressedRef.current || ignoreNextNodeSelectChangeRef.current)) {
+        ignoreNextNodeSelectChangeRef.current = false;
+        return current;
+      }
+      const next = applyNodeChanges(changes, current);
+      if (changes.some((change) => change.type === "select" || change.type === "remove")) {
+        const nextSelectedId = next.filter((node) => node.selected).at(-1)?.id ?? null;
+        selectedNodeIdsRef.current = next.filter((node) => node.selected).map((node) => node.id);
+        setSelectedNodeId(nextSelectedId);
+      }
+      return next;
+    });
+  }, []);
+
+  const onNodesDelete = useCallback((deletedNodes: WorkflowNode[]) => {
+    const deletedIds = new Set(deletedNodes.map((node) => node.id));
+    if (!deletedIds.size) return;
+    setEdges((current) => current.filter((edge) => !deletedIds.has(edge.source) && !deletedIds.has(edge.target)));
+    selectedNodeIdsRef.current = [];
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setNodeContextMenu(null);
   }, []);
 
   const onEdgesChange = useCallback((changes: EdgeChange<WorkflowEdge>[]) => {
@@ -417,6 +504,64 @@ export function WorkflowBuilder({
     setEdges((current) => current.filter((edge) => edge.id !== selectedEdgeId));
     setSelectedEdgeId(null);
     setMessage("선 연결을 삭제했습니다.");
+  }
+
+  function clearSelectedNodes() {
+    selectedNodeIdsRef.current = [];
+    setSelectedNodeId(null);
+    setNodes((current) => (current.some((node) => node.selected) ? current.map((node) => ({ ...node, selected: false })) : current));
+  }
+
+  function setSelectedNodesByIds(nodeIds: string[]) {
+    selectedNodeIdsRef.current = nodeIds;
+    const selectedIds = new Set(nodeIds);
+    setNodes((current) => current.map((node) => ({ ...node, selected: selectedIds.has(node.id) })));
+    setSelectedNodeId(nodeIds.at(-1) ?? null);
+  }
+
+  function selectSingleNode(nodeId: string) {
+    setSelectedNodesByIds([nodeId]);
+    setSelectedEdgeId(null);
+    setNodeContextMenu(null);
+  }
+
+  function toggleNodeSelection(nodeId: string) {
+    const selectedIds = new Set(selectedNodeIdsRef.current);
+    if (selectedIds.has(nodeId)) {
+      selectedIds.delete(nodeId);
+    } else {
+      selectedIds.add(nodeId);
+    }
+    setSelectedNodesByIds(Array.from(selectedIds));
+    setSelectedEdgeId(null);
+    setNodeContextMenu(null);
+  }
+
+  function onWorkflowNodeSelect(event: ReactMouseEvent, nodeId: string) {
+    if (event.shiftKey || event.nativeEvent.shiftKey || shiftKeyPressedRef.current) {
+      event.preventDefault();
+      ignoreNextNodeSelectChangeRef.current = true;
+      toggleNodeSelection(nodeId);
+      return;
+    }
+    ignoreNextNodeSelectChangeRef.current = false;
+    selectSingleNode(nodeId);
+  }
+
+  function deleteSelectedNodes() {
+    if (!selectedNodeIds.length) return;
+    const selectedIds = new Set(selectedNodeIds);
+    setNodes((current) => current.filter((node) => !selectedIds.has(node.id)));
+    setEdges((current) => current.filter((edge) => !selectedIds.has(edge.source) && !selectedIds.has(edge.target)));
+    selectedNodeIdsRef.current = [];
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setNodeContextMenu(null);
+    setMessage(`${selectedIds.size.toLocaleString()}개 노드를 삭제했습니다.`);
+  }
+
+  function closeNodeContextMenu() {
+    setNodeContextMenu(null);
   }
 
   function onRunSidebarResize(event: PointerEvent<HTMLButtonElement>) {
@@ -867,11 +1012,36 @@ export function WorkflowBuilder({
     }
   }
 
-  function addNode(kind: WorkflowNodeKind) {
+  function addNode(kind: WorkflowNodeKind, position?: { x: number; y: number }) {
     const palette = nodePalette.find((item) => item.kind === kind);
-    const node = workflowNode(kind, palette?.label ?? kind, 160 + nodes.length * 48, 260 + nodes.length * 16);
-    setNodes((current) => [...current, node]);
+    const node = workflowNode(
+      kind,
+      palette?.label ?? kind,
+      position?.x ?? 160 + nodes.length * 48,
+      position?.y ?? 260 + nodes.length * 16
+    );
+    selectedNodeIdsRef.current = [node.id];
+    setNodes((current) => [...current.map((item) => ({ ...item, selected: false })), { ...node, selected: true }]);
     setSelectedNodeId(node.id);
+    setSelectedEdgeId(null);
+    setNodeContextMenu(null);
+  }
+
+  function addNodeFromContextMenu(kind: WorkflowNodeKind) {
+    addNode(kind, nodeContextMenu?.flowPosition);
+  }
+
+  function openNodeContextMenu(event: ReactMouseEvent | globalThis.MouseEvent) {
+    event.preventDefault();
+    const flowPosition = reactFlowInstanceRef.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY }) ?? {
+      x: event.clientX,
+      y: event.clientY
+    };
+    setSelectedEdgeId(null);
+    setNodeContextMenu({
+      ...workflowContextMenuPosition(event.clientX, event.clientY),
+      flowPosition
+    });
   }
 
   function updateNodeConfig(nodeId: string, key: string, value: string) {
@@ -1037,6 +1207,14 @@ export function WorkflowBuilder({
                 </button>
               </div>
             )}
+            {!selectedEdge && selectedNodeIds.length > 0 && (
+              <div className="workflow-edge-actions">
+                <span>{selectedNodeIds.length.toLocaleString()}개 노드 선택됨</span>
+                <button type="button" className="secondary danger-outline" onClick={deleteSelectedNodes}>
+                  <Trash2 size={15} /> 노드 삭제
+                </button>
+              </div>
+            )}
             <span className="workflow-autosave">
               자동 저장 {draftSavedAt ?? "대기"}
             </span>
@@ -1049,23 +1227,50 @@ export function WorkflowBuilder({
               nodeTypes={nodeTypes}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
+              onNodesDelete={onNodesDelete}
               onConnect={onConnect}
-              onNodeClick={(_, node) => {
-                setSelectedNodeId(node.id);
-                setSelectedEdgeId(null);
+              onInit={(instance) => {
+                reactFlowInstanceRef.current = instance;
               }}
               onEdgeClick={(_, edge) => {
                 setSelectedEdgeId(edge.id);
-                setSelectedNodeId(null);
+                clearSelectedNodes();
+                setNodeContextMenu(null);
               }}
-              onPaneClick={() => setSelectedEdgeId(null)}
+              onPaneClick={() => {
+                setSelectedEdgeId(null);
+                setNodeContextMenu(null);
+                clearSelectedNodes();
+              }}
+              onPaneContextMenu={openNodeContextMenu}
               deleteKeyCode={["Backspace", "Delete"]}
+              multiSelectionKeyCode={null}
               fitView
             >
               <Background />
               <Controls />
               <MiniMap pannable zoomable />
             </ReactFlow>
+            {nodeContextMenu && (
+              <div
+                ref={nodeContextMenuRef}
+                className="workflow-upload-menu workflow-upload-menu-fixed workflow-node-create-menu"
+                role="menu"
+                style={{ top: nodeContextMenu.top, left: nodeContextMenu.left }}
+              >
+                {nodePalette.map((item) => (
+                  <button
+                    key={item.kind}
+                    type="button"
+                    className="workflow-upload-menu-item"
+                    role="menuitem"
+                    onClick={() => addNodeFromContextMenu(item.kind)}
+                  >
+                    <NodeIcon kind={item.kind} /> {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {isStartingRun ? (
               <WorkflowRunPreparingDock
@@ -1287,7 +1492,10 @@ function WorkflowCanvasNode({ id, data, selected }: NodeProps<WorkflowNode>) {
   const branchKeys = normalizeBranchKeys(data.branchKeys);
   const connectedBranchKeys = new Set(data.connectedBranchKeys ?? []);
   return (
-    <div className={`workflow-node workflow-node-${kind} ${data.configSelect ? "workflow-node-configurable" : ""} ${selected ? "selected" : ""}`}>
+    <div
+      className={`workflow-node workflow-node-${kind} ${data.configSelect ? "workflow-node-configurable" : ""} ${selected ? "selected" : ""}`}
+      onClick={(event) => data.onSelect?.(event, id)}
+    >
       {kind !== "input" && <Handle className="workflow-handle workflow-handle-target" type="target" position={Position.Left} />}
       <div className="workflow-node-title">
         <NodeIcon kind={kind} />
@@ -2202,6 +2410,15 @@ function clampWorkflowPaneWidth(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function workflowContextMenuPosition(clientX: number, clientY: number) {
+  const menuWidth = 220;
+  const menuHeight = 300;
+  return {
+    left: Math.max(8, Math.min(clientX, window.innerWidth - menuWidth)),
+    top: Math.max(8, Math.min(clientY, window.innerHeight - menuHeight))
+  };
+}
+
 function startWorkflowResultResize(
   event: PointerEvent<HTMLButtonElement>,
   side: "left" | "right",
@@ -2695,6 +2912,7 @@ function normalizeWorkflowNode(node: WorkflowNode): WorkflowNode {
     connectedBranchKeys: _connectedBranchKeys,
     configSelect: _configSelect,
     onConfigChange: _onConfigChange,
+    onSelect: _onSelect,
     ...data
   } = node.data;
   const branchKeys = data.kind === "branch" ? normalizeBranchKeys(data.branchKeys) : data.branchKeys;
@@ -2715,8 +2933,11 @@ function buildCanvasNodes(
   schemas: SchemaSummary[],
   classifiers: ClassifierSummary[],
   checklists: ChecklistSummary[],
-  onConfigChange: (nodeId: string, key: string, value: string) => void
+  onConfigChange: (nodeId: string, key: string, value: string) => void,
+  onNodeSelect: (event: ReactMouseEvent, nodeId: string) => void,
+  selectedNodeIds: string[] = []
 ): WorkflowNode[] {
+  const selectedSet = new Set(selectedNodeIds);
   return nodes.map((node) => {
     const configSelect = workflowNodeConfigSelect(node, schemas, classifiers, checklists);
     const connectedBranchKeys = edges
@@ -2724,11 +2945,13 @@ function buildCanvasNodes(
       .map((edge) => String(edge.sourceHandle));
     return {
       ...node,
+      selected: selectedSet.has(node.id),
       data: {
         ...node.data,
         connectedBranchKeys: node.data.kind === "branch" ? connectedBranchKeys : undefined,
         configSelect,
-        onConfigChange: configSelect ? onConfigChange : undefined
+        onConfigChange: configSelect ? onConfigChange : undefined,
+        onSelect: onNodeSelect
       }
     };
   });

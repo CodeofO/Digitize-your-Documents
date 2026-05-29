@@ -1002,6 +1002,10 @@ textarea {
   position: absolute;
 }
 
+.workflow-node-create-menu {
+  min-width: 204px;
+}
+
 .workflow-validation {
   border-top: 1px solid #e8ede9;
   padding: 8px 12px;

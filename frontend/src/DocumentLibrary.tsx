@@ -19,7 +19,7 @@ import {
   UploadCloud,
   X
 } from "lucide-react";
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "./apiClient";
 
 const LIBRARY_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.pptx";
@@ -181,6 +181,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const processingQueueRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
+  const lastSelectedDocumentIdRef = useRef<string | null>(props.selectedIds[props.selectedIds.length - 1] ?? null);
   const selectedSet = useMemo(() => new Set(props.selectedIds), [props.selectedIds]);
   const selectableDocuments = documents.filter((document) => !["deleted", "failed"].includes(document.status));
   const allVisibleSelected = selectableDocuments.length > 0 && selectableDocuments.every((document) => selectedSet.has(document.document_id));
@@ -203,6 +204,14 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     if (!nextItem) return;
     void processQueueItem(nextItem.id);
   }, [uploadQueue]);
+
+  useEffect(() => {
+    if (!props.selectedIds.length) {
+      lastSelectedDocumentIdRef.current = null;
+    } else if (!lastSelectedDocumentIdRef.current || !props.selectedIds.includes(lastSelectedDocumentIdRef.current)) {
+      lastSelectedDocumentIdRef.current = props.selectedIds[props.selectedIds.length - 1] ?? null;
+    }
+  }, [props.selectedIds]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -296,17 +305,39 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
     });
   }
 
-  function toggleDocument(document: LibraryDocument) {
+  function toggleDocument(document: LibraryDocument, event?: ReactMouseEvent<HTMLButtonElement>) {
     if (document.status === "deleted" || document.status === "failed") return;
+    if (event?.shiftKey && lastSelectedDocumentIdRef.current) {
+      selectDocumentRange(lastSelectedDocumentIdRef.current, document.document_id);
+      lastSelectedDocumentIdRef.current = document.document_id;
+      return;
+    }
     rememberDocuments([document]);
     const next = selectedSet.has(document.document_id)
       ? props.selectedIds.filter((id) => id !== document.document_id)
       : [...props.selectedIds, document.document_id];
     props.onSelectedIds(next);
+    lastSelectedDocumentIdRef.current = document.document_id;
+  }
+
+  function selectDocumentRange(anchorId: string, targetId: string) {
+    const anchorIndex = documents.findIndex((document) => document.document_id === anchorId);
+    const targetIndex = documents.findIndex((document) => document.document_id === targetId);
+    if (anchorIndex < 0 || targetIndex < 0) {
+      const targetDocument = documents.find((document) => document.document_id === targetId);
+      if (targetDocument) toggleDocument(targetDocument);
+      return;
+    }
+    const [start, end] = anchorIndex < targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
+    const rangeDocuments = documents.slice(start, end + 1).filter((item) => !["deleted", "failed"].includes(item.status));
+    if (!rangeDocuments.length) return;
+    rememberDocuments(rangeDocuments);
+    props.onSelectedIds(Array.from(new Set([...props.selectedIds, ...rangeDocuments.map((item) => item.document_id)])));
   }
 
   function clearSelection() {
     props.onSelectedIds([]);
+    lastSelectedDocumentIdRef.current = null;
   }
 
   async function selectAllDocuments() {
@@ -797,7 +828,7 @@ function DocumentLibraryPanel(props: DocumentLibraryPanelProps) {
             {documents.length ? (
               documents.map((document) => (
                 <article key={document.document_id} className={`document-library-row ${document.status} ${selectedSet.has(document.document_id) ? "selected" : ""}`}>
-                  <button type="button" className="document-library-row-main" onClick={() => toggleDocument(document)}>
+                  <button type="button" className="document-library-row-main" onClick={(event) => toggleDocument(document, event)}>
                     <span className="document-library-check">{selectedSet.has(document.document_id) ? <Check size={15} /> : null}</span>
                     <span className="document-library-icon">
                       <FileText size={18} />
