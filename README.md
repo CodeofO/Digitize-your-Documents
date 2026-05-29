@@ -17,9 +17,7 @@
 
 ### 시연 영상
 
-<video src="assets/readme/시연영상.mp4" controls title="Document Automation Workspace 시연 영상"></video>
-
-[시연 영상 보기](assets/readme/시연영상.mp4)
+![Document Automation Workspace 시연 영상](assets/readme/demo-preview.gif)
 
 ### 외부 데모 실행
 
