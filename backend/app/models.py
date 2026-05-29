@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -227,6 +227,9 @@ class ClassificationResult(Base):
 
 class ClassificationBatch(Base):
     __tablename__ = "classification_batches"
+    __table_args__ = (
+        Index("ix_classification_batches_created_at_id", "created_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classification_batch"))
     classifier_id: Mapped[str] = mapped_column(ForeignKey("document_classifiers.id"), nullable=False)
@@ -245,6 +248,10 @@ class ClassificationBatch(Base):
 
 class ClassificationBatchItem(Base):
     __tablename__ = "classification_batch_items"
+    __table_args__ = (
+        Index("ix_classification_batch_items_batch_job", "batch_id", "job_id"),
+        Index("ix_classification_batch_items_batch_upload_index", "batch_id", "upload_index"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classification_batch_item"))
     batch_id: Mapped[str] = mapped_column(ForeignKey("classification_batches.id"), nullable=False)
@@ -322,6 +329,9 @@ class RequiredFieldCheckResult(Base):
 
 class RequiredFieldCheckBatch(Base):
     __tablename__ = "required_field_check_batches"
+    __table_args__ = (
+        Index("ix_required_field_check_batches_created_at_id", "created_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("required_check_batch"))
     checklist_id: Mapped[str] = mapped_column(ForeignKey("required_field_checklists.id"), nullable=False)
@@ -340,6 +350,10 @@ class RequiredFieldCheckBatch(Base):
 
 class RequiredFieldCheckBatchItem(Base):
     __tablename__ = "required_field_check_batch_items"
+    __table_args__ = (
+        Index("ix_required_field_check_batch_items_batch_job", "batch_id", "job_id"),
+        Index("ix_required_field_check_batch_items_batch_upload_index", "batch_id", "upload_index"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("required_check_batch_item"))
     batch_id: Mapped[str] = mapped_column(ForeignKey("required_field_check_batches.id"), nullable=False)
@@ -357,6 +371,9 @@ class RequiredFieldCheckBatchItem(Base):
 
 class Batch(Base):
     __tablename__ = "batches"
+    __table_args__ = (
+        Index("ix_batches_created_at_id", "created_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("batch"))
     schema_id: Mapped[str] = mapped_column(ForeignKey("schemas.id"), nullable=False)
@@ -376,6 +393,10 @@ class Batch(Base):
 
 class BatchItem(Base):
     __tablename__ = "batch_items"
+    __table_args__ = (
+        Index("ix_batch_items_batch_job", "batch_id", "job_id"),
+        Index("ix_batch_items_batch_upload_index", "batch_id", "upload_index"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("batch_item"))
     batch_id: Mapped[str] = mapped_column(ForeignKey("batches.id"), nullable=False)
@@ -409,6 +430,28 @@ class ExportPreset(Base):
     schema: Mapped[Schema | None] = relationship()
 
 
+class ExportJob(Base):
+    __tablename__ = "export_jobs"
+    __table_args__ = (
+        Index("ix_export_jobs_owner_created_at", "owner_type", "owner_id", "created_at"),
+        Index("ix_export_jobs_status_created_at", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("export_job"))
+    owner_type: Mapped[str] = mapped_column(String, nullable=False)
+    owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    format: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    filename: Mapped[str | None] = mapped_column(String, nullable=True)
+    storage_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class WorkflowDefinition(Base):
     __tablename__ = "workflow_definitions"
 
@@ -430,6 +473,10 @@ class WorkflowDefinition(Base):
 
 class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
+    __table_args__ = (
+        Index("ix_workflow_runs_created_at_id", "created_at", "id"),
+        Index("ix_workflow_runs_queue_group_status_order", "workflow_run_group_id", "status", "queue_order", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("workflow_run"))
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow_definitions.id"), nullable=False)
@@ -460,6 +507,10 @@ class WorkflowRun(Base):
 
 class WorkflowRunItem(Base):
     __tablename__ = "workflow_run_items"
+    __table_args__ = (
+        Index("ix_workflow_run_items_run_status", "run_id", "status"),
+        Index("ix_workflow_run_items_run_upload_index", "run_id", "upload_index"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("workflow_item"))
     run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.id"), nullable=False)

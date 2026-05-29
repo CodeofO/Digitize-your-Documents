@@ -68,6 +68,8 @@ docker compose -f docker-compose.hosting.example.yml up -d backend
 
 `STORAGE_BACKEND=local`에서는 `/data` 같은 persistent volume이 반드시 필요하다. volume이 없는 ephemeral filesystem에 두면 재배포 시 업로드와 결과가 사라진다.
 
+비동기 export artifact는 local storage 기준 `DOCUMENT_STORAGE_DIR/exports/<export_job_id>/` 아래에 저장된다. `STORAGE_BACKEND=s3`에서는 같은 key prefix가 object storage로 업로드되고 DB에는 `s3://...` reference가 남는다. API polling에는 `ExportJob.status`, `size_bytes`, `error_message`가 노출되므로 운영 로그와 함께 export 실패율과 평균 생성 시간을 추적할 수 있다.
+
 ## 보안 동작
 
 - `/api/health`, `/api/auth/session`, `/api/auth/logout` 외 `/api/*`는 세션이 필요하다.
@@ -89,7 +91,7 @@ curl -X POST https://api.example.com/api/maintenance/retention-cleanup \
   --cookie "digitize_session=<session-cookie>"
 ```
 
-스키마, 분류기, 체크리스트, 워크플로우 정의, export preset은 retention cleanup 대상이 아니다.
+스키마, 분류기, 체크리스트, 워크플로우 정의, export preset은 retention cleanup 대상이 아니다. export job 기록과 생성 artifact는 업로드 데이터 보존 기간을 넘으면 cleanup 대상이다.
 
 ## S3 전환 준비
 

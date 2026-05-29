@@ -44,6 +44,8 @@ import { ChangeEvent, CSSProperties, PointerEvent, UIEvent, useCallback, useEffe
 import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 import { DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "./DocumentLibrary";
+import { ExportJobHistory } from "./ExportJobHistory";
+import { createAndDownloadExportJob } from "./exportJobs";
 
 const WORKFLOW_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const WORKFLOW_RUN_ROW_HEIGHT = 64;
@@ -1431,6 +1433,7 @@ function WorkflowRunExportButton(props: {
   title?: string;
 }) {
   const menu = useWorkflowUploadMenu("right");
+  const [pendingFormat, setPendingFormat] = useState<ExportFormat | null>(null);
   const buttonClass = props.compact ? "secondary compact" : "secondary";
   const iconSize = props.compact ? 14 : 15;
   const formats: { format: ExportFormat; label: string }[] = [
@@ -1438,24 +1441,37 @@ function WorkflowRunExportButton(props: {
     { format: "json", label: "JSON" },
     { format: "xlsx", label: "XLSX" }
   ];
+  const onExport = async (format: ExportFormat) => {
+    if (pendingFormat) return;
+    menu.close();
+    setPendingFormat(format);
+    try {
+      await createAndDownloadExportJob("workflow_run", props.runId, format);
+    } catch (exc) {
+      window.alert(exc instanceof Error ? exc.message : "Export 요청에 실패했습니다.");
+    } finally {
+      setPendingFormat(null);
+    }
+  };
 
   return (
     <div className="workflow-upload-picker" ref={menu.ref}>
-      <button type="button" className={buttonClass} aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle} title={props.title}>
-        <Download size={iconSize} /> Export
+      <button type="button" className={buttonClass} aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle} title={props.title} disabled={pendingFormat !== null}>
+        {pendingFormat ? <Loader2 size={iconSize} className="spin" /> : <Download size={iconSize} />} Export
       </button>
       {menu.open && (
         <div className="workflow-upload-menu workflow-upload-menu-right workflow-upload-menu-fixed" role="menu" style={menu.menuStyle}>
           {formats.map((item) => (
-            <a
+            <button
               key={item.format}
+              type="button"
               className="workflow-upload-menu-item"
               role="menuitem"
-              href={`${API_BASE}/api/workflow-runs/${props.runId}/export?format=${item.format}`}
-              onClick={menu.close}
+              disabled={pendingFormat !== null}
+              onClick={() => void onExport(item.format)}
             >
-              {exportFormatIcon(item.format, iconSize)} {item.label}
-            </a>
+              {pendingFormat === item.format ? <Loader2 size={iconSize} className="spin" /> : exportFormatIcon(item.format, iconSize)} {item.label}
+            </button>
           ))}
         </div>
       )}
@@ -1753,6 +1769,7 @@ function WorkflowRunResults(props: {
     () => props.run.items.filter((item) => workflowResultFilterMatches(item, statusFilter) && workflowClassFilterMatches(item, classFilter)),
     [classFilter, props.run.items, statusFilter]
   );
+  const reviewItems = useMemo(() => props.run.items.filter((item) => item.status === "needs_review"), [props.run.items]);
   const visibleSelectedItem =
     props.selectedItem && filteredItems.some((item) => item.id === props.selectedItem?.id)
       ? props.selectedItem
@@ -1785,6 +1802,14 @@ function WorkflowRunResults(props: {
   const onRightResize = useCallback((event: PointerEvent<HTMLButtonElement>) => {
     startWorkflowResultResize(event, "right", leftWidth, rightWidth, setLeftWidth, setRightWidth);
   }, [leftWidth, rightWidth]);
+  const goToNextReviewItem = useCallback(() => {
+    if (!reviewItems.length) return;
+    const currentIndex = reviewItems.findIndex((item) => item.id === props.selectedItem?.id);
+    const nextItem = reviewItems[(currentIndex + 1) % reviewItems.length];
+    setStatusFilter("review");
+    setClassFilter("all");
+    props.onSelectItem(nextItem.id);
+  }, [props.onSelectItem, props.selectedItem?.id, reviewItems]);
 
   return (
     <section className={`workflow-results ${workflowRunStatusClass(props.run)}`}>
@@ -1809,6 +1834,9 @@ function WorkflowRunResults(props: {
           <span><strong>{workflowRunCompletedAtLabel(props.run)}</strong> 종료</span>
         </div>
         <div className="workflow-results-actions">
+          <button type="button" className="secondary" onClick={goToNextReviewItem} disabled={!reviewItems.length}>
+            <CheckSquare size={15} /> 다음 검토 {reviewItems.length ? reviewItems.length.toLocaleString() : ""}
+          </button>
           {props.onResume && workflowRunCanResume(props.run) && (
             <button type="button" className="secondary" onClick={props.onResume}>
               <Play size={15} /> 이어하기
@@ -1841,6 +1869,7 @@ function WorkflowRunResults(props: {
           )}
         </div>
       </div>
+      <ExportJobHistory ownerType="workflow_run" ownerId={props.run.id} compact limit={3} />
       <progress className={`workflow-run-progress ${workflowRunStatusClass(props.run)}`} value={props.run.progress} max={1} />
       <div className="workflow-run-workbench workflow-run-workbench-resizable resize-scope" style={workbenchStyle}>
         <WorkflowRunRail
@@ -1996,7 +2025,7 @@ function workflowRunDeleteQueueEntryLabel(run: WorkflowRun) {
 }
 
 function workflowRunCanDiscard(run: WorkflowRun) {
-  return run.status !== "waiting" && !["completed", "completed_with_errors", "needs_review", "canceled"].includes(run.status);
+  return run.status !== "waiting" && !["completed", "completed_with_errors", "needs_review", "failed", "canceled"].includes(run.status);
 }
 
 function workflowRunIsLive(run: WorkflowRun) {

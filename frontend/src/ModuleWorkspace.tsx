@@ -22,6 +22,8 @@ import { ChangeEvent, CSSProperties, DragEvent, PointerEvent, UIEvent, useCallba
 import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 import { DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "./DocumentLibrary";
+import { ExportJobHistory } from "./ExportJobHistory";
+import { createAndDownloadExportJob } from "./exportJobs";
 
 const MODULE_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const MODULE_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "pptx"]);
@@ -337,19 +339,32 @@ function ModuleUploadPicker(props: {
 }
 
 function ModuleBatchExportButton(props: {
-  onExport: (format: ModuleExportFormat) => void;
+  onExport: (format: ModuleExportFormat) => Promise<unknown> | unknown;
 }) {
   const menu = useModuleUploadMenu();
+  const [pendingFormat, setPendingFormat] = useState<ModuleExportFormat | null>(null);
   const formats: { format: ModuleExportFormat; label: string }[] = [
     { format: "csv", label: "CSV" },
     { format: "json", label: "JSON" },
     { format: "xlsx", label: "XLSX" }
   ];
+  const handleExport = async (format: ModuleExportFormat) => {
+    if (pendingFormat) return;
+    menu.close();
+    setPendingFormat(format);
+    try {
+      await props.onExport(format);
+    } catch (exc) {
+      window.alert(exc instanceof Error ? exc.message : "Export 요청에 실패했습니다.");
+    } finally {
+      setPendingFormat(null);
+    }
+  };
 
   return (
     <div className="workflow-upload-picker unified-upload-picker" ref={menu.ref}>
-      <button type="button" className="secondary compact" aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle}>
-        <Download size={14} />
+      <button type="button" className="secondary compact" aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle} disabled={pendingFormat !== null}>
+        {pendingFormat ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
         Export
       </button>
       {menu.open && (
@@ -360,12 +375,12 @@ function ModuleBatchExportButton(props: {
               type="button"
               className="workflow-upload-menu-item"
               role="menuitem"
+              disabled={pendingFormat !== null}
               onClick={() => {
-                menu.close();
-                props.onExport(item.format);
+                void handleExport(item.format);
               }}
             >
-              {moduleExportFormatIcon(item.format, 14)} {item.label}
+              {pendingFormat === item.format ? <Loader2 size={14} className="spin" /> : moduleExportFormatIcon(item.format, 14)} {item.label}
             </button>
           ))}
         </div>
@@ -821,6 +836,13 @@ export function ModuleWorkspace({
     }
   }
 
+  function openNextReviewBatchItem(batch: ModuleBatch) {
+    const reviewItems = batch.items.filter((item) => item.status === "needs_review");
+    if (!reviewItems.length) return;
+    const currentIndex = reviewItems.findIndex((item) => item.id === activeBatchItemId);
+    void openBatchItem(reviewItems[(currentIndex + 1) % reviewItems.length]);
+  }
+
   function selectFiles(files: FileList | File[] | null) {
     const incoming = Array.from(files ?? []);
     const supported = sortUploadFiles(
@@ -905,6 +927,7 @@ export function ModuleWorkspace({
                 onDiscard={() => void discardBatch(activeBatch.id)}
                 onResume={() => void resumeBatch(activeBatch.id)}
                 onExport={(format) => openModuleBatchExport(kind, activeBatch.id, format)}
+                onNextReview={() => openNextReviewBatchItem(activeBatch)}
               />
               <ModuleDocumentPreview document={document} activePage={activePage} activeImageUrl={activeImageUrl} regions={regions} showRegions={showRegions} onPage={setActivePage} />
             </div>
@@ -1256,13 +1279,15 @@ function ModuleBatchRail(props: {
   onOpen: (item: ModuleBatchItem) => void;
   onDiscard: () => void;
   onResume: () => void;
-  onExport: (format: ModuleExportFormat) => void;
+  onExport: (format: ModuleExportFormat) => Promise<unknown> | unknown;
+  onNextReview: () => void;
 }) {
   const finishedCount = props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count;
   const uploadedCount = props.batch.uploaded_count ?? props.batch.items.length;
   const preprocessingCount = props.batch.preprocessing_count ?? props.batch.items.filter((item) => item.status === "preprocessing").length;
   const runningCount = props.batch.running_count ?? props.batch.items.filter((item) => item.status === "running").length;
   const queuedCount = props.batch.queued_count ?? props.batch.items.filter((item) => item.status === "queued").length;
+  const needsReviewCount = props.batch.needs_review_count ?? props.batch.items.filter((item) => item.status === "needs_review").length;
   return (
     <aside className="module-batch-rail">
       <div className="module-batch-head">
@@ -1286,8 +1311,18 @@ function ModuleBatchRail(props: {
       </div>
       <progress value={props.batch.progress} max={1} />
       <div className="module-batch-actions">
+        <button type="button" className="secondary compact" onClick={props.onNextReview} disabled={!needsReviewCount}>
+          <CheckSquare size={14} />
+          다음 검토 {needsReviewCount ? needsReviewCount.toLocaleString() : ""}
+        </button>
         <ModuleBatchExportButton onExport={props.onExport} />
       </div>
+      <ExportJobHistory
+        ownerType={props.batch.classifier_id ? "classification_batch" : "required_field_check_batch"}
+        ownerId={props.batch.id}
+        compact
+        limit={3}
+      />
       <ModuleBatchItemList batch={props.batch} activeItemId={props.activeItemId} onOpen={props.onOpen} />
     </aside>
   );
@@ -1707,10 +1742,8 @@ async function pollJob<T>(path: string): Promise<ModuleJob<T>> {
 }
 
 function openModuleBatchExport(kind: ModuleKind, batchId: string, format: ModuleExportFormat) {
-  const path = kind === "classifier"
-    ? `/api/classification-batches/${batchId}/export?format=${format}`
-    : `/api/required-field-check-batches/${batchId}/export?format=${format}`;
-  window.open(`${API_BASE}${path}`, "_blank", "noopener,noreferrer");
+  const ownerType = kind === "classifier" ? "classification_batch" : "required_field_check_batch";
+  return createAndDownloadExportJob(ownerType, batchId, format);
 }
 
 function moduleExportFormatIcon(format: ModuleExportFormat, size: number) {

@@ -97,6 +97,83 @@ def _run_lightweight_migrations() -> None:
             ("execution_generation", "INTEGER NOT NULL DEFAULT 0"),
         ],
     }
+    index_specs = [
+        (
+            "ix_workflow_runs_created_at_id",
+            "workflow_runs",
+            '"created_at", "id"',
+        ),
+        (
+            "ix_workflow_runs_queue_group_status_order",
+            "workflow_runs",
+            '"workflow_run_group_id", "status", "queue_order", "created_at"',
+        ),
+        (
+            "ix_workflow_run_items_run_status",
+            "workflow_run_items",
+            '"run_id", "status"',
+        ),
+        (
+            "ix_workflow_run_items_run_upload_index",
+            "workflow_run_items",
+            '"run_id", "upload_index"',
+        ),
+        (
+            "ix_batches_created_at_id",
+            "batches",
+            '"created_at", "id"',
+        ),
+        (
+            "ix_batch_items_batch_job",
+            "batch_items",
+            '"batch_id", "job_id"',
+        ),
+        (
+            "ix_batch_items_batch_upload_index",
+            "batch_items",
+            '"batch_id", "upload_index"',
+        ),
+        (
+            "ix_classification_batches_created_at_id",
+            "classification_batches",
+            '"created_at", "id"',
+        ),
+        (
+            "ix_classification_batch_items_batch_job",
+            "classification_batch_items",
+            '"batch_id", "job_id"',
+        ),
+        (
+            "ix_classification_batch_items_batch_upload_index",
+            "classification_batch_items",
+            '"batch_id", "upload_index"',
+        ),
+        (
+            "ix_required_field_check_batches_created_at_id",
+            "required_field_check_batches",
+            '"created_at", "id"',
+        ),
+        (
+            "ix_required_field_check_batch_items_batch_job",
+            "required_field_check_batch_items",
+            '"batch_id", "job_id"',
+        ),
+        (
+            "ix_required_field_check_batch_items_batch_upload_index",
+            "required_field_check_batch_items",
+            '"batch_id", "upload_index"',
+        ),
+        (
+            "ix_export_jobs_owner_created_at",
+            "export_jobs",
+            '"owner_type", "owner_id", "created_at"',
+        ),
+        (
+            "ix_export_jobs_status_created_at",
+            "export_jobs",
+            '"status", "created_at"',
+        ),
+    ]
 
     with engine.begin() as connection:
         tables = {
@@ -113,6 +190,10 @@ def _run_lightweight_migrations() -> None:
             for column_name, sql_type in specs:
                 if column_name not in existing:
                     connection.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type}'))
+
+        for index_name, table_name, columns_sql in index_specs:
+            if table_name in tables:
+                connection.execute(text(f'CREATE INDEX IF NOT EXISTS "{index_name}" ON "{table_name}" ({columns_sql})'))
 
         if "schemas" in tables:
             schema_columns = {

@@ -7,8 +7,10 @@ import queue
 import re
 import shutil
 import threading
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from PIL import Image
 from pydantic import ValidationError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from starlette.datastructures import FormData
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -67,6 +70,7 @@ from app.models import (
     DocumentClassifier,
     DocumentLibraryFolder,
     DocumentPage,
+    ExportJob,
     ExportPreset,
     ExtractionJob,
     ExtractionResult,
@@ -109,6 +113,8 @@ from app.schemas import (
     DocumentClassifierRead,
     DocumentClassifierUpdate,
     DraftExtractionJobCreate,
+    ExportJobCreate,
+    ExportJobRead,
     ExportPresetCreate,
     ExportPresetRead,
     ExportPresetUpdate,
@@ -165,6 +171,7 @@ from app.workflows import (
     workflow_run_export_csv,
     workflow_run_export_payload,
     workflow_run_to_read,
+    workflow_runs_to_read,
 )
 from app.storage import delete_local_tree, delete_storage_ref, is_s3_ref, materialize_storage_ref, persist_artifact, scratch_dir_for_ref
 
@@ -173,10 +180,13 @@ from app.storage import delete_local_tree, delete_storage_ref, is_s3_ref, materi
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_db()
     stop_conversion = _start_document_conversion_workers()
+    stop_export = _start_export_job_worker()
     stop_cleanup = _start_retention_cleanup_worker()
     yield
     if stop_conversion:
         stop_conversion.set()
+    if stop_export:
+        stop_export.set()
     if stop_cleanup:
         stop_cleanup.set()
 
@@ -188,9 +198,19 @@ WORKFLOW_ENQUEUE_BLOCKED_STATUSES = {"waiting", "failed", "canceled"}
 DOCUMENT_READY_STATUSES = {"ready"}
 DOCUMENT_CONVERTING_STATUSES = {"queued", "preprocessing"}
 DOCUMENT_CONVERSION_TERMINAL_STATUSES = {"completed", "failed", "canceled"}
+EXPORT_JOB_OWNER_TYPES = {"workflow_run", "batch", "classification_batch", "required_field_check_batch"}
+EXPORT_JOB_WORKER_INTERVAL_SECONDS = 1.0
+XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _document_conversion_queue: queue.Queue[str] = queue.Queue()
 _document_conversion_enqueued: set[str] = set()
 _document_conversion_queue_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class ExportArtifact:
+    content: bytes
+    filename: str
+    content_type: str
 
 settings = get_settings()
 app.add_middleware(
@@ -2020,7 +2040,7 @@ def start_workflow_run(
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
     if run.status not in {"uploading", "queued", "waiting"}:
-        return WorkflowRunRead(**workflow_run_to_read(run))
+        raise HTTPException(status_code=409, detail=f"Workflow run cannot be started from status {run.status}")
     if run.status == "waiting":
         _validate_waiting_workflow_run_can_start(run, db)
     _validate_owner_can_start(run, run.items)
@@ -2152,6 +2172,8 @@ def discard_workflow_run(run_id: str, db: Session = Depends(get_db)) -> Workflow
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
+    if run.status in WORKFLOW_RUN_TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail="Workflow run is already terminal")
     if run.status == "waiting":
         _cancel_waiting_workflow_run(run, db)
         db.commit()
@@ -2182,6 +2204,8 @@ def resume_workflow_run(
         raise HTTPException(status_code=404, detail="Workflow run not found")
     if run.status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
+    if run.status == "waiting":
+        raise HTTPException(status_code=409, detail="Waiting workflow run must be started or canceled from the queue")
     if not run.items:
         raise HTTPException(status_code=422, detail="No uploaded workflow items are available to continue")
     _validate_owner_upload_complete(run, run.items)
@@ -2219,6 +2243,8 @@ def pause_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRu
         raise HTTPException(status_code=404, detail="Workflow run not found")
     if run.status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
+    if run.status == "waiting":
+        raise HTTPException(status_code=409, detail="Waiting workflow run must be started or canceled from the queue")
     if run.status == "paused":
         return WorkflowRunRead(**workflow_run_to_read(run))
 
@@ -2368,7 +2394,7 @@ def retry_failed_workflow_run(
 @app.get("/api/workflow-runs", response_model=list[WorkflowRunRead])
 def list_workflow_runs(limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)) -> list[WorkflowRunRead]:
     runs = db.query(WorkflowRun).order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc()).limit(limit).all()
-    return [WorkflowRunRead(**workflow_run_to_read(run, include_items=False)) for run in runs]
+    return [WorkflowRunRead(**payload) for payload in workflow_runs_to_read(runs, include_items=False, db=db)]
 
 
 @app.get("/api/workflow-runs/{run_id}", response_model=WorkflowRunRead)
@@ -2384,7 +2410,7 @@ def get_workflow_run_summary(run_id: str, db: Session = Depends(get_db)) -> Work
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
-    return WorkflowRunRead(**workflow_run_to_read(run, include_items=False))
+    return WorkflowRunRead(**workflow_run_to_read(run, include_items=False, db=db))
 
 
 @app.get("/api/workflow-runs/{run_id}/export")
@@ -2396,7 +2422,7 @@ def export_workflow_run(
     run = db.get(WorkflowRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
-    payload = workflow_run_export_payload(run)
+    artifact = _build_export_artifact(db, "workflow_run", run.id, format)
     log_audit_event(
         db,
         entity_type="workflow_run",
@@ -2406,14 +2432,89 @@ def export_workflow_run(
         metadata={"format": format},
     )
     db.commit()
-    workflow_name = payload.get("workflow_name") or (run.workflow.name if run.workflow else "workflow")
-    filename = _export_filename("workflow", workflow_name, run.id, format)
-    if format == "json":
-        return JSONResponse(payload, headers=_download_headers(filename))
-    if format == "xlsx":
-        rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
-        return _xlsx_download_response(rows, _table_fieldnames(rows), filename)
-    return _csv_download_response(workflow_run_export_csv(run), filename)
+    return _export_artifact_response(artifact)
+
+
+@app.post("/api/export-jobs", response_model=ExportJobRead, status_code=202)
+def create_export_job(
+    payload: ExportJobCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> ExportJobRead:
+    job = _queue_export_job(
+        db,
+        background_tasks,
+        owner_type=payload.owner_type,
+        owner_id=payload.owner_id,
+        format=payload.format,
+    )
+    return _export_job_read(job)
+
+
+@app.get("/api/export-jobs", response_model=list[ExportJobRead])
+def list_export_jobs(
+    owner_type: str | None = Query(default=None, pattern="^(workflow_run|batch|classification_batch|required_field_check_batch)$"),
+    owner_id: str | None = Query(default=None),
+    status: str | None = Query(default=None, pattern="^(queued|running|completed|failed)$"),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[ExportJobRead]:
+    query = db.query(ExportJob)
+    if owner_type:
+        query = query.filter(ExportJob.owner_type == owner_type)
+    if owner_id:
+        query = query.filter(ExportJob.owner_id == owner_id)
+    if status:
+        query = query.filter(ExportJob.status == status)
+    jobs = query.order_by(ExportJob.created_at.desc(), ExportJob.id.desc()).limit(limit).all()
+    return [_export_job_read(job) for job in jobs]
+
+
+@app.post("/api/export-jobs/{job_id}/retry", response_model=ExportJobRead, status_code=202)
+def retry_export_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> ExportJobRead:
+    source = db.get(ExportJob, job_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if source.status != "failed":
+        raise HTTPException(status_code=409, detail="Only failed export jobs can be retried")
+    job = _queue_export_job(
+        db,
+        background_tasks,
+        owner_type=source.owner_type,
+        owner_id=source.owner_id,
+        format=source.format,
+        retry_source_job_id=source.id,
+    )
+    return _export_job_read(job)
+
+
+@app.get("/api/export-jobs/{job_id}", response_model=ExportJobRead)
+def get_export_job(job_id: str, db: Session = Depends(get_db)) -> ExportJobRead:
+    job = db.get(ExportJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    return _export_job_read(job)
+
+
+@app.get("/api/export-jobs/{job_id}/download")
+def download_export_job(job_id: str, db: Session = Depends(get_db)) -> FileResponse:
+    job = db.get(ExportJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if job.status != "completed" or not job.storage_path or not job.filename:
+        raise HTTPException(status_code=409, detail="Export job is not ready for download")
+    path = materialize_storage_ref(job.storage_path, suffix=Path(job.filename).suffix)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Export artifact not found")
+    return FileResponse(
+        path,
+        media_type=job.content_type or "application/octet-stream",
+        headers=_download_headers(job.filename),
+    )
 
 
 @app.post("/api/batches", response_model=BatchRead)
@@ -2596,9 +2697,13 @@ def resume_batch(batch_id: str, background_tasks: BackgroundTasks, db: Session =
 
 
 @app.get("/api/batches", response_model=list[BatchRead])
-def list_batches(limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)) -> list[BatchRead]:
+def list_batches(
+    limit: int = Query(default=20, ge=1, le=100),
+    include_items: bool = Query(default=True),
+    db: Session = Depends(get_db),
+) -> list[BatchRead]:
     batches = db.query(Batch).order_by(Batch.created_at.desc()).limit(limit).all()
-    return [_batch_read(batch) for batch in batches]
+    return [_batch_read(batch, include_items=include_items, db=db) for batch in batches]
 
 
 @app.get("/api/batches/{batch_id}", response_model=BatchRead)
@@ -2614,7 +2719,7 @@ def get_batch_summary(batch_id: str, db: Session = Depends(get_db)) -> BatchRead
     batch = db.get(Batch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
-    return _batch_read(batch, include_items=False)
+    return _batch_read(batch, include_items=False, db=db)
 
 
 @app.post("/api/batches/{batch_id}/cancel", response_model=BatchRead)
@@ -2668,22 +2773,7 @@ def export_batch(
     batch = db.get(Batch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
-
-    schema = db.get(Schema, batch.schema_id)
-    if not schema:
-        raise HTTPException(status_code=404, detail="Schema not found")
-
-    schema_data = _schema_data(schema)
-    field_names = [field["key_name"] for field in schema_data.get("fields", [])]
-    rows = [_batch_export_row(item, field_names) for item in _sorted_batch_items(batch.items)]
-    payload = {
-        "batch_id": batch.id,
-        "schema_id": batch.schema_id,
-        "schema_name": schema.name,
-        "status": _batch_read(batch).status,
-        "total_count": batch.total_count,
-        "rows": rows,
-    }
+    artifact = _build_export_artifact(db, "batch", batch.id, format)
     log_audit_event(
         db,
         entity_type="batch",
@@ -2693,34 +2783,7 @@ def export_batch(
         metadata={"format": format},
     )
     db.commit()
-
-    filename = _export_filename("KIE", schema.name, batch.id, format)
-    if format == "json":
-        return JSONResponse(
-            payload,
-            headers=_download_headers(filename),
-        )
-
-    output = io.StringIO()
-    field_columns = [column for field_name in field_names for column in _kie_export_columns(field_name)]
-    fieldnames = [
-        "filename",
-        "document_id",
-        "job_id",
-        "status",
-        "error_message",
-        *field_columns,
-        "warnings",
-    ]
-    if format == "xlsx":
-        return _xlsx_download_response(rows, fieldnames, filename)
-
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in rows:
-        writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
-
-    return _csv_download_response(output.getvalue(), filename)
+    return _export_artifact_response(artifact)
 
 
 @app.post("/api/classification-batches", response_model=ClassificationBatchRead)
@@ -2909,10 +2972,11 @@ def resume_classification_batch(
 @app.get("/api/classification-batches", response_model=list[ClassificationBatchRead])
 def list_classification_batches(
     limit: int = Query(default=20, ge=1, le=100),
+    include_items: bool = Query(default=True),
     db: Session = Depends(get_db),
 ) -> list[ClassificationBatchRead]:
     batches = db.query(ClassificationBatch).order_by(ClassificationBatch.created_at.desc()).limit(limit).all()
-    return [_classification_batch_read(batch) for batch in batches]
+    return [_classification_batch_read(batch, include_items=include_items, db=db) for batch in batches]
 
 
 @app.get("/api/classification-batches/{batch_id}", response_model=ClassificationBatchRead)
@@ -2928,7 +2992,7 @@ def get_classification_batch_summary(batch_id: str, db: Session = Depends(get_db
     batch = db.get(ClassificationBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Classification batch not found")
-    return _classification_batch_read(batch, include_items=False)
+    return _classification_batch_read(batch, include_items=False, db=db)
 
 
 @app.post("/api/classification-batches/{batch_id}/cancel", response_model=ClassificationBatchRead)
@@ -2951,18 +3015,7 @@ def export_classification_batch(
     batch = db.get(ClassificationBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Classification batch not found")
-    classifier = db.get(DocumentClassifier, batch.classifier_id)
-    if not classifier:
-        raise HTTPException(status_code=404, detail="Document classifier not found")
-    rows = [_classification_batch_export_row(item) for item in _sorted_module_items(batch.items)]
-    payload = {
-        "batch_id": batch.id,
-        "classifier_id": batch.classifier_id,
-        "classifier_name": classifier.name,
-        "status": _classification_batch_read(batch).status,
-        "total_count": batch.total_count,
-        "rows": rows,
-    }
+    artifact = _build_export_artifact(db, "classification_batch", batch.id, format)
     log_audit_event(
         db,
         entity_type="classification_batch",
@@ -2972,31 +3025,7 @@ def export_classification_batch(
         metadata={"format": format},
     )
     db.commit()
-    filename = _export_filename("classification", classifier.name, batch.id, format)
-    if format == "json":
-        return JSONResponse(payload, headers=_download_headers(filename))
-
-    output = io.StringIO()
-    fieldnames = [
-        "filename",
-        "document_id",
-        "job_id",
-        "status",
-        "error_message",
-        "classification_status",
-        "class_name",
-        "confidence",
-        "reason",
-        "evidence",
-    ]
-    if format == "xlsx":
-        return _xlsx_download_response(rows, fieldnames, filename)
-
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in rows:
-        writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
-    return _csv_download_response(output.getvalue(), filename)
+    return _export_artifact_response(artifact)
 
 
 @app.post("/api/required-field-check-batches", response_model=RequiredFieldCheckBatchRead)
@@ -3196,10 +3225,11 @@ def resume_required_field_check_batch(
 @app.get("/api/required-field-check-batches", response_model=list[RequiredFieldCheckBatchRead])
 def list_required_field_check_batches(
     limit: int = Query(default=20, ge=1, le=100),
+    include_items: bool = Query(default=True),
     db: Session = Depends(get_db),
 ) -> list[RequiredFieldCheckBatchRead]:
     batches = db.query(RequiredFieldCheckBatch).order_by(RequiredFieldCheckBatch.created_at.desc()).limit(limit).all()
-    return [_required_field_batch_read(batch) for batch in batches]
+    return [_required_field_batch_read(batch, include_items=include_items, db=db) for batch in batches]
 
 
 @app.get("/api/required-field-check-batches/{batch_id}", response_model=RequiredFieldCheckBatchRead)
@@ -3215,7 +3245,7 @@ def get_required_field_check_batch_summary(batch_id: str, db: Session = Depends(
     batch = db.get(RequiredFieldCheckBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Required field check batch not found")
-    return _required_field_batch_read(batch, include_items=False)
+    return _required_field_batch_read(batch, include_items=False, db=db)
 
 
 @app.post("/api/required-field-check-batches/{batch_id}/cancel", response_model=RequiredFieldCheckBatchRead)
@@ -3238,19 +3268,7 @@ def export_required_field_check_batch(
     batch = db.get(RequiredFieldCheckBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Required field check batch not found")
-    checklist = db.get(RequiredFieldChecklist, batch.checklist_id)
-    if not checklist:
-        raise HTTPException(status_code=404, detail="Required field checklist not found")
-    item_names = [item.get("item_name") for item in _checklist_data(checklist).get("items", []) if item.get("item_name")]
-    rows = [_required_field_batch_export_row(item, item_names) for item in _sorted_module_items(batch.items)]
-    payload = {
-        "batch_id": batch.id,
-        "checklist_id": batch.checklist_id,
-        "checklist_name": checklist.name,
-        "status": _required_field_batch_read(batch).status,
-        "total_count": batch.total_count,
-        "rows": rows,
-    }
+    artifact = _build_export_artifact(db, "required_field_check_batch", batch.id, format)
     log_audit_event(
         db,
         entity_type="required_field_check_batch",
@@ -3260,29 +3278,7 @@ def export_required_field_check_batch(
         metadata={"format": format},
     )
     db.commit()
-    filename = _export_filename("required_checker", checklist.name, batch.id, format)
-    if format == "json":
-        return JSONResponse(payload, headers=_download_headers(filename))
-
-    output = io.StringIO()
-    item_columns = [f"{name}_status" for name in item_names] + [f"{name}_evidence" for name in item_names]
-    fieldnames = [
-        "filename",
-        "document_id",
-        "job_id",
-        "status",
-        "error_message",
-        "overall_status",
-        *item_columns,
-    ]
-    if format == "xlsx":
-        return _xlsx_download_response(rows, fieldnames, filename)
-
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in rows:
-        writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
-    return _csv_download_response(output.getvalue(), filename)
+    return _export_artifact_response(artifact)
 
 
 @app.get("/api/archive/search", response_model=list[ArchiveSearchResult])
@@ -3313,6 +3309,7 @@ def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
         "required_field_check_results": db.query(RequiredFieldCheckResult).count(),
         "workflow_runs": db.query(WorkflowRun).count(),
         "workflow_run_items": db.query(WorkflowRunItem).count(),
+        "export_jobs": db.query(ExportJob).count(),
         "documents": db.query(Document).count(),
         "document_pages": db.query(DocumentPage).count(),
         "extraction_jobs": db.query(ExtractionJob).count(),
@@ -3333,6 +3330,7 @@ def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
     db.query(RequiredFieldCheckJob).delete(synchronize_session=False)
     db.query(WorkflowRunItem).delete(synchronize_session=False)
     db.query(WorkflowRun).delete(synchronize_session=False)
+    db.query(ExportJob).delete(synchronize_session=False)
     db.query(BatchItem).delete(synchronize_session=False)
     db.query(Batch).delete(synchronize_session=False)
     db.query(ExtractionResult).delete(synchronize_session=False)
@@ -4692,9 +4690,17 @@ def _job_read(job: ExtractionJob) -> ExtractionJobRead:
     )
 
 
-def _batch_read(batch: Batch, *, include_items: bool = True) -> BatchRead:
-    items = [_batch_item_read(item) for item in _sorted_batch_items(batch.items)]
-    counters = _owner_counters(batch.total_count, [item.status for item in items], batch.status)
+def _batch_read(batch: Batch, *, include_items: bool = True, db: Session | None = None) -> BatchRead:
+    if include_items or db is None:
+        items = [_batch_item_read(item) for item in _sorted_batch_items(batch.items)]
+        counters = _owner_counters(batch.total_count, [item.status for item in items], batch.status)
+    else:
+        items = []
+        counters = _owner_counters_from_status_counts(
+            batch.total_count,
+            _module_batch_status_counts(db, BatchItem, ExtractionJob, "batch_id", batch.id),
+            batch.status,
+        )
     return BatchRead(
         id=batch.id,
         schema_id=batch.schema_id,
@@ -4731,9 +4737,17 @@ def _batch_item_read(item: BatchItem) -> BatchItemRead:
     )
 
 
-def _classification_batch_read(batch: ClassificationBatch, *, include_items: bool = True) -> ClassificationBatchRead:
-    items = [_classification_batch_item_read(item) for item in _sorted_module_items(batch.items)]
-    counters = _owner_counters(batch.total_count, [item.status for item in items], batch.status)
+def _classification_batch_read(batch: ClassificationBatch, *, include_items: bool = True, db: Session | None = None) -> ClassificationBatchRead:
+    if include_items or db is None:
+        items = [_classification_batch_item_read(item) for item in _sorted_module_items(batch.items)]
+        counters = _owner_counters(batch.total_count, [item.status for item in items], batch.status)
+    else:
+        items = []
+        counters = _owner_counters_from_status_counts(
+            batch.total_count,
+            _module_batch_status_counts(db, ClassificationBatchItem, ClassificationJob, "batch_id", batch.id),
+            batch.status,
+        )
     return ClassificationBatchRead(
         id=batch.id,
         classifier_id=batch.classifier_id,
@@ -4770,9 +4784,17 @@ def _classification_batch_item_read(item: ClassificationBatchItem) -> Classifica
     )
 
 
-def _required_field_batch_read(batch: RequiredFieldCheckBatch, *, include_items: bool = True) -> RequiredFieldCheckBatchRead:
-    items = [_required_field_batch_item_read(item) for item in _sorted_module_items(batch.items)]
-    counters = _owner_counters(batch.total_count, [item.status for item in items], batch.status)
+def _required_field_batch_read(batch: RequiredFieldCheckBatch, *, include_items: bool = True, db: Session | None = None) -> RequiredFieldCheckBatchRead:
+    if include_items or db is None:
+        items = [_required_field_batch_item_read(item) for item in _sorted_module_items(batch.items)]
+        counters = _owner_counters(batch.total_count, [item.status for item in items], batch.status)
+    else:
+        items = []
+        counters = _owner_counters_from_status_counts(
+            batch.total_count,
+            _module_batch_status_counts(db, RequiredFieldCheckBatchItem, RequiredFieldCheckJob, "batch_id", batch.id),
+            batch.status,
+        )
     return RequiredFieldCheckBatchRead(
         id=batch.id,
         checklist_id=batch.checklist_id,
@@ -4809,20 +4831,37 @@ def _required_field_batch_item_read(item: RequiredFieldCheckBatchItem) -> Requir
     )
 
 
+def _module_batch_status_counts(db: Session, item_model: Any, job_model: Any, owner_field: str, owner_id: str) -> dict[str, int]:
+    owner_column = getattr(item_model, owner_field)
+    rows = (
+        db.query(job_model.status, func.count(item_model.id))
+        .select_from(item_model)
+        .join(job_model, item_model.job_id == job_model.id)
+        .filter(owner_column == owner_id)
+        .group_by(job_model.status)
+        .all()
+    )
+    return {status: int(count) for status, count in rows}
+
+
 def _owner_counters(total_count: int, statuses: list[str], owner_status: str) -> dict[str, Any]:
+    return _owner_counters_from_status_counts(total_count, dict(Counter(statuses)), owner_status)
+
+
+def _owner_counters_from_status_counts(total_count: int, status_counts: dict[str, int], owner_status: str) -> dict[str, Any]:
     completed_statuses = {"completed", "needs_review"}
     terminal_statuses = {"completed", "needs_review", "failed", "canceled"}
-    uploaded_count = len(statuses)
-    preprocessing_count = sum(1 for status in statuses if status in {"uploading", "preprocessing", "waiting_for_document"})
-    queued_count = sum(1 for status in statuses if status == "queued")
-    running_count = sum(1 for status in statuses if status == "running")
-    needs_review_count = sum(1 for status in statuses if status == "needs_review")
-    completed_count = sum(1 for status in statuses if status in completed_statuses)
-    failed_count = sum(1 for status in statuses if status == "failed")
-    canceled_count = sum(1 for status in statuses if status == "canceled")
-    finished_count = sum(1 for status in statuses if status in terminal_statuses)
+    uploaded_count = sum(status_counts.values())
+    preprocessing_count = sum(status_counts.get(status, 0) for status in {"uploading", "preprocessing", "waiting_for_document"})
+    queued_count = status_counts.get("queued", 0)
+    running_count = status_counts.get("running", 0)
+    needs_review_count = status_counts.get("needs_review", 0)
+    completed_count = sum(status_counts.get(status, 0) for status in completed_statuses)
+    failed_count = status_counts.get("failed", 0)
+    canceled_count = status_counts.get("canceled", 0)
+    finished_count = sum(status_counts.get(status, 0) for status in terminal_statuses)
     ready_count = max(0, uploaded_count - preprocessing_count)
-    if owner_status in {"canceled", "failed"} and not statuses:
+    if owner_status in {"canceled", "failed"} and not uploaded_count:
         status = owner_status
         progress_phase = owner_status
     elif total_count and finished_count >= total_count:
@@ -6177,15 +6216,353 @@ def _download_headers(filename: str) -> dict[str, str]:
     return {"Content-Disposition": f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{quote(filename)}"}
 
 
-def _csv_download_response(content: str, filename: str) -> Response:
-    return Response(
-        content=f"\ufeff{content}",
-        media_type="text/csv; charset=utf-8",
-        headers=_download_headers(filename),
+def _export_job_read(job: ExportJob) -> ExportJobRead:
+    return ExportJobRead(
+        id=job.id,
+        owner_type=job.owner_type,
+        owner_id=job.owner_id,
+        format=job.format,
+        status=job.status,
+        filename=job.filename,
+        content_type=job.content_type,
+        size_bytes=job.size_bytes,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
     )
 
 
-def _xlsx_download_response(rows: list[dict[str, Any]], fieldnames: list[str], filename: str) -> Response:
+def _queue_export_job(
+    db: Session,
+    background_tasks: BackgroundTasks,
+    *,
+    owner_type: str,
+    owner_id: str,
+    format: str,
+    retry_source_job_id: str | None = None,
+) -> ExportJob:
+    _validate_export_job_owner_exists(db, owner_type, owner_id)
+    job = ExportJob(owner_type=owner_type, owner_id=owner_id, format=format, status="queued")
+    db.add(job)
+    db.flush()
+    action = "retried" if retry_source_job_id else "created"
+    message = (
+        f"Retried {owner_type} export {format.upper()}"
+        if retry_source_job_id
+        else f"Queued {owner_type} export {format.upper()}"
+    )
+    metadata = {"owner_type": owner_type, "owner_id": owner_id, "format": format}
+    if retry_source_job_id:
+        metadata["retry_source_job_id"] = retry_source_job_id
+    log_audit_event(
+        db,
+        entity_type="export_job",
+        entity_id=job.id,
+        action=action,
+        message=message,
+        metadata=metadata,
+    )
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(_run_export_job, job.id)
+    return job
+
+
+def _validate_export_job_owner_exists(db: Session, owner_type: str, owner_id: str) -> None:
+    if owner_type not in EXPORT_JOB_OWNER_TYPES:
+        raise HTTPException(status_code=422, detail="Unsupported export owner type")
+    owner_models: dict[str, tuple[Any, str]] = {
+        "workflow_run": (WorkflowRun, "Workflow run not found"),
+        "batch": (Batch, "Batch not found"),
+        "classification_batch": (ClassificationBatch, "Classification batch not found"),
+        "required_field_check_batch": (RequiredFieldCheckBatch, "Required field check batch not found"),
+    }
+    owner_model = owner_models.get(owner_type)
+    if not owner_model:
+        raise HTTPException(status_code=422, detail="Unsupported export owner type")
+    model, not_found_detail = owner_model
+    if not db.get(model, owner_id):
+        raise HTTPException(status_code=404, detail=not_found_detail)
+
+
+def _start_export_job_worker() -> threading.Event:
+    stop_event = threading.Event()
+    _reset_interrupted_export_jobs()
+
+    def _run() -> None:
+        while not stop_event.is_set():
+            job_id = _next_queued_export_job_id()
+            if not job_id:
+                stop_event.wait(EXPORT_JOB_WORKER_INTERVAL_SECONDS)
+                continue
+            _run_export_job(job_id)
+
+    thread = threading.Thread(target=_run, name="export-job-worker", daemon=True)
+    thread.start()
+    return stop_event
+
+
+def _reset_interrupted_export_jobs() -> None:
+    db = SessionLocal()
+    try:
+        db.query(ExportJob).filter(ExportJob.status == "running").update(
+            {
+                ExportJob.status: "queued",
+                ExportJob.started_at: None,
+                ExportJob.error_message: "Recovered after server restart",
+            },
+            synchronize_session=False,
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _next_queued_export_job_id() -> str | None:
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(ExportJob.id)
+            .filter(ExportJob.status == "queued")
+            .order_by(ExportJob.created_at.asc(), ExportJob.id.asc())
+            .first()
+        )
+        return row[0] if row else None
+    finally:
+        db.close()
+
+
+def _run_export_job(job_id: str) -> None:
+    db = SessionLocal()
+    try:
+        started_at = datetime.utcnow()
+        claimed_count = (
+            db.query(ExportJob)
+            .filter(ExportJob.id == job_id, ExportJob.status == "queued")
+            .update(
+                {
+                    ExportJob.status: "running",
+                    ExportJob.started_at: started_at,
+                    ExportJob.completed_at: None,
+                    ExportJob.error_message: None,
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        if not claimed_count:
+            return
+
+        job = db.get(ExportJob, job_id)
+        if not job:
+            return
+        artifact = _build_export_artifact(db, job.owner_type, job.owner_id, job.format)
+        target = _export_job_artifact_path(job.id, artifact.filename)
+        target.write_bytes(artifact.content)
+        storage_ref = persist_artifact(target, f"exports/{job.id}/{artifact.filename}", artifact.content_type)
+
+        job.storage_path = storage_ref
+        job.filename = artifact.filename
+        job.content_type = artifact.content_type
+        job.size_bytes = len(artifact.content)
+        job.status = "completed"
+        job.completed_at = datetime.utcnow()
+        log_audit_event(
+            db,
+            entity_type=job.owner_type,
+            entity_id=job.owner_id,
+            action="exported_async",
+            message=f"Completed async export {artifact.filename}",
+            metadata={"format": job.format, "export_job_id": job.id, "size_bytes": job.size_bytes},
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        failed_job = db.get(ExportJob, job_id)
+        if failed_job:
+            failed_job.status = "failed"
+            failed_job.error_message = _export_job_error_message(exc)
+            failed_job.completed_at = datetime.utcnow()
+            log_audit_event(
+                db,
+                entity_type="export_job",
+                entity_id=failed_job.id,
+                action="failed",
+                message=failed_job.error_message,
+                metadata={
+                    "owner_type": failed_job.owner_type,
+                    "owner_id": failed_job.owner_id,
+                    "format": failed_job.format,
+                },
+            )
+            db.commit()
+    finally:
+        db.close()
+
+
+def _export_job_error_message(exc: Exception) -> str:
+    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+    if isinstance(detail, dict | list):
+        detail = json.dumps(detail, ensure_ascii=False, default=str)
+    return str(detail or "Export failed")[:2000]
+
+
+def _export_job_artifact_path(job_id: str, filename: str) -> Path:
+    target_dir = get_settings().resolved_storage_dir / "exports" / job_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir / filename
+
+
+def _build_export_artifact(db: Session, owner_type: str, owner_id: str, format: str) -> ExportArtifact:
+    if format not in {"json", "csv", "xlsx"}:
+        raise HTTPException(status_code=422, detail="Unsupported export format")
+    if owner_type == "workflow_run":
+        run = db.get(WorkflowRun, owner_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Workflow run not found")
+        return _workflow_run_export_artifact(run, format)
+    if owner_type == "batch":
+        batch = db.get(Batch, owner_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        return _batch_export_artifact(db, batch, format)
+    if owner_type == "classification_batch":
+        batch = db.get(ClassificationBatch, owner_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="Classification batch not found")
+        return _classification_batch_export_artifact(db, batch, format)
+    if owner_type == "required_field_check_batch":
+        batch = db.get(RequiredFieldCheckBatch, owner_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="Required field check batch not found")
+        return _required_field_batch_export_artifact(db, batch, format)
+    raise HTTPException(status_code=422, detail="Unsupported export owner type")
+
+
+def _workflow_run_export_artifact(run: WorkflowRun, format: str) -> ExportArtifact:
+    payload = workflow_run_export_payload(run)
+    workflow_name = payload.get("workflow_name") or (run.workflow.name if run.workflow else "workflow")
+    filename = _export_filename("workflow", workflow_name, run.id, format)
+    if format == "json":
+        return ExportArtifact(_json_export_bytes(payload), filename, "application/json")
+    if format == "xlsx":
+        rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+        return ExportArtifact(_xlsx_bytes(rows, _table_fieldnames(rows)), filename, XLSX_MIME_TYPE)
+    return ExportArtifact(_csv_export_bytes(workflow_run_export_csv(run)), filename, "text/csv; charset=utf-8")
+
+
+def _batch_export_artifact(db: Session, batch: Batch, format: str) -> ExportArtifact:
+    schema = db.get(Schema, batch.schema_id)
+    if not schema:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    schema_data = _schema_data(schema)
+    field_names = [field["key_name"] for field in schema_data.get("fields", [])]
+    rows = [_batch_export_row(item, field_names) for item in _sorted_batch_items(batch.items)]
+    payload = {
+        "batch_id": batch.id,
+        "schema_id": batch.schema_id,
+        "schema_name": schema.name,
+        "status": _batch_read(batch).status,
+        "total_count": batch.total_count,
+        "rows": rows,
+    }
+    field_columns = [column for field_name in field_names for column in _kie_export_columns(field_name)]
+    fieldnames = ["filename", "document_id", "job_id", "status", "error_message", *field_columns, "warnings"]
+    filename = _export_filename("KIE", schema.name, batch.id, format)
+    return _tabular_export_artifact(payload, rows, fieldnames, filename, format)
+
+
+def _classification_batch_export_artifact(db: Session, batch: ClassificationBatch, format: str) -> ExportArtifact:
+    classifier = db.get(DocumentClassifier, batch.classifier_id)
+    if not classifier:
+        raise HTTPException(status_code=404, detail="Document classifier not found")
+    rows = [_classification_batch_export_row(item) for item in _sorted_module_items(batch.items)]
+    payload = {
+        "batch_id": batch.id,
+        "classifier_id": batch.classifier_id,
+        "classifier_name": classifier.name,
+        "status": _classification_batch_read(batch).status,
+        "total_count": batch.total_count,
+        "rows": rows,
+    }
+    fieldnames = [
+        "filename",
+        "document_id",
+        "job_id",
+        "status",
+        "error_message",
+        "classification_status",
+        "class_name",
+        "confidence",
+        "reason",
+        "evidence",
+    ]
+    filename = _export_filename("classification", classifier.name, batch.id, format)
+    return _tabular_export_artifact(payload, rows, fieldnames, filename, format)
+
+
+def _required_field_batch_export_artifact(db: Session, batch: RequiredFieldCheckBatch, format: str) -> ExportArtifact:
+    checklist = db.get(RequiredFieldChecklist, batch.checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    item_names = [item.get("item_name") for item in _checklist_data(checklist).get("items", []) if item.get("item_name")]
+    rows = [_required_field_batch_export_row(item, item_names) for item in _sorted_module_items(batch.items)]
+    payload = {
+        "batch_id": batch.id,
+        "checklist_id": batch.checklist_id,
+        "checklist_name": checklist.name,
+        "status": _required_field_batch_read(batch).status,
+        "total_count": batch.total_count,
+        "rows": rows,
+    }
+    item_columns = [f"{name}_status" for name in item_names] + [f"{name}_evidence" for name in item_names]
+    fieldnames = ["filename", "document_id", "job_id", "status", "error_message", "overall_status", *item_columns]
+    filename = _export_filename("required_checker", checklist.name, batch.id, format)
+    return _tabular_export_artifact(payload, rows, fieldnames, filename, format)
+
+
+def _tabular_export_artifact(
+    payload: dict[str, Any],
+    rows: list[dict[str, Any]],
+    fieldnames: list[str],
+    filename: str,
+    format: str,
+) -> ExportArtifact:
+    if format == "json":
+        return ExportArtifact(_json_export_bytes(payload), filename, "application/json")
+    if format == "xlsx":
+        return ExportArtifact(_xlsx_bytes(rows, fieldnames), filename, XLSX_MIME_TYPE)
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: _csv_cell(row.get(key)) for key in fieldnames})
+    return ExportArtifact(_csv_export_bytes(output.getvalue()), filename, "text/csv; charset=utf-8")
+
+
+def _export_artifact_response(artifact: ExportArtifact) -> Response:
+    return Response(
+        content=artifact.content,
+        media_type=artifact.content_type,
+        headers=_download_headers(artifact.filename),
+    )
+
+
+def _json_export_bytes(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+
+
+def _csv_export_bytes(content: str) -> bytes:
+    return f"\ufeff{content}".encode("utf-8")
+
+
+def _csv_download_response(content: str, filename: str) -> Response:
+    return _export_artifact_response(ExportArtifact(_csv_export_bytes(content), filename, "text/csv; charset=utf-8"))
+
+
+def _xlsx_bytes(rows: list[dict[str, Any]], fieldnames: list[str]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Export"
@@ -6196,11 +6573,11 @@ def _xlsx_download_response(rows: list[dict[str, Any]], fieldnames: list[str], f
 
     output = io.BytesIO()
     workbook.save(output)
-    return Response(
-        content=output.getvalue(),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=_download_headers(filename),
-    )
+    return output.getvalue()
+
+
+def _xlsx_download_response(rows: list[dict[str, Any]], fieldnames: list[str], filename: str) -> Response:
+    return _export_artifact_response(ExportArtifact(_xlsx_bytes(rows, fieldnames), filename, XLSX_MIME_TYPE))
 
 
 def _xlsx_cell(value: Any) -> Any:
@@ -6382,7 +6759,8 @@ def _cleanup_expired_upload_data() -> dict[str, Any]:
     try:
         documents = db.query(Document).filter(Document.created_at < cutoff).all()
         raw_rows = db.query(RawExtraction).filter(RawExtraction.created_at < cutoff).all()
-        paths = _storage_paths_for_cleanup(documents, raw_rows)
+        export_jobs = db.query(ExportJob).filter(ExportJob.created_at < cutoff).all()
+        paths = _storage_paths_for_cleanup(documents, raw_rows, export_jobs)
         counts = _delete_history_before(db, cutoff)
         db.commit()
     finally:
@@ -6398,7 +6776,7 @@ def _cleanup_expired_upload_data() -> dict[str, Any]:
     return {"status": "cleaned", "cutoff": cutoff.isoformat(), "counts": counts, "removed_paths": removed_paths}
 
 
-def _storage_paths_for_cleanup(documents: list[Document], raw_rows: list[RawExtraction]) -> set[str]:
+def _storage_paths_for_cleanup(documents: list[Document], raw_rows: list[RawExtraction], export_jobs: list[ExportJob]) -> set[str]:
     paths: set[str] = set()
     for document in documents:
         if document.storage_path:
@@ -6410,6 +6788,9 @@ def _storage_paths_for_cleanup(documents: list[Document], raw_rows: list[RawExtr
         for ref in [raw.storage_path, raw.pdf_path, raw.html_path]:
             if ref:
                 paths.add(_artifact_root(ref))
+    for job in export_jobs:
+        if job.storage_path:
+            paths.add(job.storage_path if is_s3_ref(job.storage_path) else str(Path(job.storage_path).parent))
     return paths
 
 
@@ -6446,6 +6827,7 @@ def _delete_history_before(db: Session, cutoff: datetime) -> dict[str, int]:
     if expired_extraction_job_ids:
         counts["extraction_results"] = db.query(ExtractionResult).filter(ExtractionResult.job_id.in_(expired_extraction_job_ids)).delete(synchronize_session=False)
     counts["extraction_jobs"] = db.query(ExtractionJob).filter(ExtractionJob.created_at < cutoff).delete(synchronize_session=False)
+    counts["export_jobs"] = db.query(ExportJob).filter(ExportJob.created_at < cutoff).delete(synchronize_session=False)
     if expired_document_ids:
         counts["document_pages"] = db.query(DocumentPage).filter(DocumentPage.document_id.in_(expired_document_ids)).delete(synchronize_session=False)
     counts["documents"] = db.query(Document).filter(Document.created_at < cutoff).delete(synchronize_session=False)

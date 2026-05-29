@@ -15,6 +15,7 @@
 | Required check from library | `POST /api/required-field-check-batches/from-documents` |
 | Legacy batch upload | `POST /api/batches/init`, `POST /api/batches/{batch_id}/items`, `POST /api/batches/{batch_id}/start` |
 | Summary polling | `GET /api/workflow-runs/{run_id}/summary`, `GET /api/batches/{batch_id}/summary` 계열 |
+| Export jobs | `POST /api/export-jobs`, `GET /api/export-jobs`, `GET /api/export-jobs/{job_id}`, `POST /api/export-jobs/{job_id}/retry`, `GET /api/export-jobs/{job_id}/download` |
 
 ## Notes
 
@@ -22,3 +23,5 @@
 - 보관함 대량 업로드 API는 백그라운드 conversion queue를 사용합니다.
 - 목록 polling은 summary endpoint를 사용하고, 상세 화면에서만 item/page payload를 가져오는 방향이 기본입니다.
 - Workflow export는 CSV, JSON, XLSX 형식을 지원합니다.
+- 대량 export는 `POST /api/export-jobs`로 요청합니다. `owner_type`은 `workflow_run`, `batch`, `classification_batch`, `required_field_check_batch` 중 하나이고, `format`은 `csv`, `json`, `xlsx` 중 하나입니다.
+- export job은 `queued`, `running`, `completed`, `failed` 상태를 반환하며 완료 후 `/download` endpoint에서 artifact를 받습니다. 실패 시 `error_message`에 사유가 남고, failed job은 `/retry`로 새 job을 생성합니다.

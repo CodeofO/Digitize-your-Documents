@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 import zipfile
 
 import pytest
@@ -18,7 +19,7 @@ except ImportError:  # pragma: no cover - compatibility for older PyMuPDF instal
 from PIL import Image
 
 from app.config import get_settings
-from app.models import Document, WorkflowRun, WorkflowRunItem
+from app.models import Batch, ClassificationBatch, Document, ExportJob, RequiredFieldCheckBatch, WorkflowRun, WorkflowRunItem
 from tests.conftest import get_client
 
 
@@ -33,6 +34,17 @@ def assert_xlsx_response(response) -> None:
     assert response.status_code == 200, response.text
     assert response.headers["content-type"] == XLSX_MIME
     assert response.content.startswith(b"PK")
+
+
+def wait_for_export_job(client, job_id: str) -> dict[str, Any]:
+    for _ in range(20):
+        response = client.get(f"/api/export-jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        if payload["status"] in {"completed", "failed"}:
+            return payload
+        time.sleep(0.01)
+    raise AssertionError(f"Export job did not finish: {job_id}")
 
 
 def test_health() -> None:
@@ -1812,6 +1824,192 @@ def test_batch_export_csv_and_json_mock_mode() -> None:
         get_settings.cache_clear()
 
 
+def test_export_job_batch_csv_download_mock_mode() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="async_export_batch_schema")
+            response = client.post(
+                "/api/batches",
+                data={"schema_id": schema["id"]},
+                files=[("files", ("invoice.png", ONE_BY_ONE_PNG, "image/png"))],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+
+            create_job = client.post(
+                "/api/export-jobs",
+                json={"owner_type": "batch", "owner_id": batch["id"], "format": "csv"},
+            )
+            assert create_job.status_code == 202, create_job.text
+            queued = create_job.json()
+            assert queued["owner_type"] == "batch"
+            assert queued["status"] in {"queued", "running", "completed"}
+
+            completed = wait_for_export_job(client, queued["id"])
+            assert completed["status"] == "completed", completed
+            assert completed["filename"].endswith(".csv")
+            assert completed["size_bytes"] > 0
+
+            download = client.get(f"/api/export-jobs/{queued['id']}/download")
+            assert download.status_code == 200, download.text
+            assert download.content.startswith(b"\xef\xbb\xbf")
+            assert "invoice_number" in download.text.splitlines()[0]
+            assert "invoice.png" in download.text
+
+            listed = client.get(f"/api/export-jobs?owner_type=batch&owner_id={batch['id']}&limit=5")
+            assert listed.status_code == 200, listed.text
+            assert queued["id"] in {item["id"] for item in listed.json()}
+
+            missing_owner = client.post(
+                "/api/export-jobs",
+                json={"owner_type": "batch", "owner_id": "batch_missing", "format": "csv"},
+            )
+            assert missing_owner.status_code == 404
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_export_job_retry_failed_job_mock_mode() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="retry_export_batch_schema")
+            response = client.post(
+                "/api/batches",
+                data={"schema_id": schema["id"]},
+                files=[("files", ("retry.png", ONE_BY_ONE_PNG, "image/png"))],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+
+            from app.database import SessionLocal
+
+            db = SessionLocal()
+            source = ExportJob(
+                owner_type="batch",
+                owner_id=batch["id"],
+                format="csv",
+                status="failed",
+                error_message="network timeout",
+                started_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
+            )
+            db.add(source)
+            db.commit()
+            source_job_id = source.id
+            db.close()
+
+            retry = client.post(f"/api/export-jobs/{source_job_id}/retry")
+            assert retry.status_code == 202, retry.text
+            retried = retry.json()
+            assert retried["id"] != source_job_id
+            assert retried["owner_id"] == batch["id"]
+
+            completed = wait_for_export_job(client, retried["id"])
+            assert completed["status"] == "completed", completed
+
+            failed_jobs = client.get(f"/api/export-jobs?owner_type=batch&owner_id={batch['id']}&status=failed")
+            assert failed_jobs.status_code == 200, failed_jobs.text
+            assert [item["id"] for item in failed_jobs.json()] == [source_job_id]
+
+            retry_completed = client.post(f"/api/export-jobs/{completed['id']}/retry")
+            assert retry_completed.status_code == 409
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_export_job_worker_only_claims_queued_jobs() -> None:
+    from app.database import SessionLocal, init_db
+    from app.main import _run_export_job
+
+    init_db()
+    db = SessionLocal()
+    job = ExportJob(
+        owner_type="batch",
+        owner_id="batch_missing",
+        format="csv",
+        status="running",
+        started_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.commit()
+    job_id = job.id
+    db.close()
+
+    _run_export_job(job_id)
+
+    db = SessionLocal()
+    try:
+        loaded = db.get(ExportJob, job_id)
+        assert loaded is not None
+        assert loaded.status == "running"
+        assert loaded.error_message is None
+    finally:
+        db.close()
+
+
+def test_export_worker_recovers_interrupted_running_job_mock_mode() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            schema = create_schema(client, name="recover_export_batch_schema")
+            response = client.post(
+                "/api/batches",
+                data={"schema_id": schema["id"]},
+                files=[("files", ("recover.png", ONE_BY_ONE_PNG, "image/png"))],
+            )
+            assert response.status_code == 200, response.text
+            batch = response.json()
+
+        from app.database import SessionLocal
+        from app.main import _reset_interrupted_export_jobs, _run_export_job
+
+        db = SessionLocal()
+        job = ExportJob(
+            owner_type="batch",
+            owner_id=batch["id"],
+            format="csv",
+            status="running",
+            started_at=datetime.utcnow(),
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+        db.close()
+
+        _reset_interrupted_export_jobs()
+
+        db = SessionLocal()
+        try:
+            recovered = db.get(ExportJob, job_id)
+            assert recovered is not None
+            assert recovered.status == "queued"
+            assert recovered.error_message == "Recovered after server restart"
+        finally:
+            db.close()
+
+        _run_export_job(job_id)
+
+        db = SessionLocal()
+        try:
+            completed = db.get(ExportJob, job_id)
+            assert completed is not None
+            assert completed.status == "completed"
+            assert completed.storage_path
+            assert completed.size_bytes > 0
+        finally:
+            db.close()
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
 def test_batch_finalizes_after_mock_jobs() -> None:
     try:
         os.environ["VLM_PROVIDER"] = "mock"
@@ -2288,9 +2486,385 @@ def test_workflow_definition_validation_and_branch_run_mock_mode() -> None:
 
             xlsx_response = client.get(f"/api/workflow-runs/{run['id']}/export?format=xlsx")
             assert_xlsx_response(xlsx_response)
+
+            export_job = client.post(
+                "/api/export-jobs",
+                json={"owner_type": "workflow_run", "owner_id": run["id"], "format": "json"},
+            )
+            assert export_job.status_code == 202, export_job.text
+            completed_export = wait_for_export_job(client, export_job.json()["id"])
+            assert completed_export["status"] == "completed", completed_export
+            async_download = client.get(f"/api/export-jobs/{completed_export['id']}/download")
+            assert async_download.status_code == 200, async_download.text
+            assert async_download.json()["workflow_run_id"] == run["id"]
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
+
+
+def test_workflow_summary_polling_uses_aggregate_counts_without_result_payloads() -> None:
+    from sqlalchemy import event
+
+    from app.database import SessionLocal, engine, init_db
+    from app.models import WorkflowDefinition, WorkflowRunItem
+
+    init_db()
+    db = SessionLocal()
+    try:
+        workflow = WorkflowDefinition(
+            name="summary_polling_workflow",
+            definition_json=json.dumps({"nodes": [], "edges": []}),
+        )
+        db.add(workflow)
+        db.flush()
+        run = WorkflowRun(
+            workflow_id=workflow.id,
+            workflow_name=workflow.name,
+            status="running",
+            total_count=4,
+        )
+        db.add(run)
+        db.flush()
+        for index, status in enumerate(["completed", "needs_review", "failed", "canceled"]):
+            db.add(
+                WorkflowRunItem(
+                    run_id=run.id,
+                    document_id=f"doc_summary_{index}",
+                    filename=f"summary_{index}.png",
+                    upload_index=index,
+                    status=status,
+                    result_json=json.dumps({"payload": "x" * 10000}),
+                )
+            )
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    item_queries: list[str] = []
+
+    def capture_item_queries(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        normalized = " ".join(statement.lower().split())
+        if "workflow_run_items" in normalized:
+            item_queries.append(normalized)
+
+    event.listen(engine, "before_cursor_execute", capture_item_queries)
+    try:
+        with get_client() as client:
+            summary_response = client.get(f"/api/workflow-runs/{run_id}/summary")
+            list_response = client.get("/api/workflow-runs?limit=100")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_item_queries)
+
+    assert summary_response.status_code == 200, summary_response.text
+    summary = summary_response.json()
+    assert summary["items"] == []
+    assert summary["status"] == "completed_with_errors"
+    assert summary["completed_count"] == 4
+    assert summary["failed_count"] == 1
+    assert summary["needs_review_count"] == 1
+    assert summary["progress"] == 1
+
+    assert list_response.status_code == 200, list_response.text
+    listed = next(item for item in list_response.json() if item["id"] == run_id)
+    assert listed["items"] == []
+    assert listed["failed_count"] == 1
+
+    assert item_queries
+    assert any("count" in query and "group by" in query for query in item_queries)
+    assert all("result_json" not in query for query in item_queries)
+
+
+def test_workflow_summary_polling_handles_1000_item_run_with_stable_counts() -> None:
+    from sqlalchemy import event
+
+    from app.database import SessionLocal, engine, init_db
+    from app.models import WorkflowDefinition, WorkflowRunItem
+
+    init_db()
+    status_sequence = (
+        ["completed"] * 700
+        + ["needs_review"] * 100
+        + ["failed"] * 50
+        + ["canceled"] * 25
+        + ["running"] * 75
+        + ["waiting_for_document"] * 50
+    )
+    db = SessionLocal()
+    try:
+        workflow = WorkflowDefinition(
+            name="summary_polling_1000_workflow",
+            definition_json=json.dumps({"nodes": [], "edges": []}),
+        )
+        db.add(workflow)
+        db.flush()
+        run = WorkflowRun(
+            workflow_id=workflow.id,
+            workflow_name=workflow.name,
+            status="running",
+            total_count=len(status_sequence),
+        )
+        db.add(run)
+        db.flush()
+        db.add_all(
+            [
+                WorkflowRunItem(
+                    run_id=run.id,
+                    document_id=f"doc_summary_1000_{index}",
+                    filename=f"summary_1000_{index:04d}.png",
+                    upload_index=index,
+                    status=status,
+                    result_json=json.dumps({"payload": "x" * 100}),
+                )
+                for index, status in enumerate(status_sequence)
+            ]
+        )
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    item_queries: list[str] = []
+
+    def capture_item_queries(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        normalized = " ".join(statement.lower().split())
+        if "workflow_run_items" in normalized:
+            item_queries.append(normalized)
+
+    event.listen(engine, "before_cursor_execute", capture_item_queries)
+    try:
+        with get_client() as client:
+            summary_response = client.get(f"/api/workflow-runs/{run_id}/summary")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_item_queries)
+
+    assert summary_response.status_code == 200, summary_response.text
+    summary = summary_response.json()
+    assert summary["items"] == []
+    assert summary["total_count"] == 1000
+    assert summary["uploaded_count"] == 1000
+    assert summary["completed_count"] == 875
+    assert summary["needs_review_count"] == 100
+    assert summary["failed_count"] == 50
+    assert summary["canceled_count"] == 25
+    assert summary["running_count"] == 75
+    assert summary["preprocessing_count"] == 50
+    assert summary["progress_phase"] == "preprocessing"
+    assert summary["progress"] == 0.875
+    assert {"vlm_active_count", "vlm_waiting_count", "vlm_limit"}.issubset(summary)
+    assert item_queries
+    assert any("count" in query and "group by" in query for query in item_queries)
+    assert all("result_json" not in query for query in item_queries)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        {
+            "owner_model": Batch,
+            "item_model_name": "BatchItem",
+            "job_model_name": "ExtractionJob",
+            "owner_kwargs": {"schema_id": "schema_summary_polling", "schema_version": 1},
+            "item_owner_field": "batch_id",
+            "job_kwargs": {"schema_id": "schema_summary_polling", "schema_version": 1},
+            "summary_path": "/api/batches/{id}/summary",
+            "list_path": "/api/batches?limit=100&include_items=false",
+            "item_table": "batch_items",
+        },
+        {
+            "owner_model": ClassificationBatch,
+            "item_model_name": "ClassificationBatchItem",
+            "job_model_name": "ClassificationJob",
+            "owner_kwargs": {"classifier_id": "classifier_summary_polling"},
+            "item_owner_field": "batch_id",
+            "job_kwargs": {"classifier_id": "classifier_summary_polling"},
+            "summary_path": "/api/classification-batches/{id}/summary",
+            "list_path": "/api/classification-batches?limit=100&include_items=false",
+            "item_table": "classification_batch_items",
+        },
+        {
+            "owner_model": RequiredFieldCheckBatch,
+            "item_model_name": "RequiredFieldCheckBatchItem",
+            "job_model_name": "RequiredFieldCheckJob",
+            "owner_kwargs": {"checklist_id": "checklist_summary_polling"},
+            "item_owner_field": "batch_id",
+            "job_kwargs": {"checklist_id": "checklist_summary_polling"},
+            "summary_path": "/api/required-field-check-batches/{id}/summary",
+            "list_path": "/api/required-field-check-batches?limit=100&include_items=false",
+            "item_table": "required_field_check_batch_items",
+        },
+    ],
+)
+def test_module_batch_summary_and_light_list_use_aggregate_counts(case: dict[str, Any]) -> None:
+    from sqlalchemy import event
+
+    from app import models as model_module
+    from app.database import SessionLocal, engine, init_db
+
+    init_db()
+    item_model = getattr(model_module, case["item_model_name"])
+    job_model = getattr(model_module, case["job_model_name"])
+    statuses = ["completed", "needs_review", "failed", "canceled", "running", "waiting_for_document"]
+
+    db = SessionLocal()
+    try:
+        owner = case["owner_model"](status="running", total_count=len(statuses), **case["owner_kwargs"])
+        db.add(owner)
+        db.flush()
+        for index, status in enumerate(statuses):
+            job = job_model(
+                document_id=f"doc_module_summary_{case['item_table']}_{index}",
+                status=status,
+                error_message="failed by test" if status == "failed" else None,
+                **case["job_kwargs"],
+            )
+            db.add(job)
+            db.flush()
+            db.add(
+                item_model(
+                    **{case["item_owner_field"]: owner.id},
+                    document_id=job.document_id,
+                    job_id=job.id,
+                    filename=f"module_summary_{index}.png",
+                    upload_index=index,
+                    client_file_id=f"test:{index}",
+                )
+            )
+        db.commit()
+        owner_id = owner.id
+    finally:
+        db.close()
+
+    item_queries: list[str] = []
+
+    def capture_item_queries(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        normalized = " ".join(statement.lower().split())
+        if normalized.startswith("select") and case["item_table"] in normalized:
+            item_queries.append(normalized)
+
+    event.listen(engine, "before_cursor_execute", capture_item_queries)
+    try:
+        with get_client() as client:
+            summary_response = client.get(case["summary_path"].format(id=owner_id))
+            list_response = client.get(case["list_path"])
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_item_queries)
+
+    assert summary_response.status_code == 200, summary_response.text
+    summary = summary_response.json()
+    assert summary["items"] == []
+    assert summary["uploaded_count"] == 6
+    assert summary["completed_count"] == 2
+    assert summary["needs_review_count"] == 1
+    assert summary["failed_count"] == 1
+    assert summary["canceled_count"] == 1
+    assert summary["running_count"] == 1
+    assert summary["preprocessing_count"] == 1
+    assert summary["progress"] == 4 / 6
+
+    assert list_response.status_code == 200, list_response.text
+    listed = next(item for item in list_response.json() if item["id"] == owner_id)
+    assert listed["items"] == []
+    assert listed["failed_count"] == 1
+
+    assert item_queries
+    assert all("count" in query and "group by" in query for query in item_queries)
+    assert all("filename" not in query and "client_file_id" not in query for query in item_queries)
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["running", "paused", "completed", "completed_with_errors", "needs_review", "failed", "canceled"],
+)
+def test_workflow_start_rejects_non_startable_statuses(status: str) -> None:
+    from app.database import SessionLocal, init_db
+    from app.models import WorkflowDefinition, WorkflowRunItem
+
+    init_db()
+    db = SessionLocal()
+    try:
+        workflow = WorkflowDefinition(
+            name=f"start_reject_{status}_workflow",
+            definition_json=json.dumps({"nodes": [], "edges": []}),
+        )
+        db.add(workflow)
+        db.flush()
+        run = WorkflowRun(
+            workflow_id=workflow.id,
+            workflow_name=workflow.name,
+            status=status,
+            total_count=1,
+            completed_at=datetime.utcnow() if status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"} else None,
+        )
+        db.add(run)
+        db.flush()
+        db.add(
+            WorkflowRunItem(
+                run_id=run.id,
+                document_id=f"doc_start_reject_{status}",
+                filename=f"start_reject_{status}.png",
+                upload_index=0,
+                status="completed" if status == "completed_with_errors" else status,
+                completed_at=datetime.utcnow() if status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"} else None,
+            )
+        )
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    with get_client() as client:
+        response = client.post(f"/api/workflow-runs/{run_id}/start")
+        assert response.status_code == 409, response.text
+        refreshed = client.get(f"/api/workflow-runs/{run_id}").json()
+
+    assert refreshed["status"] == status
+
+
+@pytest.mark.parametrize("status", ["completed", "completed_with_errors", "needs_review", "failed", "canceled"])
+def test_workflow_discard_rejects_terminal_statuses(status: str) -> None:
+    from app.database import SessionLocal, init_db
+    from app.models import WorkflowDefinition, WorkflowRunItem
+
+    init_db()
+    db = SessionLocal()
+    try:
+        workflow = WorkflowDefinition(
+            name=f"discard_reject_{status}_workflow",
+            definition_json=json.dumps({"nodes": [], "edges": []}),
+        )
+        db.add(workflow)
+        db.flush()
+        run = WorkflowRun(
+            workflow_id=workflow.id,
+            workflow_name=workflow.name,
+            status=status,
+            total_count=1,
+            completed_at=datetime.utcnow(),
+        )
+        db.add(run)
+        db.flush()
+        db.add(
+            WorkflowRunItem(
+                run_id=run.id,
+                document_id=f"doc_discard_reject_{status}",
+                filename=f"discard_reject_{status}.png",
+                upload_index=0,
+                status=status,
+                completed_at=datetime.utcnow(),
+            )
+        )
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    with get_client() as client:
+        response = client.post(f"/api/workflow-runs/{run_id}/discard")
+        assert response.status_code == 409, response.text
+        refreshed = client.get(f"/api/workflow-runs/{run_id}").json()
+
+    assert refreshed["status"] == status
 
 
 def test_workflow_resume_and_discard_partial_upload(monkeypatch) -> None:
@@ -2660,6 +3234,11 @@ def test_workflow_waiting_run_cannot_enqueue_or_start_out_of_order(monkeypatch) 
 
         blocked_by_source = client.post(f"/api/workflow-runs/{first_waiting_id}/start")
         assert blocked_by_source.status_code == 409, blocked_by_source.text
+        resume_waiting = client.post(f"/api/workflow-runs/{first_waiting_id}/resume")
+        assert resume_waiting.status_code == 409, resume_waiting.text
+        pause_waiting = client.post(f"/api/workflow-runs/{first_waiting_id}/pause")
+        assert pause_waiting.status_code == 409, pause_waiting.text
+        assert client.get(f"/api/workflow-runs/{first_waiting_id}").json()["status"] == "waiting"
 
         from app.database import SessionLocal
 

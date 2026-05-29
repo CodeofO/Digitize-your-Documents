@@ -36,8 +36,10 @@ import type { CSSProperties, ReactNode, UIEvent } from "react";
 import { apiFetch, exchangeAccessFragment, refreshAuthSession } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 import { DocumentLibraryScreen, DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "./DocumentLibrary";
+import { ExportJobHistory } from "./ExportJobHistory";
 import { ModuleWorkspace } from "./ModuleWorkspace";
 import { WorkflowBuilder, WorkflowRunResultWindow } from "./WorkflowBuilder";
+import { createAndDownloadExportJob } from "./exportJobs";
 
 const WORKSPACE_STATE_KEY = "digitize_workspace_state_v1";
 const LEFT_PANE_PERCENT_KEY = "digitize_left_pane_percent_v1";
@@ -80,6 +82,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 type AppMode = "home" | "documents" | "raw" | "key-info" | "classifier" | "required-checker" | "workflow" | "workflow-result";
 type ExportFormat = "json" | "csv" | "xlsx";
+type ExportMenuOption = { format: ExportFormat; href?: string; label?: string; onExport?: () => Promise<unknown> | unknown };
 type Step = "upload" | "schema" | "review";
 type ReviewFilter = "needs_review" | "all" | "warning" | "null" | "changed" | "low_confidence" | "unreviewed" | "ai_corrected" | "ai_review_failed";
 type HistoryTab = "documents" | "schemas" | "jobs";
@@ -750,35 +753,61 @@ function UnifiedUploadPicker(props: {
 }
 
 function ExportMenuButton(props: {
-  options: { format: ExportFormat; href: string; label?: string }[];
+  options: ExportMenuOption[];
   compact?: boolean;
   align?: "left" | "right";
 }) {
   const menu = useUploadPickerMenu();
+  const [pendingFormat, setPendingFormat] = useState<ExportFormat | null>(null);
   const iconSize = props.compact ? 14 : 16;
   const buttonClass = props.compact ? "secondary compact" : "secondary";
+  const handleExport = async (option: ExportMenuOption) => {
+    if (!option.onExport || pendingFormat) return;
+    menu.close();
+    setPendingFormat(option.format);
+    try {
+      await option.onExport();
+    } catch (exc) {
+      window.alert(exc instanceof Error ? exc.message : "Export 요청에 실패했습니다.");
+    } finally {
+      setPendingFormat(null);
+    }
+  };
 
   return (
     <div className="workflow-upload-picker unified-upload-picker" ref={menu.ref}>
-      <button type="button" className={buttonClass} aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle}>
-        <Download size={iconSize} />
+      <button type="button" className={buttonClass} aria-haspopup="menu" aria-expanded={menu.open} onClick={menu.toggle} disabled={pendingFormat !== null}>
+        {pendingFormat ? <Loader2 size={iconSize} className="spin" /> : <Download size={iconSize} />}
         Export
       </button>
       {menu.open && (
         <div className={`workflow-upload-menu ${props.align === "right" ? "workflow-upload-menu-right" : ""}`} role="menu">
-          {props.options.map((option) => (
-            <a
-              key={option.format}
-              className="workflow-upload-menu-item"
-              role="menuitem"
-              href={option.href}
-              target="_blank"
-              rel="noreferrer"
-              onClick={menu.close}
-            >
-              {exportFormatIcon(option.format, iconSize)} {option.label ?? option.format.toUpperCase()}
-            </a>
-          ))}
+          {props.options.map((option) =>
+            option.onExport ? (
+              <button
+                key={option.format}
+                type="button"
+                className="workflow-upload-menu-item"
+                role="menuitem"
+                disabled={pendingFormat !== null}
+                onClick={() => void handleExport(option)}
+              >
+                {pendingFormat === option.format ? <Loader2 size={iconSize} className="spin" /> : exportFormatIcon(option.format, iconSize)} {option.label ?? option.format.toUpperCase()}
+              </button>
+            ) : (
+              <a
+                key={option.format}
+                className="workflow-upload-menu-item"
+                role="menuitem"
+                href={option.href}
+                target="_blank"
+                rel="noreferrer"
+                onClick={menu.close}
+              >
+                {exportFormatIcon(option.format, iconSize)} {option.label ?? option.format.toUpperCase()}
+              </a>
+            )
+          )}
         </div>
       )}
     </div>
@@ -1271,8 +1300,8 @@ export default function App() {
   async function refreshHomeMonitor() {
     const [workflowRuns, classificationBatches, requiredBatches] = await Promise.all([
       safeApiList<HomeWorkflowRun>("/api/workflow-runs?limit=6"),
-      safeApiList<HomeModuleBatch>("/api/classification-batches?limit=6"),
-      safeApiList<HomeModuleBatch>("/api/required-field-check-batches?limit=6")
+      safeApiList<HomeModuleBatch>("/api/classification-batches?limit=6&include_items=false"),
+      safeApiList<HomeModuleBatch>("/api/required-field-check-batches?limit=6&include_items=false")
     ]);
     setHomeWorkflowRuns(workflowRuns);
     setHomeClassificationBatches(classificationBatches);
@@ -1932,6 +1961,15 @@ export default function App() {
     setActiveBatchItemId(item.id);
     setStep("review");
     await loadJob(item.job_id, { preserveBatch: true, forceReviewStep: true, silent: true });
+  }
+
+  function openNextBatchReviewItem(batch: Batch) {
+    const reviewItems = batch.items.filter((item) => item.status === "needs_review");
+    if (!reviewItems.length) return;
+    const currentIndex = reviewItems.findIndex((item) => item.id === activeBatchItemId);
+    const nextItem = reviewItems[(currentIndex + 1) % reviewItems.length];
+    setReviewFilter("needs_review");
+    void openBatchItem(batch.id, nextItem.id, batch);
   }
 
   async function refreshActiveBatchItemJob() {
@@ -2631,6 +2669,7 @@ export default function App() {
                     onOpenItem={(itemId) => void openBatchItem(activeBatch.id, itemId)}
                     onDiscardBatch={(batchId) => void discardBatch(batchId)}
                     onResumeBatch={(batchId) => void resumeBatch(batchId)}
+                    onNextReviewItem={() => openNextBatchReviewItem(activeBatch)}
                   />
                 )}
                 <div className="document-viewer-panel">
@@ -2754,6 +2793,7 @@ export default function App() {
                 item={activeBatchItem}
                 onDiscardBatch={(batchId) => void discardBatch(batchId)}
                 onResumeBatch={(batchId) => void resumeBatch(batchId)}
+                onNextReviewItem={() => openNextBatchReviewItem(activeBatch)}
               />
             ) : (
               <ReviewPanel
@@ -3649,11 +3689,13 @@ function BatchFileRail(props: {
   onOpenItem: (itemId: string) => void;
   onDiscardBatch: (batchId: string) => void;
   onResumeBatch: (batchId: string) => void;
+  onNextReviewItem: () => void;
 }) {
   const uploadedCount = props.batch.uploaded_count ?? props.batch.items.length;
   const preprocessingCount = props.batch.preprocessing_count ?? props.batch.items.filter((item) => item.status === "preprocessing").length;
   const runningCount = props.batch.running_count ?? props.batch.items.filter((item) => item.status === "running").length;
   const queuedCount = props.batch.queued_count ?? props.batch.items.filter((item) => item.status === "queued").length;
+  const needsReviewCount = props.batch.needs_review_count ?? props.batch.items.filter((item) => item.status === "needs_review").length;
   return (
     <aside className="batch-file-rail" aria-label="배치 파일">
       <div className="batch-rail-header">
@@ -3665,6 +3707,10 @@ function BatchFileRail(props: {
       </div>
       <progress max={1} value={props.batch.progress} />
       <div className="batch-rail-actions">
+        <button type="button" className="secondary compact" onClick={props.onNextReviewItem} disabled={!needsReviewCount}>
+          <CheckSquare size={14} />
+          다음 검토 {needsReviewCount ? needsReviewCount.toLocaleString() : ""}
+        </button>
         <ExportMenuButton options={batchExportOptions(props.batch.id)} compact align="right" />
         {batchCanResume(props.batch) && (
           <button type="button" className="secondary compact" onClick={() => props.onResumeBatch(props.batch.id)}>
@@ -3677,6 +3723,7 @@ function BatchFileRail(props: {
           </button>
         )}
       </div>
+      <ExportJobHistory ownerType="batch" ownerId={props.batch.id} compact limit={3} />
       <VirtualBatchFileList items={props.batch.items} activeItemId={props.activeItemId} onOpenItem={props.onOpenItem} />
     </aside>
   );
@@ -3817,8 +3864,10 @@ function BatchItemStatusPanel(props: {
   item: BatchItem;
   onDiscardBatch: (batchId: string) => void;
   onResumeBatch: (batchId: string) => void;
+  onNextReviewItem: () => void;
 }) {
   const finishedCount = props.batch.completed_count + props.batch.failed_count + props.batch.canceled_count;
+  const needsReviewCount = props.batch.needs_review_count ?? props.batch.items.filter((item) => item.status === "needs_review").length;
   return (
     <div className="review-panel batch-wait-panel">
       <div className="pane-header">
@@ -3841,6 +3890,10 @@ function BatchItemStatusPanel(props: {
       </div>
 
       <div className="action-row">
+        <button type="button" className="secondary" onClick={props.onNextReviewItem} disabled={!needsReviewCount}>
+          <CheckSquare size={16} />
+          다음 검토 {needsReviewCount ? needsReviewCount.toLocaleString() : ""}
+        </button>
         <ExportMenuButton options={batchExportOptions(props.batch.id)} />
         {batchCanResume(props.batch) && (
           <button type="button" className="secondary" onClick={() => props.onResumeBatch(props.batch.id)}>
@@ -5625,13 +5678,8 @@ function resolveImageUrl(url: string) {
 function batchExportOptions(batchId: string) {
   return (["csv", "json", "xlsx"] as ExportFormat[]).map((format) => ({
     format,
-    href: batchExportHref(batchId, format),
+    onExport: () => createAndDownloadExportJob("batch", batchId, format),
   }));
-}
-
-function batchExportHref(batchId: string, format: ExportFormat) {
-  const params = new URLSearchParams({ format });
-  return `${API_BASE}/api/batches/${batchId}/export?${params.toString()}`;
 }
 
 function exportFormatIcon(format: ExportFormat, size: number) {

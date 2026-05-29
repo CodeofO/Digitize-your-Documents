@@ -3,10 +3,12 @@ import csv
 import io
 import json
 import threading
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit_event
@@ -99,13 +101,50 @@ def _workflow_definition_for_run(run: WorkflowRun, workflow: WorkflowDefinition 
     return _workflow_definition_json(workflow)
 
 
-def workflow_run_to_read(run: WorkflowRun, *, include_items: bool = True) -> dict[str, Any]:
+def workflow_runs_to_read(
+    runs: list[WorkflowRun],
+    *,
+    include_items: bool = True,
+    db: Session | None = None,
+) -> list[dict[str, Any]]:
+    if include_items or db is None:
+        return [workflow_run_to_read(run, include_items=include_items, db=db) for run in runs]
+
+    status_counts_by_run = _workflow_run_status_counts_for_runs([run.id for run in runs], db)
+    return [
+        _workflow_run_to_read_with_status_counts(run, status_counts_by_run.get(run.id, {}), include_items=False)
+        for run in runs
+    ]
+
+
+def workflow_run_to_read(
+    run: WorkflowRun,
+    *,
+    include_items: bool = True,
+    db: Session | None = None,
+) -> dict[str, Any]:
+    if include_items:
+        items = sorted(run.items, key=_workflow_item_sort_key)
+        status_counts = _workflow_item_status_counts(items)
+        return _workflow_run_to_read_with_status_counts(run, status_counts, items=items, include_items=True)
+
+    if db is not None:
+        return _workflow_run_to_read_with_status_counts(run, _workflow_run_status_counts_from_db(run.id, db), include_items=False)
+
     items = sorted(run.items, key=_workflow_item_sort_key)
-    counters = _workflow_run_counters(run, items)
+    return _workflow_run_to_read_with_status_counts(run, _workflow_item_status_counts(items), items=items, include_items=False)
+
+
+def _workflow_run_to_read_with_status_counts(
+    run: WorkflowRun,
+    status_counts: dict[str, int],
+    *,
+    items: list[WorkflowRunItem] | None = None,
+    include_items: bool,
+) -> dict[str, Any]:
+    items = items or []
+    counters = _workflow_run_counters_from_status_counts(run, status_counts)
     vlm_counters = vlm_runtime_counters()
-    completed = [item for item in items if item.status in WORKFLOW_TERMINAL_STATUSES]
-    failed = [item for item in items if item.status == "failed"]
-    needs_review = [item for item in items if item.status == "needs_review"]
     return {
         "id": run.id,
         "workflow_id": run.workflow_id,
@@ -116,9 +155,9 @@ def workflow_run_to_read(run: WorkflowRun, *, include_items: bool = True) -> dic
         "queue_order": run.queue_order,
         "status": counters["status"],
         "total_count": run.total_count,
-        "completed_count": len(completed),
-        "failed_count": len(failed),
-        "needs_review_count": len(needs_review),
+        "completed_count": _workflow_terminal_count(status_counts),
+        "failed_count": status_counts.get("failed", 0),
+        "needs_review_count": status_counts.get("needs_review", 0),
         "uploaded_count": counters["uploaded_count"],
         "preprocessing_count": counters["preprocessing_count"],
         "ready_count": counters["ready_count"],
@@ -1638,30 +1677,34 @@ def _workflow_summary(node_results: dict[str, Any], branch_path: str | None) -> 
 
 
 def _workflow_run_status(run: WorkflowRun, items: list[WorkflowRunItem]) -> str:
+    return _workflow_run_status_from_counts(run, _workflow_item_status_counts(items))
+
+
+def _workflow_run_status_from_counts(run: WorkflowRun, status_counts: dict[str, int]) -> str:
     if run.status in WORKFLOW_TERMINAL_STATUSES or run.status in {"completed_with_errors", "failed"}:
         return run.status
     if run.status == "waiting":
         return "waiting"
     if run.status == "paused":
         return "paused"
-    statuses = [item.status for item in items]
-    if len(statuses) < run.total_count:
+    uploaded_count = sum(status_counts.values())
+    if uploaded_count < run.total_count:
         return "uploading"
-    if not statuses:
+    if not uploaded_count:
         return run.status
-    if any(status in {"preprocessing", "waiting_for_document"} for status in statuses):
+    if status_counts.get("preprocessing", 0) or status_counts.get("waiting_for_document", 0):
         return "preprocessing"
-    if any(status == "running" for status in statuses):
+    if status_counts.get("running", 0):
         return "running"
-    if any(status == "paused" for status in statuses):
+    if status_counts.get("paused", 0):
         return "paused"
-    if run.status == "running" and any(status == "queued" for status in statuses):
+    if run.status == "running" and status_counts.get("queued", 0):
         return "running"
-    if any(status == "queued" for status in statuses):
+    if status_counts.get("queued", 0):
         return "queued"
-    if any(status == "failed" for status in statuses):
+    if status_counts.get("failed", 0):
         return "completed_with_errors"
-    if any(status == "needs_review" for status in statuses):
+    if status_counts.get("needs_review", 0):
         return "needs_review"
     return "completed"
 
@@ -1672,20 +1715,57 @@ def _workflow_item_sort_key(item: WorkflowRunItem) -> tuple[int, int, str, str]:
     return (0, item.upload_index, item.filename.casefold(), item.id)
 
 
+def _workflow_item_status_counts(items: list[WorkflowRunItem]) -> dict[str, int]:
+    return dict(Counter(item.status for item in items))
+
+
+def _workflow_run_status_counts_from_db(run_id: str, db: Session) -> dict[str, int]:
+    rows = (
+        db.query(WorkflowRunItem.status, func.count(WorkflowRunItem.id))
+        .filter(WorkflowRunItem.run_id == run_id)
+        .group_by(WorkflowRunItem.status)
+        .all()
+    )
+    return {status: int(count) for status, count in rows}
+
+
+def _workflow_run_status_counts_for_runs(run_ids: list[str], db: Session) -> dict[str, dict[str, int]]:
+    if not run_ids:
+        return {}
+    rows = (
+        db.query(WorkflowRunItem.run_id, WorkflowRunItem.status, func.count(WorkflowRunItem.id))
+        .filter(WorkflowRunItem.run_id.in_(run_ids))
+        .group_by(WorkflowRunItem.run_id, WorkflowRunItem.status)
+        .all()
+    )
+    counts: dict[str, dict[str, int]] = {run_id: {} for run_id in run_ids}
+    for run_id, status, count in rows:
+        counts.setdefault(run_id, {})[status] = int(count)
+    return counts
+
+
+def _workflow_terminal_count(status_counts: dict[str, int]) -> int:
+    return sum(count for status, count in status_counts.items() if status in WORKFLOW_TERMINAL_STATUSES)
+
+
 def _workflow_run_counters(run: WorkflowRun, items: list[WorkflowRunItem]) -> dict[str, Any]:
-    statuses = [item.status for item in items]
-    terminal_count = sum(1 for status in statuses if status in WORKFLOW_TERMINAL_STATUSES)
-    preprocessing_count = sum(1 for status in statuses if status in {"preprocessing", "waiting_for_document"})
-    queued_count = sum(1 for status in statuses if status == "queued")
-    running_count = sum(1 for status in statuses if status == "running")
-    canceled_count = sum(1 for status in statuses if status == "canceled")
-    paused_count = sum(1 for status in statuses if status == "paused")
-    status = _workflow_run_status(run, items)
+    return _workflow_run_counters_from_status_counts(run, _workflow_item_status_counts(items))
+
+
+def _workflow_run_counters_from_status_counts(run: WorkflowRun, status_counts: dict[str, int]) -> dict[str, Any]:
+    uploaded_count = sum(status_counts.values())
+    terminal_count = _workflow_terminal_count(status_counts)
+    preprocessing_count = status_counts.get("preprocessing", 0) + status_counts.get("waiting_for_document", 0)
+    queued_count = status_counts.get("queued", 0)
+    running_count = status_counts.get("running", 0)
+    canceled_count = status_counts.get("canceled", 0)
+    paused_count = status_counts.get("paused", 0)
+    status = _workflow_run_status_from_counts(run, status_counts)
     if status == "waiting":
         progress_phase = "waiting"
     elif status == "paused" or paused_count:
         progress_phase = "paused"
-    elif len(statuses) < run.total_count:
+    elif uploaded_count < run.total_count:
         progress_phase = "uploading"
     elif preprocessing_count:
         progress_phase = "preprocessing"
@@ -1695,9 +1775,9 @@ def _workflow_run_counters(run: WorkflowRun, items: list[WorkflowRunItem]) -> di
         progress_phase = status
     return {
         "status": status,
-        "uploaded_count": len(statuses),
+        "uploaded_count": uploaded_count,
         "preprocessing_count": preprocessing_count,
-        "ready_count": max(0, len(statuses) - preprocessing_count),
+        "ready_count": max(0, uploaded_count - preprocessing_count),
         "queued_count": queued_count,
         "running_count": running_count,
         "canceled_count": canceled_count,

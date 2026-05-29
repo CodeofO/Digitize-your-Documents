@@ -811,6 +811,31 @@ class ExportPresetRead(BaseModel):
     updated_at: datetime
 
 
+ExportJobOwnerType = Literal["workflow_run", "batch", "classification_batch", "required_field_check_batch"]
+ExportJobFormat = Literal["json", "csv", "xlsx"]
+
+
+class ExportJobCreate(BaseModel):
+    owner_type: ExportJobOwnerType
+    owner_id: str = Field(min_length=1)
+    format: ExportJobFormat = "csv"
+
+
+class ExportJobRead(BaseModel):
+    id: str
+    owner_type: str
+    owner_id: str
+    format: str
+    status: str
+    filename: str | None = None
+    content_type: str | None = None
+    size_bytes: int = 0
+    error_message: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
 class WorkflowDefinitionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = None

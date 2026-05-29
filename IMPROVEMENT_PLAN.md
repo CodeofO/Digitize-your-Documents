@@ -18,6 +18,20 @@
 | P2 | 배포/운영 구조 정리 | Postgres, job queue, object storage 기준 운영 구조를 만든다. |
 | P2 | 업무 템플릿/PoC 패키지 | 고객에게 바로 보여줄 수 있는 업종별 예시를 만든다. |
 
+## 진행 기록
+
+| 날짜 | 상태 | 항목 | 반영 내용 |
+| --- | --- | --- | --- |
+| 2026-05-29 | 완료 | Phase 2-4 실행 현황 타임라인 / Phase 2-6 조회 index | workflow run list/summary polling이 item `result_json`을 반복 로드하지 않도록 aggregate count read path로 변경하고, workflow run/item 조회 index와 회귀 테스트를 추가했다. |
+| 2026-05-29 | 진행 중 | Phase 1-1 Workflow 상태 머신 정식화 | 이미 실행 중이거나 terminal 상태인 run의 `start`를 409로 차단하고, terminal run의 `discard`가 완료 상태를 `canceled`로 바꾸지 못하도록 차단했다. 프론트 버튼 노출 조건과 backend 회귀 테스트를 함께 반영했다. |
+| 2026-05-29 | 부분 완료 | Phase 2-4 1k summary polling 검증 | 1,000개 workflow item run에서 summary counter, progress phase, VLM counter 필드, `result_json` 미로드를 검증하는 backend 회귀 테스트를 추가했다. |
+| 2026-05-29 | 완료 | Phase 2-4 모듈 batch summary polling | KIE, Document Classifier, Required Field Checker batch summary와 lightweight list에 aggregate count read path를 추가하고, Home monitor가 item 목록 없이 최근 batch 현황을 가져오도록 변경했다. |
+| 2026-05-29 | 완료 | Phase 3-8 Background export job | Workflow, KIE batch, Classification batch, Required Field Check batch export를 `ExportJob` 모델/API로 비동기 생성하고, job status, filename, content type, size, failure reason을 DB에 남기도록 추가했다. 직접 다운로드 endpoint는 동일 artifact builder를 재사용한다. |
+| 2026-05-29 | 완료 | Phase 3-8 Export retry/history UX | `GET /api/export-jobs`와 failed job retry API를 추가하고, KIE/Workflow/Module 화면에서 최근 export 상태, 다운로드, 재시도를 확인할 수 있게 했다. |
+| 2026-05-29 | 완료 | Phase 2-6 운영 DB migration | `export_jobs`와 workflow/batch summary 조회 index를 Alembic `0002` migration으로 고정하고, 임시 SQLite DB에서 `alembic upgrade head`를 검증했다. |
+| 2026-05-29 | 완료 | Phase 1-1 Waiting run guard | queue 대기 중인 workflow run이 API 직접 호출로 `resume`/`pause`되어 순서 제어를 우회하지 못하도록 409 guard와 회귀 테스트를 추가했다. |
+| 2026-05-29 | 완료 | Phase 2-5 Export worker 복구 | FastAPI background task에만 의존하지 않도록 export worker를 lifespan에 추가하고, 서버 재시작으로 남은 `running` export job을 `queued`로 복구해 처리하도록 했다. |
+
 ## Phase 1. 안정성 고정
 
 ### 1. Workflow 상태 머신 정식화
@@ -72,6 +86,7 @@
 - 문서 변환, workflow inference, export를 FastAPI process 내부 thread에만 의존하지 않는 구조를 검토한다.
 - 후보: Redis/RQ, Celery, Dramatiq, arq.
 - 초기 도입은 문서 변환과 대량 export부터 분리한다.
+- 현재 1차 조치로 export는 `ExportJob` DB 레코드와 FastAPI background task로 분리했다. 운영 queue 도입 시 같은 job 상태 계약을 유지한다.
 
 완료 기준:
 
@@ -107,11 +122,13 @@
 - Export는 CSV/JSON/XLSX 선택형으로 통일한다.
 - 대량 export는 background export job으로 만들고 완료 후 다운로드하게 한다.
 - Export schema는 branch별 union-column 정책을 유지하되 빈 값/unknown/class path를 명확히 한다.
+- 관측 필드: `status`, `started_at`, `completed_at`, `filename`, `content_type`, `size_bytes`, `error_message`, audit event `exported_async`.
+- 최근 export history UI에서 완료 artifact 다운로드와 실패 job 재시도를 제공한다.
 
 완료 기준:
 
 - 1k 이상 문서 export가 브라우저 timeout 없이 완료된다.
-- export 실패 시 재시도와 실패 사유 표시가 가능하다.
+- export 실패 시 실패 사유 표시가 가능하고, 재시도 UX를 추가할 수 있는 job id가 남는다.
 
 ### 9. 문서 보관함 UX 보강
 
@@ -160,11 +177,11 @@
 
 ## 당장 시작할 작업
 
-1. Backend workflow 상태 전이 테스트 추가.
-2. 1k 문서 mock run으로 summary polling, 실행 현황 정렬, VLM counter를 검증.
-3. 결과 검수 화면에서 `검토 필요` 중심 순회 UX 설계.
-4. Export를 background job으로 분리할지 설계안 작성.
-5. 은행서류 템플릿을 README, 카드뉴스, 데모 영상에서 일관되게 쓰도록 정리.
+1. [부분 완료] Backend workflow 상태 전이 테스트 추가.
+2. [부분 완료] 1k 문서 mock run으로 summary polling, 실행 현황 정렬, VLM counter를 검증.
+3. [대기] 결과 검수 화면에서 `검토 필요` 중심 순회 UX 설계.
+4. [완료] Export를 background job으로 분리할지 설계안 작성 및 1차 구현.
+5. [대기] 은행서류 템플릿을 README, 카드뉴스, 데모 영상에서 일관되게 쓰도록 정리.
 
 ## 보류할 작업
 
