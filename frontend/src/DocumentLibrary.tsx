@@ -35,6 +35,8 @@ export type LibraryDocument = {
   page_count: number;
   status: string;
   error_message?: string | null;
+  source_path?: string;
+  source_note?: string;
   created_at: string;
   deleted_at?: string | null;
 };

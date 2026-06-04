@@ -3,8 +3,11 @@
 
 # Repository entrypoints.
 !.gitignore
+!.env.example
 !README.md
-!IMPROVEMENT_PLAN.md
+!DEVELOPMENT_DEFINITION.md
+!DEVELOPMENT_PLAN.md
+!ERROR_NOTE.md
 !docker-compose.hosting.example.yml
 
 # Runtime examples.
@@ -54,31 +57,36 @@ frontend/src/*
 !frontend/src/*.tsx
 !frontend/src/*.css
 
-# Operator documentation and final README media.
+# Template data and final README media.
 !docs/
 docs/*
-!docs/api-shape.md
-!docs/deployment.md
-!docs/recovery-controls.md
 !docs/readme-media.html
+!docs/templates/
+docs/templates/*
+!docs/templates/*.json
 !assets/
 assets/*
 !assets/readme/
 assets/readme/*
 !assets/readme/*.png
+!assets/readme/*.gif
 !assets/readme/*.mp4
 !assets/readme-src/
 assets/readme-src/*
 !assets/readme-src/*.html
 !assets/readme-src/*.css
 !assets/readme-src/*.png
+!assets/sample/
+assets/sample/*
+!assets/sample/*.jpg
+!assets/sample/*.jpeg
 
 # Runnable scripts.
 !scripts/
 scripts/*
 !scripts/run_dev.sh
-!scripts/start_hosting_demo.sh
-!scripts/stop_hosting_demo.sh
+!scripts/run_large_mock_smoke.py
+!scripts/run_poc_ui_smoke.py
 
 # Always ignored local outputs.
 .env

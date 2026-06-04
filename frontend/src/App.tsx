@@ -18,6 +18,7 @@ import {
   History,
   Loader2,
   Maximize2,
+  Menu,
   PanelLeft,
   Play,
   Plus,
@@ -33,7 +34,7 @@ import {
 } from "lucide-react";
 import { ChangeEvent, DragEvent, PointerEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, UIEvent } from "react";
-import { apiFetch, exchangeAccessFragment, refreshAuthSession } from "./apiClient";
+import { apiFetch } from "./apiClient";
 import { API_BASE } from "./apiConfig";
 import { DocumentLibraryScreen, DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "./DocumentLibrary";
 import { ExportJobHistory } from "./ExportJobHistory";
@@ -74,7 +75,7 @@ const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
   },
   {
     key_name: "금액",
-    description: "보이는 경우 최종 합계, 잔액, 거래 금액 또는 결제 금액입니다.",
+    description: "보이는 경우 최종 합계, 잔액 또는 거래 금액입니다.",
     output_format: "float"
   }
 ];
@@ -283,6 +284,17 @@ type VlmSettings = {
   has_api_key: boolean;
   env_path: string;
   runtime_settings_writable: boolean;
+};
+
+type BankPocSeed = {
+  template_key: string;
+  created: Record<string, boolean>;
+  workflow: {
+    id: string;
+    name: string;
+  };
+  sample_document: LibraryDocument | null;
+  sample_documents?: LibraryDocument[];
 };
 
 type HomeWorkflowRun = {
@@ -814,6 +826,18 @@ function ExportMenuButton(props: {
   );
 }
 
+function PolicyNotice({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={`policy-notice ${compact ? "compact" : ""}`}>
+      <CircleHelp size={compact ? 15 : 17} />
+      <p>
+        업로드 문서는 추출과 검수를 위해 설정된 VLM provider로 전송될 수 있습니다. 외부 베타 기본 보존 기간은 24시간이며,
+        문서 보관함 삭제는 원본과 page image payload를 삭제합니다.
+      </p>
+    </div>
+  );
+}
+
 export default function App() {
   const [mode, setMode] = useState<AppMode>(() => modeFromLocation());
   const [step, setStep] = useState<Step>("upload");
@@ -878,12 +902,14 @@ export default function App() {
   const [schemaLibraryOpen, setSchemaLibraryOpen] = useState(false);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [selectedLibraryDocuments, setSelectedLibraryDocuments] = useState<LibraryDocument[]>([]);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
   const [draftBatchIndex, setDraftBatchIndex] = useState(0);
   const [batchMessage, setBatchMessage] = useState<string | null>(null);
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const [activeBatchItemId, setActiveBatchItemId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const topbarMenu = useUploadPickerMenu();
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
   const documentCacheRef = useRef<Map<string, UploadedDocument>>(new Map());
   const schemaCacheRef = useRef<Map<string, SavedSchema>>(new Map());
@@ -1157,14 +1183,34 @@ export default function App() {
 
   async function bootstrapWorkspace() {
     try {
-      await exchangeAccessFragment();
-      await refreshAuthSession();
       await refreshAll(false);
       await restoreWorkspaceState();
       setWorkspaceRestored(true);
     } catch (err) {
       setError(toFriendlyError(err));
       setWorkspaceRestored(true);
+    }
+  }
+
+  async function seedBankPocTemplate() {
+    try {
+      setError(null);
+      setBusy("은행 서류 데모 준비 중");
+      const seeded = await api<BankPocSeed>("/api/templates/bank-documents-poc/seed", { method: "POST" });
+      const seededDocuments = seeded.sample_documents?.length
+        ? seeded.sample_documents
+        : seeded.sample_document
+          ? [seeded.sample_document]
+          : [];
+      setSelectedLibraryDocuments(seededDocuments);
+      setSelectedWorkflowId(seeded.workflow.id);
+      window.localStorage.setItem("digitize_bank_poc_tour_pending_v1", "1");
+      await Promise.all([refreshHomeMonitor(), refreshHistory()]);
+      navigateMode("workflow");
+    } catch (err) {
+      setError(toFriendlyError(err));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -2415,6 +2461,7 @@ export default function App() {
   }
 
   function navigateMode(nextMode: AppMode) {
+    topbarMenu.close();
     const hash = nextMode === "home" ? "" : `#${nextMode}`;
     window.history.pushState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
     if (nextMode !== "key-info") setSchemaLibraryOpen(false);
@@ -2512,44 +2559,59 @@ export default function App() {
           <p className="eyebrow">Document Automation Workspace</p>
           <h1>{modeTitle(mode)}</h1>
         </div>
-        <div className="status-strip">
-          <ProviderPill status={systemStatus} />
-          {mode !== "home" && (
-            <button type="button" className="secondary compact" onClick={() => navigateMode("home")}>
-              홈
-            </button>
-          )}
-          {mode === "key-info" && (
-            <>
-              <StepPill label="업로드" active={step === "upload"} done={Boolean(document)} />
-              <StepPill label="Schema" active={step === "schema"} done={Boolean(schema) && !schemaDirty} />
-              <StepPill label="검수" active={step === "review"} done={Boolean(result)} />
-            </>
-          )}
-          {mode === "home" && (
-            <button
-              type="button"
-              className="secondary compact"
-              disabled={Boolean(busy)}
-              onClick={() => {
-                setSettingsMessage(null);
-                setSettingsOpen(true);
-              }}
-              title="VLM과 LibreOffice 설정"
-            >
-              <Settings size={16} />
-              설정
-            </button>
-          )}
-          <div className="help-trigger">
-            <button type="button" className="help-button" aria-label="사용 가이드">
-              <CircleHelp size={18} />
-            </button>
-            <div className="help-panel" role="tooltip">
-              <strong>사용 흐름</strong>
-              <span>문서를 업로드한 뒤 직접 schema를 정의하거나 AI 추천을 사용하세요.</span>
-              <span>Schema 변경은 필드 수정 후 자동 저장됩니다.</span>
-              <span>Export 전에 경고, 누락값, 수정값, 근거, 페이지를 검수하세요.</span>
+        <div className="topbar-action-shell" ref={topbarMenu.ref}>
+          <button
+            type="button"
+            className="secondary compact mobile-topbar-menu-button"
+            aria-expanded={topbarMenu.open}
+            aria-haspopup="menu"
+            aria-label="상단 메뉴"
+            onClick={topbarMenu.toggle}
+          >
+            {topbarMenu.open ? <X size={16} /> : <Menu size={16} />}
+            메뉴
+          </button>
+          <div className={`status-strip ${topbarMenu.open ? "mobile-open" : ""}`}>
+            <ProviderPill status={systemStatus} />
+            {mode !== "home" && (
+              <button type="button" className="secondary compact" onClick={() => navigateMode("home")}>
+                홈
+              </button>
+            )}
+            {mode === "key-info" && (
+              <>
+                <StepPill label="업로드" active={step === "upload"} done={Boolean(document)} />
+                <StepPill label="Schema" active={step === "schema"} done={Boolean(schema) && !schemaDirty} />
+                <StepPill label="검수" active={step === "review"} done={Boolean(result)} />
+              </>
+            )}
+            {mode === "home" && (
+              <button
+                type="button"
+                className="secondary compact"
+                disabled={Boolean(busy)}
+                onClick={() => {
+                  topbarMenu.close();
+                  setSettingsMessage(null);
+                  setSettingsOpen(true);
+                }}
+                title="VLM과 LibreOffice 설정"
+              >
+                <Settings size={16} />
+                설정
+              </button>
+            )}
+            <div className="help-trigger">
+              <button type="button" className="help-button" aria-label="사용 가이드">
+                <CircleHelp size={18} />
+                <span className="help-button-label">도움말</span>
+              </button>
+              <div className="help-panel" role="tooltip">
+                <strong>사용 흐름</strong>
+                <span>문서를 업로드한 뒤 직접 schema를 정의하거나 AI 추천을 사용하세요.</span>
+                <span>Schema 변경은 필드 수정 후 자동 저장됩니다.</span>
+                <span>Export 전에 경고, 누락값, 수정값, 근거, 페이지를 검수하세요.</span>
+              </div>
             </div>
           </div>
         </div>
@@ -2571,6 +2633,9 @@ export default function App() {
           onClassifier={() => navigateMode("classifier")}
           onRequiredChecker={() => navigateMode("required-checker")}
           onWorkflow={() => navigateMode("workflow")}
+          onSeedBankPoc={() => void seedBankPocTemplate()}
+          pocBusy={Boolean(busy)}
+          showMonitor
           systemStatus={systemStatus}
           vlmSettings={vlmSettings}
           workflowRuns={homeWorkflowRuns}
@@ -2614,6 +2679,8 @@ export default function App() {
           uploadChunkFiles={uploadChunkFiles}
           initialLibraryDocuments={selectedLibraryDocuments}
           onConsumeInitialLibraryDocuments={() => setSelectedLibraryDocuments([])}
+          initialWorkflowId={selectedWorkflowId}
+          onConsumeInitialWorkflowId={() => setSelectedWorkflowId("")}
           onCreateSchema={() => navigateMode("key-info")}
           onCreateClassifier={() => navigateMode("classifier")}
           onCreateChecklist={() => navigateMode("required-checker")}
@@ -3027,6 +3094,9 @@ function HomeScreen(props: {
   onClassifier: () => void;
   onRequiredChecker: () => void;
   onWorkflow: () => void;
+  onSeedBankPoc: () => void;
+  pocBusy: boolean;
+  showMonitor: boolean;
   systemStatus: SystemStatus | null;
   vlmSettings: VlmSettings | null;
   workflowRuns: HomeWorkflowRun[];
@@ -3044,7 +3114,7 @@ function HomeScreen(props: {
 
   return (
     <main className="home-screen">
-      <section className="home-hero home-hero-workflow">
+      <section className={`home-hero home-hero-workflow ${props.showMonitor ? "" : "home-hero-workflow-no-monitor"}`}>
         <div className="home-hero-copy">
           <p className="eyebrow">작업 공간</p>
           <h2>문서 검수를 한 번에 자동화하세요</h2>
@@ -3053,6 +3123,10 @@ function HomeScreen(props: {
             <button type="button" className="primary home-workflow-cta" onClick={props.onWorkflow}>
               <FileJson size={18} />
               워크플로우 빌더 열기
+            </button>
+            <button type="button" className="secondary home-workflow-cta" disabled={props.pocBusy} onClick={props.onSeedBankPoc}>
+              <Sparkles size={18} />
+              은행 서류 데모 시작
             </button>
           </div>
           <div className="home-value-panel home-value-strip" aria-label="핵심 가치">
@@ -3073,11 +3147,14 @@ function HomeScreen(props: {
             </div>
           </div>
         </div>
-        <HomeMonitorPanel
-          activeCount={activeMonitorCount}
-          items={monitorItems}
-        />
+        {props.showMonitor && (
+          <HomeMonitorPanel
+            activeCount={activeMonitorCount}
+            items={monitorItems}
+          />
+        )}
       </section>
+      <PolicyNotice />
       <div className="home-section-title">
         <p className="eyebrow">핵심 기능</p>
         <h3>필요한 작업을 바로 실행하거나 워크플로우에 연결하세요</h3>
@@ -3156,8 +3233,8 @@ function HomeMonitorPanel(props: {
     <section className="home-monitor-panel" aria-label="진행 현황">
       <div className="home-monitor-head">
         <div>
-          <p className="eyebrow">진행 현황</p>
-          <h3>{props.activeCount ? `진행 중인 작업 ${props.activeCount}개` : "최근 작업"}</h3>
+          <p className="eyebrow">최근 실행</p>
+          <h3>{props.activeCount ? `진행 중인 작업 ${props.activeCount}개` : "작업 진행 현황"}</h3>
         </div>
       </div>
       {props.items.length ? (
@@ -3198,7 +3275,7 @@ function HomeMonitorPanel(props: {
       ) : (
         <div className="home-monitor-empty">
           <strong>실행 중인 작업이 없습니다.</strong>
-          <span>배치를 시작하면 이곳에서 진행률을 확인할 수 있습니다.</span>
+          <span>데모 실행 후 여기에 표시됩니다.</span>
         </div>
       )}
     </section>
@@ -3664,6 +3741,7 @@ function LibraryDocumentSelectionPreview(props: {
             <FileJson size={15} />
             <span>{document.filename}</span>
             <small>{statusLabel(document.status)}</small>
+            {document.source_path && <em>출처: {document.source_path}</em>}
           </div>
         ))}
         {props.documents.length > 20 && <div className="muted">+ {props.documents.length - 20}개 더 있음</div>}
@@ -3981,6 +4059,9 @@ function SettingsDialog(props: {
   onClose: () => void;
 }) {
   const settingsWritable = props.vlmSettings?.runtime_settings_writable ?? true;
+  const settingsBlockedMessage = !(props.vlmSettings?.runtime_settings_writable ?? true)
+    ? "호스팅 환경 변수로 관리됨"
+    : "";
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="settings-panel modal-panel" role="dialog" aria-modal="true" aria-labelledby="vlm-settings-title">
@@ -4065,7 +4146,7 @@ function SettingsDialog(props: {
           </SettingsField>
           <SettingsField
             label="AI 동시 요청 수"
-            help="Gemini/OpenAI로 동시에 보내는 요청 수입니다. RPM/TPM/timeout을 보며 조절하세요. 기본값은 128입니다."
+            help="Gemini/OpenAI로 동시에 보내는 요청 수입니다. production 예시는 provider quota 보호를 위해 8로 둡니다."
           >
             <input
               inputMode="numeric"
@@ -4107,7 +4188,7 @@ function SettingsDialog(props: {
         <div className="settings-status">
           <span>{props.vlmSettings?.has_api_key ? "API key 저장됨" : "API key 미설정"}</span>
           <span>env: {props.vlmSettings?.env_path || ".env"}</span>
-          {!settingsWritable && <span className="warning-text">호스팅 환경 변수로 관리됨</span>}
+          {!settingsWritable && settingsBlockedMessage && <span className="warning-text">{settingsBlockedMessage}</span>}
           {props.settingsMessage && <span className="success-text">{props.settingsMessage}</span>}
         </div>
       </section>

@@ -25,6 +25,7 @@ from app.document_modules import (
 from app.extraction import result_to_dict, run_extraction_job, run_extraction_job_async
 from app.models import (
     ClassificationJob,
+    Document,
     DocumentClassifier,
     ExportPreset,
     ExtractionJob,
@@ -71,7 +72,7 @@ def workflow_definition_to_read(workflow: WorkflowDefinition, db: Session) -> di
     definition = _workflow_definition_json(workflow)
     warnings: list[str] = []
     try:
-        warnings = validate_workflow_definition(definition, db).warnings
+        warnings = validate_workflow_definition(definition, db, workspace_id=workflow.workspace_id).warnings
     except WorkflowDefinitionError:
         warnings = []
     return {
@@ -155,7 +156,7 @@ def _workflow_run_to_read_with_status_counts(
         "queue_order": run.queue_order,
         "status": counters["status"],
         "total_count": run.total_count,
-        "completed_count": _workflow_terminal_count(status_counts),
+        "completed_count": counters["completed_count"],
         "failed_count": status_counts.get("failed", 0),
         "needs_review_count": status_counts.get("needs_review", 0),
         "uploaded_count": counters["uploaded_count"],
@@ -196,12 +197,12 @@ def workflow_run_item_to_read(item: WorkflowRunItem) -> dict[str, Any]:
     }
 
 
-def validate_workflow_definition(definition: dict[str, Any], db: Session) -> WorkflowGraph:
+def validate_workflow_definition(definition: dict[str, Any], db: Session, *, workspace_id: str | None = None) -> WorkflowGraph:
     graph = _build_graph(definition)
     errors = _validate_graph_shape(graph)
-    errors.extend(_validate_config_references(graph, db))
+    errors.extend(_validate_config_references(graph, db, workspace_id=workspace_id))
     errors.extend(_validate_branch_shape(graph))
-    warnings = _workflow_warnings(graph, db)
+    warnings = _workflow_warnings(graph, db, workspace_id=workspace_id)
     if errors:
         raise WorkflowDefinitionError(errors)
     return WorkflowGraph(
@@ -255,7 +256,7 @@ def _prepare_workflow_run_execution(
             return
         workflow = db.get(WorkflowDefinition, run.workflow_id)
         try:
-            graph = validate_workflow_definition(_workflow_definition_for_run(run, workflow), db)
+            graph = validate_workflow_definition(_workflow_definition_for_run(run, workflow), db, workspace_id=run.workspace_id)
         except WorkflowDefinitionError as exc:
             _fail_run(db, run, "; ".join(exc.errors))
             return
@@ -998,7 +999,13 @@ def _raise_if_workflow_paused(
 def _create_classification_job(document_id: str, classifier_id: str) -> str:
     db = SessionLocal()
     try:
-        job = ClassificationJob(document_id=document_id, classifier_id=classifier_id, status="queued")
+        document = db.get(Document, document_id)
+        job = ClassificationJob(
+            workspace_id=document.workspace_id if document else None,
+            document_id=document_id,
+            classifier_id=classifier_id,
+            status="queued",
+        )
         db.add(job)
         db.flush()
         log_audit_event(
@@ -1047,7 +1054,14 @@ def _classification_node_result(job_id: str, classifier_id: str) -> dict[str, An
 def _create_extraction_job(document_id: str, schema_id: str) -> str:
     db = SessionLocal()
     try:
-        job = ExtractionJob(document_id=document_id, schema_id=schema_id, schema_version=1, status="queued")
+        document = db.get(Document, document_id)
+        job = ExtractionJob(
+            workspace_id=document.workspace_id if document else None,
+            document_id=document_id,
+            schema_id=schema_id,
+            schema_version=1,
+            status="queued",
+        )
         db.add(job)
         db.flush()
         log_audit_event(
@@ -1096,7 +1110,13 @@ def _kie_node_result(job_id: str, schema_id: str) -> dict[str, Any]:
 def _create_required_job(document_id: str, checklist_id: str) -> str:
     db = SessionLocal()
     try:
-        job = RequiredFieldCheckJob(document_id=document_id, checklist_id=checklist_id, status="queued")
+        document = db.get(Document, document_id)
+        job = RequiredFieldCheckJob(
+            workspace_id=document.workspace_id if document else None,
+            document_id=document_id,
+            checklist_id=checklist_id,
+            status="queued",
+        )
         db.add(job)
         db.flush()
         log_audit_event(
@@ -1144,7 +1164,13 @@ def _required_node_result(job_id: str, checklist_id: str) -> dict[str, Any]:
 
 def _execute_classifier_node(db: Session, document_id: str, node: dict[str, Any]) -> dict[str, Any]:
     classifier_id = _node_config_value(node, "classifier_id")
-    job = ClassificationJob(document_id=document_id, classifier_id=classifier_id, status="queued")
+    document = db.get(Document, document_id)
+    job = ClassificationJob(
+        workspace_id=document.workspace_id if document else None,
+        document_id=document_id,
+        classifier_id=classifier_id,
+        status="queued",
+    )
     db.add(job)
     db.flush()
     log_audit_event(
@@ -1184,7 +1210,14 @@ def _execute_classifier_node(db: Session, document_id: str, node: dict[str, Any]
 
 def _execute_kie_node(db: Session, document_id: str, node: dict[str, Any]) -> dict[str, Any]:
     schema_id = _node_config_value(node, "schema_id")
-    job = ExtractionJob(document_id=document_id, schema_id=schema_id, schema_version=1, status="queued")
+    document = db.get(Document, document_id)
+    job = ExtractionJob(
+        workspace_id=document.workspace_id if document else None,
+        document_id=document_id,
+        schema_id=schema_id,
+        schema_version=1,
+        status="queued",
+    )
     db.add(job)
     db.flush()
     log_audit_event(
@@ -1224,7 +1257,13 @@ def _execute_kie_node(db: Session, document_id: str, node: dict[str, Any]) -> di
 
 def _execute_required_node(db: Session, document_id: str, node: dict[str, Any]) -> dict[str, Any]:
     checklist_id = _node_config_value(node, "checklist_id")
-    job = RequiredFieldCheckJob(document_id=document_id, checklist_id=checklist_id, status="queued")
+    document = db.get(Document, document_id)
+    job = RequiredFieldCheckJob(
+        workspace_id=document.workspace_id if document else None,
+        document_id=document_id,
+        checklist_id=checklist_id,
+        status="queued",
+    )
     db.add(job)
     db.flush()
     log_audit_event(
@@ -1460,7 +1499,7 @@ def _validate_graph_shape(graph: WorkflowGraph) -> list[str]:
     return errors
 
 
-def _validate_config_references(graph: WorkflowGraph, db: Session) -> list[str]:
+def _validate_config_references(graph: WorkflowGraph, db: Session, *, workspace_id: str | None = None) -> list[str]:
     errors: list[str] = []
     input_nodes = [node_id for node_id, node in graph.nodes.items() if _node_kind(node) == "input"]
     active_node_ids = _reachable_node_ids(graph, input_nodes[0]) if input_nodes else set(graph.nodes)
@@ -1471,17 +1510,17 @@ def _validate_config_references(graph: WorkflowGraph, db: Session) -> list[str]:
         if kind == "classifier":
             classifier_id = _node_config_value(node, "classifier_id")
             classifier = db.get(DocumentClassifier, classifier_id) if classifier_id else None
-            if not classifier or classifier.archived:
+            if not classifier or classifier.archived or (workspace_id is not None and classifier.workspace_id != workspace_id):
                 errors.append(f"Classifier node {node_id} must select a saved classifier")
         if kind == "kie":
             schema_id = _node_config_value(node, "schema_id")
             schema = db.get(Schema, schema_id) if schema_id else None
-            if not schema or schema.archived or schema.ephemeral:
+            if not schema or schema.archived or schema.ephemeral or (workspace_id is not None and schema.workspace_id != workspace_id):
                 errors.append(f"KIE node {node_id} must select a saved schema")
         if kind == "required-checker":
             checklist_id = _node_config_value(node, "checklist_id")
             checklist = db.get(RequiredFieldChecklist, checklist_id) if checklist_id else None
-            if not checklist or checklist.archived:
+            if not checklist or checklist.archived or (workspace_id is not None and checklist.workspace_id != workspace_id):
                 errors.append(f"Required Field Checker node {node_id} must select a saved checklist")
     return errors
 
@@ -1501,7 +1540,7 @@ def _validate_branch_shape(graph: WorkflowGraph) -> list[str]:
     return errors
 
 
-def _workflow_warnings(graph: WorkflowGraph, db: Session) -> list[str]:
+def _workflow_warnings(graph: WorkflowGraph, db: Session, *, workspace_id: str | None = None) -> list[str]:
     warnings: list[str] = []
     input_nodes = [node_id for node_id, node in graph.nodes.items() if _node_kind(node) == "input"]
     if input_nodes:
@@ -1522,7 +1561,7 @@ def _workflow_warnings(graph: WorkflowGraph, db: Session) -> list[str]:
         classifier_node = graph.nodes.get(incoming[0]["source"])
         classifier_id = _node_config_value(classifier_node or {}, "classifier_id")
         classifier = db.get(DocumentClassifier, classifier_id) if classifier_id else None
-        if not classifier:
+        if not classifier or (workspace_id is not None and classifier.workspace_id != workspace_id):
             continue
         config = _json_or_empty(classifier.config_json)
         for candidate in config.get("classes", []):
@@ -1755,6 +1794,7 @@ def _workflow_run_counters(run: WorkflowRun, items: list[WorkflowRunItem]) -> di
 
 def _workflow_run_counters_from_status_counts(run: WorkflowRun, status_counts: dict[str, int]) -> dict[str, Any]:
     uploaded_count = sum(status_counts.values())
+    completed_count = status_counts.get("completed", 0)
     terminal_count = _workflow_terminal_count(status_counts)
     preprocessing_count = status_counts.get("preprocessing", 0) + status_counts.get("waiting_for_document", 0)
     queued_count = status_counts.get("queued", 0)
@@ -1777,6 +1817,7 @@ def _workflow_run_counters_from_status_counts(run: WorkflowRun, status_counts: d
     return {
         "status": status,
         "uploaded_count": uploaded_count,
+        "completed_count": completed_count,
         "preprocessing_count": preprocessing_count,
         "ready_count": max(0, uploaded_count - preprocessing_count),
         "queued_count": queued_count,

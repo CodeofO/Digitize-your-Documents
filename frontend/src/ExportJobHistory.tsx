@@ -85,6 +85,7 @@ export function ExportJobHistory(props: {
                   <strong>{job.filename || `${job.format.toUpperCase()} 생성 중`}</strong>
                   <div className="export-history-meta">
                     <span className={`status-badge ${job.status}`}>{exportJobStatusLabel(job.status)}</span>
+                    <span className="export-format-badge">{job.format.toUpperCase()}</span>
                     <span>{formatExportJobTime(job.completed_at || job.started_at || job.created_at)}</span>
                     <span>{formatExportJobSize(job.size_bytes)}</span>
                   </div>

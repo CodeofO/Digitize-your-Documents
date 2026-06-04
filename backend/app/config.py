@@ -19,12 +19,6 @@ DEFAULT_CORS_ALLOWED_ORIGINS = [
 DEFAULT_CORS_ALLOW_ORIGIN_REGEX = r"^http://(localhost|127\.0\.0\.1):\d+$"
 DEFAULT_ENV_VALUES = {
     "APP_ENV": "local",
-    "ACCESS_CONTROL_MODE": "disabled",
-    "APP_ACCESS_SECRET": "",
-    "SESSION_SECRET_KEY": "",
-    "SESSION_TTL_SECONDS": "86400",
-    "SESSION_COOKIE_SECURE": "false",
-    "SESSION_COOKIE_SAMESITE": "lax",
     "CORS_ALLOWED_ORIGINS": "",
     "CORS_ALLOW_ORIGIN_REGEX": "",
     "ALLOW_RUNTIME_SETTINGS": "false",
@@ -71,12 +65,6 @@ DEFAULT_ENV_VALUES = {
 
 class Settings(BaseSettings):
     app_env: str = "local"
-    access_control_mode: str = "disabled"
-    app_access_secret: str | None = None
-    session_secret_key: str | None = None
-    session_ttl_seconds: int = 86400
-    session_cookie_secure: bool = False
-    session_cookie_samesite: str = "lax"
     database_url: str | None = None
     document_storage_dir: str | None = None
     raw_storage_dir: str | None = None
@@ -187,20 +175,6 @@ class Settings(BaseSettings):
     @property
     def runtime_settings_writable(self) -> bool:
         return not self.is_production or self.allow_runtime_settings
-
-    @property
-    def auth_required(self) -> bool:
-        mode = (self.access_control_mode or "disabled").strip().lower()
-        return mode == "shared_secret" and bool((self.app_access_secret or "").strip())
-
-    @property
-    def resolved_session_secret_key(self) -> str | None:
-        return (self.session_secret_key or self.app_access_secret or "").strip() or None
-
-    @property
-    def normalized_session_cookie_samesite(self) -> str:
-        value = (self.session_cookie_samesite or "lax").strip().lower()
-        return value if value in {"lax", "strict", "none"} else "lax"
 
     @property
     def resolved_upload_retention_hours(self) -> int:

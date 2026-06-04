@@ -3,9 +3,11 @@ import asyncio
 import io
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 import zipfile
@@ -19,7 +21,17 @@ except ImportError:  # pragma: no cover - compatibility for older PyMuPDF instal
 from PIL import Image
 
 from app.config import get_settings
-from app.models import Batch, ClassificationBatch, Document, ExportJob, RequiredFieldCheckBatch, WorkflowRun, WorkflowRunItem
+from app.models import (
+    AuditEvent,
+    Batch,
+    ClassificationBatch,
+    Document,
+    ExportJob,
+    RawExtraction,
+    RequiredFieldCheckBatch,
+    WorkflowRun,
+    WorkflowRunItem,
+)
 from tests.conftest import get_client
 
 
@@ -45,6 +57,17 @@ def wait_for_export_job(client, job_id: str) -> dict[str, Any]:
             return payload
         time.sleep(0.01)
     raise AssertionError(f"Export job did not finish: {job_id}")
+
+
+def _read_env_example(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
 
 
 def test_health() -> None:
@@ -295,59 +318,179 @@ def test_vlm_settings_are_readonly_in_production(monkeypatch, tmp_path) -> None:
 
 
 def test_cors_origin_env_parser() -> None:
-    from app.config import parse_cors_allowed_origins
+    from app.config import parse_cors_allowed_origins, resolved_cors_allow_origin_regex
 
     assert parse_cors_allowed_origins("https://app.example.com, https://admin.example.com") == [
         "https://app.example.com",
         "https://admin.example.com",
     ]
+    default_origins = parse_cors_allowed_origins("")
+    assert "http://127.0.0.1:5173" in default_origins
+    assert "http://localhost:4173" in default_origins
+    default_regex = resolved_cors_allow_origin_regex(None)
+    assert default_regex is not None
+    assert re.match(default_regex, "http://127.0.0.1:53123")
+    assert re.match(default_regex, "http://localhost:53123")
+    assert not re.match(default_regex, "https://example.com")
 
 
-def test_shared_secret_auth_and_csrf(monkeypatch) -> None:
-    monkeypatch.setenv("ACCESS_CONTROL_MODE", "shared_secret")
-    monkeypatch.setenv("APP_ACCESS_SECRET", "test-access-code")
-    monkeypatch.setenv("SESSION_SECRET_KEY", "test-session-secret")
-    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
+def test_production_env_examples_disable_local_cors_regex() -> None:
+    from app.config import resolved_cors_allow_origin_regex
+
+    root = Path(__file__).resolve().parents[2]
+    production_values = _read_env_example(root / "backend/.env.production.example")
+    assert production_values["APP_ENV"] == "production"
+    cors_regex = resolved_cors_allow_origin_regex(production_values["CORS_ALLOW_ORIGIN_REGEX"])
+    assert cors_regex == "^$"
+    assert not re.match(cors_regex, "http://localhost:53123")
+    assert not re.match(cors_regex, "http://127.0.0.1:53123")
+
+    local_values = _read_env_example(root / ".env.example")
+    assert local_values["APP_ENV"] == "development"
+    assert local_values["VLM_PROVIDER"] == "mock"
+
+
+def test_production_security_headers(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("SECURITY_HEADERS_ENABLED", "true")
     get_settings.cache_clear()
 
     try:
-        with get_client() as client:
-            blocked = client.get("/api/documents")
-            assert blocked.status_code == 401
-
-            bad = client.post("/api/auth/session", json={"access_code": "wrong"})
-            assert bad.status_code == 401
-
-            created = client.post("/api/auth/session", json={"access_code": "test-access-code"})
-            assert created.status_code == 200, created.text
-            payload = created.json()
-            assert payload["authenticated"] is True
-            assert payload["csrf_token"]
-            assert "httponly" in created.headers["set-cookie"].lower()
-
-            allowed = client.get("/api/documents")
-            assert allowed.status_code == 200
-
-            missing_csrf = client.post("/api/schemas", json={"name": "blocked", "fields": []})
-            assert missing_csrf.status_code == 403
-
-            created_schema = client.post(
-                "/api/schemas",
-                headers={"X-CSRF-Token": payload["csrf_token"]},
-                json={
-                    "name": "csrf_allowed",
-                    "fields": [
-                        {"key_name": "field", "description": "visible field", "output_format": "string"},
-                    ],
-                },
-            )
-            assert created_schema.status_code == 200, created_schema.text
+        with TestClient(app, base_url="https://testserver") as client:
+            health = client.get("/api/health")
+            assert health.status_code == 200
+            assert health.headers["x-content-type-options"] == "nosniff"
+            assert health.headers["x-frame-options"] == "DENY"
+            assert health.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+            assert "camera=()" in health.headers["permissions-policy"]
+            assert "default-src 'self'" in health.headers["content-security-policy"]
     finally:
-        monkeypatch.delenv("ACCESS_CONTROL_MODE", raising=False)
-        monkeypatch.delenv("APP_ACCESS_SECRET", raising=False)
-        monkeypatch.delenv("SESSION_SECRET_KEY", raising=False)
-        monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+        monkeypatch.delenv("APP_ENV", raising=False)
+        monkeypatch.delenv("SECURITY_HEADERS_ENABLED", raising=False)
         get_settings.cache_clear()
+
+
+def test_bank_poc_template_seed_is_idempotent() -> None:
+    with get_client() as client:
+        seeded = client.post("/api/templates/bank-documents-poc/seed")
+        assert seeded.status_code == 200, seeded.text
+        payload = seeded.json()
+        assert payload["template_key"] == "bank_documents_poc"
+        assert all(payload["created"].values())
+        assert payload["schema"]["name"] == "은행 서류 핵심 정보"
+        assert [field["key_name"] for field in payload["schema"]["fields"]] == ["문서번호", "고객명", "신청일", "금액", "발급기관"]
+        assert payload["classifier"]["name"] == "bank_document_classifier"
+        assert [item["class_name"] for item in payload["classifier"]["classes"]] == ["신청서", "동의서", "증빙문서"]
+        assert payload["checklist"]["name"] == "bank_required_fields"
+        assert payload["workflow"]["name"] == "은행 서류 자동 분류 및 검수"
+        assert payload["workflow"]["validation_warnings"] == []
+        definition = payload["workflow"]["definition"]
+        nodes_by_id = {node["id"]: node for node in definition["nodes"]}
+        assert nodes_by_id["classifier"]["data"]["config"]["classifier_id"] == payload["classifier"]["id"]
+        assert nodes_by_id["branch"]["data"]["branchKeys"] == [
+            "class:신청서",
+            "class:동의서",
+            "class:증빙문서",
+            "unknown",
+        ]
+        assert nodes_by_id["kie_application"]["data"]["config"]["schema_id"] == payload["schema"]["id"]
+        assert nodes_by_id["kie_supporting"]["data"]["config"]["schema_id"] == payload["schema"]["id"]
+        assert nodes_by_id["required_application"]["data"]["config"]["checklist_id"] == payload["checklist"]["id"]
+        assert nodes_by_id["required_consent"]["data"]["config"]["checklist_id"] == payload["checklist"]["id"]
+        assert nodes_by_id["required_application"]["position"]["x"] == pytest.approx(970.3101983002833)
+        assert nodes_by_id["required_application"]["position"]["y"] == pytest.approx(43.8229461756374)
+        assert nodes_by_id["merge"]["position"]["x"] == pytest.approx(964.9985835694051)
+        assert nodes_by_id["merge"]["position"]["y"] == pytest.approx(234.41218130311614)
+        assert nodes_by_id["kie_application"]["position"]["y"] < nodes_by_id["required_consent"]["position"]["y"] < nodes_by_id["kie_supporting"]["position"]["y"]
+        assert {
+            edge.get("sourceHandle")
+            for edge in definition["edges"]
+            if edge["source"] == "branch"
+        } == {
+            "class:신청서",
+            "class:동의서",
+            "class:증빙문서",
+            "unknown",
+        }
+        sample_documents = payload["sample_documents"]
+        assert len(sample_documents) == 3
+        assert payload["sample_document"]["document_id"] == sample_documents[0]["document_id"]
+        assert [document["library_path"] for document in sample_documents] == [
+            "bank-poc/bank_00006.jpg",
+            "bank-poc/bank_00008.jpg",
+            "bank-poc/bank_00018.jpeg",
+        ]
+        assert [document["source_path"] for document in sample_documents] == [
+            "assets/sample/bank_00006.jpg",
+            "assets/sample/bank_00008.jpg",
+            "assets/sample/bank_00018.jpeg",
+        ]
+        assert all(document["source_note"] == "사용자 제공 로컬 샘플 자산" for document in sample_documents)
+        assert all(document["status"] == "ready" for document in sample_documents)
+
+        reseeded = client.post("/api/templates/bank-documents-poc/seed")
+        assert reseeded.status_code == 200, reseeded.text
+        reseeded_payload = reseeded.json()
+        assert not any(reseeded_payload["created"].values())
+        assert reseeded_payload["schema"]["id"] == payload["schema"]["id"]
+        assert reseeded_payload["workflow"]["id"] == payload["workflow"]["id"]
+        assert [document["document_id"] for document in reseeded_payload["sample_documents"]] == [
+            document["document_id"] for document in sample_documents
+        ]
+
+
+def test_bank_poc_seed_migrates_legacy_english_schema() -> None:
+    with get_client() as client:
+        legacy = client.post(
+            "/api/schemas",
+            json={
+                "name": "bank_document_core_fields",
+                "display_name": "은행 서류 핵심 정보",
+                "fields": [
+                    {"key_name": "document_number", "description": "legacy", "output_format": "string"},
+                ],
+            },
+        )
+        assert legacy.status_code == 200, legacy.text
+        legacy_classifier = client.post(
+            "/api/document-classifiers",
+            json={
+                "name": "bank_document_classifier",
+                "description": "legacy english classifier",
+                "allow_unknown": True,
+                "classes": [
+                    {"class_name": "application_form", "description": "legacy", "signals": ["application"]},
+                    {"class_name": "consent_form", "description": "legacy", "signals": ["consent"]},
+                    {"class_name": "supporting_document", "description": "legacy", "signals": ["support"]},
+                ],
+            },
+        )
+        assert legacy_classifier.status_code == 200, legacy_classifier.text
+
+        seeded = client.post("/api/templates/bank-documents-poc/seed")
+        assert seeded.status_code == 200, seeded.text
+        payload = seeded.json()
+        assert payload["created"]["schema"] is False
+        assert payload["created"]["classifier"] is False
+        assert payload["schema"]["name"] == "은행 서류 핵심 정보"
+        assert [field["key_name"] for field in payload["schema"]["fields"]] == ["문서번호", "고객명", "신청일", "금액", "발급기관"]
+        assert [item["class_name"] for item in payload["classifier"]["classes"]] == ["신청서", "동의서", "증빙문서"]
+        nodes_by_id = {node["id"]: node for node in payload["workflow"]["definition"]["nodes"]}
+        assert nodes_by_id["branch"]["data"]["branchKeys"] == ["class:신청서", "class:동의서", "class:증빙문서", "unknown"]
+        assert nodes_by_id["kie_application"]["data"]["config"]["schema_id"] == payload["schema"]["id"]
+        assert nodes_by_id["kie_supporting"]["data"]["config"]["schema_id"] == payload["schema"]["id"]
+        assert {
+            edge.get("sourceHandle")
+            for edge in payload["workflow"]["definition"]["edges"]
+            if edge["source"] == "branch"
+        } == {"class:신청서", "class:동의서", "class:증빙문서", "unknown"}
+        active_schema_names = [schema["name"] for schema in client.get("/api/schemas").json()]
+        assert "은행 서류 핵심 정보" in active_schema_names
+        assert "bank_document_core_fields" not in active_schema_names
 
 
 def test_upload_rejects_content_type_spoof() -> None:
@@ -473,18 +616,75 @@ def test_retention_cleanup_removes_expired_uploads(monkeypatch) -> None:
                 row = db.get(Document, document["document_id"])
                 assert row is not None
                 storage_path = row.storage_path
+                extra_root = Path(storage_path).parent.parent / "retention-extra"
+                raw_root = extra_root / "raw-expired"
+                export_root = extra_root / "exports"
+                raw_root.mkdir(parents=True, exist_ok=True)
+                export_root.mkdir(parents=True, exist_ok=True)
+                raw_source = raw_root / "content.bin"
+                raw_pdf = raw_root / "preview.pdf"
+                raw_html = raw_root / "preview.html"
+                export_file = export_root / "workflow.xlsx"
+                for path in [raw_source, raw_pdf, raw_html, export_file]:
+                    path.write_bytes(b"expired")
                 row.created_at = datetime.utcnow() - timedelta(hours=2)
                 for page in row.pages:
                     page.created_at = datetime.utcnow() - timedelta(hours=2)
+                raw = RawExtraction(
+                    filename="expired-source.docx",
+                    source_format="docx",
+                    size_bytes=7,
+                    storage_path=str(raw_source),
+                    pdf_path=str(raw_pdf),
+                    html_path=str(raw_html),
+                    status="completed",
+                    created_at=datetime.utcnow() - timedelta(hours=2),
+                )
+                export = ExportJob(
+                    owner_type="workflow_run",
+                    owner_id="expired-run",
+                    format="xlsx",
+                    status="completed",
+                    filename="workflow.xlsx",
+                    storage_path=str(export_file),
+                    content_type=XLSX_MIME,
+                    size_bytes=7,
+                    created_at=datetime.utcnow() - timedelta(hours=2),
+                )
+                audit = AuditEvent(
+                    entity_type="workflow_run",
+                    entity_id="expired-run",
+                    action="completed",
+                    message="expired audit",
+                    created_at=datetime.utcnow() - timedelta(hours=2),
+                )
+                db.add_all([raw, export, audit])
                 db.commit()
+                raw_id = raw.id
+                export_id = export.id
+                audit_id = audit.id
             finally:
                 db.close()
 
             cleaned = client.post("/api/maintenance/retention-cleanup")
             assert cleaned.status_code == 200, cleaned.text
-            assert cleaned.json()["status"] == "cleaned"
+            payload = cleaned.json()
+            assert payload["status"] == "cleaned"
+            assert payload["counts"]["documents"] >= 1
+            assert payload["counts"]["raw_extractions"] >= 1
+            assert payload["counts"]["export_jobs"] >= 1
+            assert payload["counts"]["audit_events"] >= 1
             assert client.get(f"/api/documents/{document['document_id']}").status_code == 404
             assert not os.path.exists(os.path.dirname(storage_path))
+            assert not raw_root.exists()
+            assert not export_root.exists()
+            db = SessionLocal()
+            try:
+                assert db.get(RawExtraction, raw_id) is None
+                assert db.get(ExportJob, export_id) is None
+                assert db.get(AuditEvent, audit_id) is None
+            finally:
+                db.close()
     finally:
         monkeypatch.delenv("UPLOAD_RETENTION_HOURS", raising=False)
         get_settings.cache_clear()
@@ -1277,6 +1477,69 @@ def test_required_field_checklist_recommendation_mock_mode() -> None:
             assert {item["region_id"] for item in payload["items"] if item["region_id"]} <= {
                 region["id"] for region in payload["regions"]
             }
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_ai_draft_mock_mode_does_not_persist_sample_images() -> None:
+    from app.database import SessionLocal, init_db
+
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        init_db()
+        db = SessionLocal()
+        try:
+            before_documents = db.query(Document).count()
+            before_batches = db.query(Batch).count()
+        finally:
+            db.close()
+
+        with get_client() as client:
+            response = client.post(
+                "/api/workflows/ai-draft",
+                files=[
+                    ("files", ("sample-one.png", ONE_BY_ONE_PNG, "image/png")),
+                    ("files", ("sample-two.png", ONE_BY_ONE_PNG, "image/png")),
+                ],
+            )
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert payload["sample_count"] == 2
+            assert payload["images_persisted"] is False
+            assert payload["schema_draft"]["name"] == "ai_recommended_schema"
+            assert len(payload["schema_draft"]["fields"]) >= 3
+            assert payload["checklist_draft"]["name"] == "ai_recommended_checklist"
+            assert len(payload["definition"]["nodes"]) == 5
+            assert any(node["id"] == "ai_kie" for node in payload["definition"]["nodes"])
+            assert any(node["id"] == "ai_required" for node in payload["definition"]["nodes"])
+
+        db = SessionLocal()
+        try:
+            assert db.query(Document).count() == before_documents
+            assert db.query(Batch).count() == before_batches
+        finally:
+            db.close()
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_ai_draft_rejects_more_than_ten_images() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        with get_client() as client:
+            response = client.post(
+                "/api/workflows/ai-draft",
+                files=[
+                    ("files", (f"sample-{index}.png", ONE_BY_ONE_PNG, "image/png"))
+                    for index in range(11)
+                ],
+            )
+            assert response.status_code == 413, response.text
+            assert "up to 10" in response.json()["detail"]
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
@@ -2640,9 +2903,10 @@ def test_workflow_summary_polling_uses_aggregate_counts_without_result_payloads(
     summary = summary_response.json()
     assert summary["items"] == []
     assert summary["status"] == "completed_with_errors"
-    assert summary["completed_count"] == 4
+    assert summary["completed_count"] == 1
     assert summary["failed_count"] == 1
     assert summary["needs_review_count"] == 1
+    assert summary["canceled_count"] == 1
     assert summary["progress"] == 1
 
     assert list_response.status_code == 200, list_response.text
@@ -2723,7 +2987,7 @@ def test_workflow_summary_polling_handles_1000_item_run_with_stable_counts() -> 
     assert summary["items"] == []
     assert summary["total_count"] == 1000
     assert summary["uploaded_count"] == 1000
-    assert summary["completed_count"] == 875
+    assert summary["completed_count"] == 700
     assert summary["needs_review_count"] == 100
     assert summary["failed_count"] == 50
     assert summary["canceled_count"] == 25

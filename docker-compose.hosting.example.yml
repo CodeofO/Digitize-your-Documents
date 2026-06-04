@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: digitize
       POSTGRES_USER: digitize
-      POSTGRES_PASSWORD: replace-password
+      POSTGRES_PASSWORD: replace-secret
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -14,20 +14,39 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: "no"
+    env_file:
+      - ${BACKEND_ENV_FILE:-backend/.env.production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - backend_data:/data
+    command: ["alembic", "upgrade", "head"]
+
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
     env_file:
-      - backend/.env.production
+      - ${BACKEND_ENV_FILE:-backend/.env.production}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - backend_data:/data
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   minio:
     image: minio/minio:latest

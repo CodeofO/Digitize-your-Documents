@@ -1,0 +1,123 @@
+{
+  "name": "bank_documents_poc",
+  "description": "Bank document classification, extraction, required-field checking, and export demo template.",
+  "schema": {
+    "name": "은행 서류 핵심 정보",
+    "display_name": "은행 서류 핵심 정보",
+    "description": "은행 접수 서류에서 문서번호, 고객명, 신청일, 금액, 발급기관을 추출합니다.",
+    "fields": [
+      {
+        "key_name": "문서번호",
+        "description": "문서번호, 접수번호, 신청번호 또는 거래번호입니다.",
+        "output_format": "string"
+      },
+      {
+        "key_name": "고객명",
+        "description": "고객명, 신청인명 또는 문서가 귀속되는 사람/조직입니다.",
+        "output_format": "string"
+      },
+      {
+        "key_name": "신청일",
+        "description": "신청일, 작성일, 발급일 또는 거래일입니다.",
+        "output_format": "date"
+      },
+      {
+        "key_name": "금액",
+        "description": "대출 금액, 신청 금액, 거래 금액 또는 최종 합계입니다.",
+        "output_format": "float"
+      },
+      {
+        "key_name": "발급기관",
+        "description": "은행, 지점, 발급기관 또는 담당 조직입니다.",
+        "output_format": "string"
+      }
+    ]
+  },
+  "classifier": {
+    "name": "bank_document_classifier",
+    "description": "은행 업무 접수 문서를 한글 class인 신청서, 동의서, 증빙문서로 분류합니다.",
+    "allow_unknown": true,
+    "classes": [
+      {
+        "class_name": "신청서",
+        "description": "대출, 계좌, 카드, 거래 신청을 위한 신청서입니다.",
+        "signals": ["신청서", "신청인", "금액", "계좌", "대출"]
+      },
+      {
+        "class_name": "동의서",
+        "description": "개인정보, 신용정보, 고유식별정보 조회 또는 제공 동의서입니다.",
+        "signals": ["동의", "개인정보", "신용정보", "조회", "제공"]
+      },
+      {
+        "class_name": "증빙문서",
+        "description": "신분증, 소득, 재직, 거래 내역 등 신청을 뒷받침하는 증빙 문서입니다.",
+        "signals": ["증명", "확인서", "내역", "발급", "소득", "재직"]
+      }
+    ]
+  },
+  "required_checklist": {
+    "name": "bank_required_fields",
+    "description": "은행 접수 전 누락되면 안 되는 필수 표시를 확인합니다.",
+    "regions": [
+      {
+        "id": "signature_region",
+        "name": "서명/날인 영역",
+        "page": 1,
+        "x": 0.55,
+        "y": 0.72,
+        "width": 0.35,
+        "height": 0.16
+      }
+    ],
+    "items": [
+      {
+        "item_name": "고객명",
+        "description": "고객명 또는 신청인 성명이 작성되어 있는지 확인합니다.",
+        "evidence_type": "text_or_handwriting",
+        "required": true
+      },
+      {
+        "item_name": "작성일",
+        "description": "신청일, 작성일 또는 동의일이 작성되어 있는지 확인합니다.",
+        "evidence_type": "text_or_handwriting",
+        "required": true
+      },
+      {
+        "item_name": "필수 동의 체크",
+        "description": "필수 동의 체크박스 또는 동의 표시가 존재하는지 확인합니다.",
+        "evidence_type": "checkbox",
+        "required": true
+      },
+      {
+        "item_name": "서명 또는 날인",
+        "description": "서명/날인 영역에 서명, 날인 또는 필기 표시가 있는지 확인합니다.",
+        "evidence_type": "signature_or_stamp",
+        "required": true,
+        "region_id": "signature_region"
+      }
+    ]
+  },
+  "workflow": {
+    "name": "은행 서류 자동 분류 및 검수",
+    "description": "문서를 분류한 뒤 신청서/동의서 경로에서 핵심 정보 추출과 필수 항목 확인을 실행하고 결과를 export합니다.",
+    "logical_nodes": ["input", "classifier", "branch", "kie", "required-checker", "merge", "export"]
+  },
+  "sample_documents": [
+    {
+      "filename": "bank_00006.jpg",
+      "source_path": "assets/sample/bank_00006.jpg",
+      "source_note": "사용자 제공 로컬 샘플 자산"
+    },
+    {
+      "filename": "bank_00008.jpg",
+      "source_path": "assets/sample/bank_00008.jpg",
+      "source_note": "사용자 제공 로컬 샘플 자산"
+    },
+    {
+      "filename": "bank_00018.jpeg",
+      "source_path": "assets/sample/bank_00018.jpeg",
+      "source_note": "사용자 제공 로컬 샘플 자산"
+    }
+  ],
+  "demo_success_message": "문서 N장 중 자동 완료, 검토 필요, 실패 수를 확인하고 XLSX export를 다운로드합니다."
+}

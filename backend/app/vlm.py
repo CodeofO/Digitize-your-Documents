@@ -949,7 +949,7 @@ def _mock_schema_recommendation() -> dict[str, Any]:
             },
             {
                 "key_name": "발급기관",
-                "description": "Organization, bank, vendor, or authority that issued the document.",
+                "description": "Organization, bank, vendor, or issuing body that issued the document.",
                 "output_format": "string",
             },
             {
@@ -959,7 +959,7 @@ def _mock_schema_recommendation() -> dict[str, Any]:
             },
             {
                 "key_name": "금액",
-                "description": "Final total, balance, transaction amount, or payment amount if one is visible.",
+                "description": "Final total, balance, or transaction amount if one is visible.",
                 "output_format": "float",
             },
         ],

@@ -8,7 +8,7 @@ declare global {
   }
 }
 
-const LOCAL_DEV_API_BASE = "http://localhost:8000";
+const LOCAL_DEV_API_PORT = "8000";
 
 export const API_BASE = resolveApiBaseUrl();
 
@@ -19,10 +19,10 @@ export function resolveApiBaseUrl() {
 }
 
 function defaultApiBaseUrl() {
-  if (typeof window === "undefined") return LOCAL_DEV_API_BASE;
-  const { hostname, port } = window.location;
+  if (typeof window === "undefined") return `http://localhost:${LOCAL_DEV_API_PORT}`;
+  const { protocol, hostname, port } = window.location;
   if ((hostname === "localhost" || hostname === "127.0.0.1") && port !== "8000") {
-    return LOCAL_DEV_API_BASE;
+    return `${protocol}//${hostname}:${LOCAL_DEV_API_PORT}`;
   }
   return "";
 }

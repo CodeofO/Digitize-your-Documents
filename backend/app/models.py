@@ -15,6 +15,7 @@ class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("doc"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String, nullable=False)
     mime_type: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -54,9 +55,13 @@ class DocumentConversionJob(Base):
 
 class DocumentLibraryFolder(Base):
     __tablename__ = "document_library_folders"
+    __table_args__ = (
+        Index("ix_document_library_folders_workspace_path", "workspace_id", "path", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("library_folder"))
-    path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    path: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
@@ -78,6 +83,7 @@ class Schema(Base):
     __tablename__ = "schemas"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("schema"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -101,6 +107,7 @@ class ExtractionJob(Base):
     __tablename__ = "extraction_jobs"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("job"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
     schema_id: Mapped[str] = mapped_column(ForeignKey("schemas.id"), nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -146,6 +153,7 @@ class RawExtraction(Base):
     __tablename__ = "raw_extractions"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("raw"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String, nullable=False)
     source_format: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -168,6 +176,7 @@ class DocumentClassifier(Base):
     __tablename__ = "document_classifiers"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classifier"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     allow_unknown: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -186,6 +195,7 @@ class ClassificationJob(Base):
     __tablename__ = "classification_jobs"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classification_job"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
     classifier_id: Mapped[str] = mapped_column(ForeignKey("document_classifiers.id"), nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
@@ -232,6 +242,7 @@ class ClassificationBatch(Base):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("classification_batch"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     classifier_id: Mapped[str] = mapped_column(ForeignKey("document_classifiers.id"), nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
     total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -271,6 +282,7 @@ class RequiredFieldChecklist(Base):
     __tablename__ = "required_field_checklists"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("checklist"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     config_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
@@ -288,6 +300,7 @@ class RequiredFieldCheckJob(Base):
     __tablename__ = "required_field_check_jobs"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("required_check_job"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), nullable=False)
     checklist_id: Mapped[str] = mapped_column(ForeignKey("required_field_checklists.id"), nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
@@ -334,6 +347,7 @@ class RequiredFieldCheckBatch(Base):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("required_check_batch"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     checklist_id: Mapped[str] = mapped_column(ForeignKey("required_field_checklists.id"), nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
     total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -376,6 +390,7 @@ class Batch(Base):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("batch"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     schema_id: Mapped[str] = mapped_column(ForeignKey("schemas.id"), nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
@@ -416,6 +431,7 @@ class ExportPreset(Base):
     __tablename__ = "export_presets"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("preset"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     schema_id: Mapped[str | None] = mapped_column(ForeignKey("schemas.id"), nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     fields_json: Mapped[str] = mapped_column(Text, nullable=False)
@@ -438,6 +454,7 @@ class ExportJob(Base):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("export_job"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     owner_type: Mapped[str] = mapped_column(String, nullable=False)
     owner_id: Mapped[str] = mapped_column(String, nullable=False)
     format: Mapped[str] = mapped_column(String, nullable=False)
@@ -456,6 +473,7 @@ class WorkflowDefinition(Base):
     __tablename__ = "workflow_definitions"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("workflow"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     definition_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
@@ -479,6 +497,7 @@ class WorkflowRun(Base):
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("workflow_run"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflow_definitions.id"), nullable=False)
     workflow_name: Mapped[str | None] = mapped_column(String, nullable=True)
     workflow_definition_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -535,6 +554,7 @@ class AuditEvent(Base):
     __tablename__ = "audit_events"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: new_id("audit"))
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     entity_type: Mapped[str] = mapped_column(String, nullable=False)
     entity_id: Mapped[str] = mapped_column(String, nullable=False)
     action: Mapped[str] = mapped_column(String, nullable=False)

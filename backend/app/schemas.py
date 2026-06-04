@@ -858,6 +858,16 @@ class WorkflowDefinitionUpdate(BaseModel):
         return value.strip() if value is not None else value
 
 
+class WorkflowAiDraftRead(BaseModel):
+    workflow_name: str
+    schema_draft: SchemaCreate
+    checklist_draft: RequiredFieldChecklistCreate | None = None
+    definition: dict[str, Any]
+    sample_count: int
+    images_persisted: bool = False
+    reasoning: str | None = None
+
+
 class WorkflowDefinitionRead(BaseModel):
     id: str
     name: str

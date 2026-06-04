@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import shutil
+import tempfile
 import threading
 from collections import Counter
 from collections.abc import AsyncIterator
@@ -24,21 +25,13 @@ from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from PIL import Image
 from pydantic import ValidationError
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from starlette.datastructures import FormData
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.audit import log_audit_event
-from app.auth import (
-    authenticate_access_code,
-    clear_session,
-    create_session,
-    is_public_api_path,
-    read_session,
-    require_session_for_request,
-)
-from app.config import DEFAULT_LIBREOFFICE_PATH, ROOT_ENV_PATH, get_settings, parse_cors_allowed_origins, resolved_cors_allow_origin_regex, upsert_root_env
+from app.config import DEFAULT_LIBREOFFICE_PATH, PROJECT_ROOT, ROOT_ENV_PATH, get_settings, parse_cors_allowed_origins, resolved_cors_allow_origin_regex, upsert_root_env
 from app.database import SessionLocal, get_db, init_db
 from app.document_processor import (
     DocumentProcessingError,
@@ -147,6 +140,7 @@ from app.schemas import (
     SystemStatusRead,
     VlmSettingsRead,
     VlmSettingsUpdate,
+    WorkflowAiDraftRead,
     WorkflowRunEnqueueRequest,
     WorkflowDefinitionCreate,
     WorkflowDefinitionRead,
@@ -194,6 +188,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Document Automation Workspace API", version="0.1.0", lifespan=lifespan)
 
 WORKFLOW_RUN_TERMINAL_STATUSES = {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}
+WORKFLOW_AI_DRAFT_MAX_IMAGES = 10
+WORKFLOW_AI_DRAFT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 WORKFLOW_ENQUEUE_BLOCKED_STATUSES = {"waiting", "failed", "canceled"}
 DOCUMENT_READY_STATUSES = {"ready"}
 DOCUMENT_CONVERTING_STATUSES = {"queued", "preprocessing"}
@@ -212,6 +208,13 @@ class ExportArtifact:
     filename: str
     content_type: str
 
+
+@dataclass
+class LocalUpload:
+    filename: str
+    content_type: str
+    file: Any
+
 settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
@@ -224,52 +227,43 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def auth_and_security_middleware(request: Request, call_next):
+async def security_headers_middleware(request: Request, call_next):
     settings = get_settings()
-    try:
-        if request.url.path.startswith("/api/") and request.method.upper() != "OPTIONS" and not is_public_api_path(request.url.path):
-            require_session_for_request(request, settings)
-    except StarletteHTTPException as exc:
-        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-
     response = await call_next(request)
     if settings.security_headers_enabled:
         _apply_security_headers(response)
     return response
 
 
-@app.get("/api/auth/session")
-def get_auth_session(request: Request) -> dict[str, Any]:
-    settings = get_settings()
-    if not settings.auth_required:
-        return {"authenticated": True, "csrf_token": None, "expires_at": None, "auth_required": False}
-    session = read_session(request, settings)
-    return {
-        "authenticated": bool(session),
-        "csrf_token": session.csrf_token if session else None,
-        "expires_at": session.expires_at if session else None,
-        "auth_required": True,
-    }
-
-
-@app.post("/api/auth/session")
-def create_auth_session(payload: dict[str, str], response: Response) -> dict[str, Any]:
-    settings = get_settings()
-    if not settings.auth_required:
-        return {"authenticated": True, "csrf_token": None, "expires_at": None, "auth_required": False}
-    if not authenticate_access_code(payload.get("access_code", ""), settings):
-        raise HTTPException(status_code=401, detail="Invalid access code")
-    return create_session(response, settings)
-
-
-@app.post("/api/auth/logout")
-def logout(response: Response) -> dict[str, Any]:
-    return clear_session(response, get_settings())
-
-
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def _current_workspace_id(request: Request) -> str | None:
+    return None
+
+
+def _scope_query(query, model, workspace_id: str | None):
+    if workspace_id is None:
+        return query
+    return query.filter(model.workspace_id == workspace_id)
+
+
+def _ensure_workspace_scope(row: Any, workspace_id: str | None, detail: str) -> None:
+    if not row:
+        raise HTTPException(status_code=404, detail=detail)
+    row_workspace_id = getattr(row, "workspace_id", None)
+    if workspace_id is not None and row_workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail=detail)
+
+
+def _require_workspace_admin_mode() -> None:
+    return None
+
+
+def _require_workspace_settings_admin(request: Request, db: Session) -> None:
+    return None
 
 
 @app.get("/api/system/status", response_model=SystemStatusRead)
@@ -290,6 +284,46 @@ def system_status() -> SystemStatusRead:
         document_page_max_long_edge=settings.document_page_max_long_edge,
         document_page_jpeg_quality=settings.document_page_jpeg_quality,
     )
+
+
+@app.post("/api/templates/bank-documents-poc/seed")
+def seed_bank_documents_poc(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    workspace_id = _current_workspace_id(request)
+    template = _load_bank_poc_template()
+    created: dict[str, bool] = {}
+
+    schema, created["schema"] = _seed_bank_poc_schema(db, template["schema"], workspace_id=workspace_id)
+    classifier, created["classifier"] = _seed_bank_poc_classifier(db, template["classifier"], workspace_id=workspace_id)
+    checklist, created["checklist"] = _seed_bank_poc_checklist(db, template["required_checklist"], workspace_id=workspace_id)
+    workflow, created["workflow"] = _seed_bank_poc_workflow(db, template["workflow"], schema, classifier, checklist, workspace_id=workspace_id)
+    documents, document_created = _seed_bank_poc_sample_documents(db, template.get("sample_documents", []), workspace_id=workspace_id)
+    created["sample_documents"] = any(document_created.values())
+
+    log_audit_event(
+        db,
+        entity_type="template",
+        entity_id="bank_documents_poc",
+        action="seeded",
+        message="Seeded bank documents PoC template",
+        metadata=created,
+    )
+    db.commit()
+    db.refresh(schema)
+    db.refresh(classifier)
+    db.refresh(checklist)
+    db.refresh(workflow)
+    for document in documents:
+        db.refresh(document)
+    return {
+        "template_key": template["name"],
+        "created": created,
+        "schema": _schema_read(schema),
+        "classifier": _classifier_read(classifier),
+        "checklist": _checklist_read(checklist),
+        "workflow": WorkflowDefinitionRead(**workflow_definition_to_read(workflow, db)),
+        "sample_document": _document_read(documents[0]) if documents else None,
+        "sample_documents": [_bank_poc_sample_document_read(document) for document in documents],
+    }
 
 
 @app.get("/api/settings/vlm", response_model=VlmSettingsRead)
@@ -314,7 +348,8 @@ def get_vlm_settings() -> VlmSettingsRead:
 
 
 @app.put("/api/settings/vlm", response_model=VlmSettingsRead)
-def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
+def update_vlm_settings(payload: VlmSettingsUpdate, request: Request, db: Session = Depends(get_db)) -> VlmSettingsRead:
+    _require_workspace_settings_admin(request, db)
     settings = get_settings()
     if not settings.runtime_settings_writable:
         raise HTTPException(status_code=403, detail="Runtime settings are disabled in production. Use hosting environment variables.")
@@ -349,17 +384,20 @@ def update_vlm_settings(payload: VlmSettingsUpdate) -> VlmSettingsRead:
 
 @app.post("/api/raw-extractions", response_model=RawExtractionRead)
 def upload_raw_extraction(
+    request: Request,
     file: UploadFile = File(...),
     include_images: bool = Form(default=True),
     include_formulas: bool = Form(default=False),
     db: Session = Depends(get_db),
 ) -> RawExtractionRead:
+    workspace_id = _current_workspace_id(request)
     try:
         source_format = validate_raw_upload(file.filename or "")[1:]
     except RawExtractionError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     raw = RawExtraction(
+        workspace_id=workspace_id,
         filename=file.filename or "uploaded_document",
         source_format=source_format,
         size_bytes=0,
@@ -403,11 +441,12 @@ def upload_raw_extraction(
 @app.post("/api/raw-extractions/from-document", response_model=RawExtractionRead)
 def create_raw_extraction_from_document(
     payload: RawExtractionFromDocumentRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RawExtractionRead:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, payload.document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
     if document.status == "deleted":
         raise HTTPException(status_code=410, detail="Original document was deleted")
     if document.status != "ready":
@@ -418,6 +457,7 @@ def create_raw_extraction_from_document(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     raw = RawExtraction(
+        workspace_id=workspace_id,
         filename=document.filename,
         source_format=source_format,
         size_bytes=document.size_bytes,
@@ -466,18 +506,20 @@ def create_raw_extraction_from_document(
 
 @app.get("/api/raw-extractions", response_model=list[RawExtractionRead])
 def list_raw_extractions(
+    request: Request,
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> list[RawExtractionRead]:
-    rows = db.query(RawExtraction).order_by(RawExtraction.created_at.desc()).limit(limit).all()
+    workspace_id = _current_workspace_id(request)
+    rows = _scope_query(db.query(RawExtraction), RawExtraction, workspace_id).order_by(RawExtraction.created_at.desc()).limit(limit).all()
     return [_raw_extraction_read(row) for row in rows]
 
 
 @app.get("/api/raw-extractions/{raw_id}/pdf")
-def get_raw_extraction_pdf(raw_id: str, db: Session = Depends(get_db)) -> FileResponse:
+def get_raw_extraction_pdf(raw_id: str, request: Request, db: Session = Depends(get_db)) -> FileResponse:
+    workspace_id = _current_workspace_id(request)
     raw = db.get(RawExtraction, raw_id)
-    if not raw:
-        raise HTTPException(status_code=404, detail="Raw extraction not found")
+    _ensure_workspace_scope(raw, workspace_id, "Raw extraction not found")
     if not raw.pdf_path:
         raise HTTPException(status_code=404, detail="Raw extraction PDF preview is not available")
     path = materialize_storage_ref(raw.pdf_path)
@@ -487,10 +529,10 @@ def get_raw_extraction_pdf(raw_id: str, db: Session = Depends(get_db)) -> FileRe
 
 
 @app.get("/api/raw-extractions/{raw_id}/html")
-def get_raw_extraction_html(raw_id: str, db: Session = Depends(get_db)) -> FileResponse:
+def get_raw_extraction_html(raw_id: str, request: Request, db: Session = Depends(get_db)) -> FileResponse:
+    workspace_id = _current_workspace_id(request)
     raw = db.get(RawExtraction, raw_id)
-    if not raw:
-        raise HTTPException(status_code=404, detail="Raw extraction not found")
+    _ensure_workspace_scope(raw, workspace_id, "Raw extraction not found")
     if not raw.html_path:
         raise HTTPException(status_code=404, detail="Raw extraction HTML is not available")
     path = materialize_storage_ref(raw.html_path)
@@ -500,16 +542,17 @@ def get_raw_extraction_html(raw_id: str, db: Session = Depends(get_db)) -> FileR
 
 
 @app.get("/api/raw-extractions/{raw_id}", response_model=RawExtractionRead)
-def get_raw_extraction(raw_id: str, db: Session = Depends(get_db)) -> RawExtractionRead:
+def get_raw_extraction(raw_id: str, request: Request, db: Session = Depends(get_db)) -> RawExtractionRead:
+    workspace_id = _current_workspace_id(request)
     raw = db.get(RawExtraction, raw_id)
-    if not raw:
-        raise HTTPException(status_code=404, detail="Raw extraction not found")
+    _ensure_workspace_scope(raw, workspace_id, "Raw extraction not found")
     return _raw_extraction_read(raw)
 
 
 @app.post("/api/documents", response_model=DocumentRead)
-def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)) -> DocumentRead:
-    document = _create_document_from_upload(file, db)
+def upload_document(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)) -> DocumentRead:
+    workspace_id = _current_workspace_id(request)
+    document = _create_document_from_upload(file, db, workspace_id=workspace_id)
     if not document.library_path:
         document.library_path = document.filename
     log_audit_event(
@@ -527,6 +570,7 @@ def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db))
 
 @app.post("/api/library/uploads", response_model=DocumentBatchUploadRead)
 async def upload_library_documents(request: Request, db: Session = Depends(get_db)) -> DocumentBatchUploadRead:
+    workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
@@ -536,7 +580,7 @@ async def upload_library_documents(request: Request, db: Session = Depends(get_d
     conversion_job_ids: list[str] = []
     try:
         for index, file in enumerate(files):
-            document, conversion_job_id = _create_queued_library_document(file, db, library_path=library_paths[index])
+            document, conversion_job_id = _create_queued_library_document(file, db, library_path=library_paths[index], workspace_id=workspace_id)
             documents.append(document)
             conversion_job_ids.append(conversion_job_id)
             log_audit_event(
@@ -566,6 +610,7 @@ async def upload_library_documents(request: Request, db: Session = Depends(get_d
 
 @app.get("/api/documents", response_model=list[DocumentRead])
 def list_documents(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     q: str | None = Query(default=None),
@@ -574,13 +619,15 @@ def list_documents(
     include_deleted: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> list[DocumentRead]:
-    query = _document_library_query(db, include_deleted=include_deleted, status=status, q=q, library_path=library_path)
+    workspace_id = _current_workspace_id(request)
+    query = _document_library_query(db, include_deleted=include_deleted, status=status, q=q, library_path=library_path, workspace_id=workspace_id)
     documents = query.order_by(Document.created_at.desc(), Document.id.desc()).offset(offset).limit(limit).all()
     return [_document_read(document) for document in documents]
 
 
 @app.get("/api/documents/ids", response_model=list[str])
 def list_document_ids(
+    request: Request,
     limit: int = Query(default=10000, ge=1, le=20000),
     q: str | None = Query(default=None),
     library_path: str | None = Query(default=None),
@@ -588,21 +635,24 @@ def list_document_ids(
     include_deleted: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> list[str]:
-    query = _document_library_query(db, include_deleted=include_deleted, status=status, q=q, library_path=library_path)
+    workspace_id = _current_workspace_id(request)
+    query = _document_library_query(db, include_deleted=include_deleted, status=status, q=q, library_path=library_path, workspace_id=workspace_id)
     rows = query.order_by(Document.created_at.desc(), Document.id.desc()).with_entities(Document.id).limit(limit).all()
     return [row[0] for row in rows]
 
 
 @app.post("/api/documents/selection", response_model=DocumentBatchUploadRead)
-def get_selected_documents(payload: DocumentSelectionRequest, db: Session = Depends(get_db)) -> DocumentBatchUploadRead:
-    documents = _selected_library_documents(db, list(dict.fromkeys(payload.document_ids)))
+def get_selected_documents(payload: DocumentSelectionRequest, request: Request, db: Session = Depends(get_db)) -> DocumentBatchUploadRead:
+    workspace_id = _current_workspace_id(request)
+    documents = _selected_library_documents(db, list(dict.fromkeys(payload.document_ids)), workspace_id=workspace_id)
     return DocumentBatchUploadRead(documents=[_document_read(document) for document in documents])
 
 
 @app.post("/api/documents/delete", response_model=DocumentBatchUploadRead)
-def delete_selected_documents_from_library(payload: DocumentSelectionRequest, db: Session = Depends(get_db)) -> DocumentBatchUploadRead:
+def delete_selected_documents_from_library(payload: DocumentSelectionRequest, request: Request, db: Session = Depends(get_db)) -> DocumentBatchUploadRead:
+    workspace_id = _current_workspace_id(request)
     document_ids = list(dict.fromkeys(payload.document_ids))
-    documents = db.query(Document).filter(Document.id.in_(document_ids)).all()
+    documents = _scope_query(db.query(Document), Document, workspace_id).filter(Document.id.in_(document_ids)).all()
     by_id = {document.id: document for document in documents}
     missing = [document_id for document_id in document_ids if document_id not in by_id]
     if missing:
@@ -623,16 +673,18 @@ def delete_selected_documents_from_library(payload: DocumentSelectionRequest, db
 
 
 @app.get("/api/library/tree", response_model=DocumentTreeRead)
-def get_document_library_tree(include_deleted: bool = Query(default=False), db: Session = Depends(get_db)) -> DocumentTreeRead:
-    return _document_tree_read(db, include_deleted=include_deleted)
+def get_document_library_tree(request: Request, include_deleted: bool = Query(default=False), db: Session = Depends(get_db)) -> DocumentTreeRead:
+    workspace_id = _current_workspace_id(request)
+    return _document_tree_read(db, include_deleted=include_deleted, workspace_id=workspace_id)
 
 
 @app.post("/api/library/folders", response_model=DocumentTreeRead)
-def create_library_folder(payload: DocumentLibraryCreateFolderRequest, db: Session = Depends(get_db)) -> DocumentTreeRead:
+def create_library_folder(payload: DocumentLibraryCreateFolderRequest, request: Request, db: Session = Depends(get_db)) -> DocumentTreeRead:
+    workspace_id = _current_workspace_id(request)
     folder_path = _normalize_library_path(payload.folder_path)
     if not folder_path:
         raise HTTPException(status_code=422, detail="Folder path is required")
-    _ensure_library_folder_records(db, folder_path)
+    _ensure_library_folder_records(db, folder_path, workspace_id=workspace_id)
     log_audit_event(
         db,
         entity_type="document_library_folder",
@@ -642,27 +694,29 @@ def create_library_folder(payload: DocumentLibraryCreateFolderRequest, db: Sessi
         metadata={"path": folder_path},
     )
     db.commit()
-    return _document_tree_read(db)
+    return _document_tree_read(db, workspace_id=workspace_id)
 
 
 @app.post("/api/library/move", response_model=DocumentLibraryActionRead)
-def move_library_entries(payload: DocumentLibraryClipboardRequest, db: Session = Depends(get_db)) -> DocumentLibraryActionRead:
-    result = _move_library_entries(payload, db)
+def move_library_entries(payload: DocumentLibraryClipboardRequest, request: Request, db: Session = Depends(get_db)) -> DocumentLibraryActionRead:
+    workspace_id = _current_workspace_id(request)
+    result = _move_library_entries(payload, db, workspace_id=workspace_id)
     db.commit()
     return result
 
 
 @app.post("/api/library/copy", response_model=DocumentLibraryActionRead)
-def copy_library_entries(payload: DocumentLibraryClipboardRequest, db: Session = Depends(get_db)) -> DocumentLibraryActionRead:
-    result, conversion_job_ids = _copy_library_entries(payload, db)
+def copy_library_entries(payload: DocumentLibraryClipboardRequest, request: Request, db: Session = Depends(get_db)) -> DocumentLibraryActionRead:
+    workspace_id = _current_workspace_id(request)
+    result, conversion_job_ids = _copy_library_entries(payload, db, workspace_id=workspace_id)
     db.commit()
     for conversion_job_id in conversion_job_ids:
         _enqueue_document_conversion_job(conversion_job_id)
     return result
 
 
-def _document_tree_read(db: Session, *, include_deleted: bool = False) -> DocumentTreeRead:
-    query = db.query(Document)
+def _document_tree_read(db: Session, *, include_deleted: bool = False, workspace_id: str | None = None) -> DocumentTreeRead:
+    query = _scope_query(db.query(Document), Document, workspace_id)
     if not include_deleted:
         query = query.filter(Document.status != "deleted")
     documents = query.all()
@@ -687,7 +741,7 @@ def _document_tree_read(db: Session, *, include_deleted: bool = False) -> Docume
         return folders[normalized]
 
     ensure_folder("")
-    for explicit_folder in db.query(DocumentLibraryFolder).order_by(DocumentLibraryFolder.path.asc()).all():
+    for explicit_folder in _scope_query(db.query(DocumentLibraryFolder), DocumentLibraryFolder, workspace_id).order_by(DocumentLibraryFolder.path.asc()).all():
         ensure_folder(explicit_folder.path)
 
     for document in documents:
@@ -706,20 +760,20 @@ def _document_tree_read(db: Session, *, include_deleted: bool = False) -> Docume
 
 
 @app.get("/api/documents/{document_id}", response_model=DocumentRead)
-def get_document(document_id: str, db: Session = Depends(get_db)) -> DocumentRead:
+def get_document(document_id: str, request: Request, db: Session = Depends(get_db)) -> DocumentRead:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
     if document.status == "ready":
         _repair_image_document_if_needed(document, db)
     return _document_read(document)
 
 
 @app.delete("/api/documents/{document_id}", response_model=DocumentRead)
-def delete_document_from_library(document_id: str, db: Session = Depends(get_db)) -> DocumentRead:
+def delete_document_from_library(document_id: str, request: Request, db: Session = Depends(get_db)) -> DocumentRead:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
     _delete_library_document_payload(document, db)
     log_audit_event(
         db,
@@ -735,8 +789,10 @@ def delete_document_from_library(document_id: str, db: Session = Depends(get_db)
 
 
 @app.get("/api/documents/{document_id}/pages/{page_number}/image")
-def get_document_page_image(document_id: str, page_number: int, db: Session = Depends(get_db)) -> FileResponse:
+def get_document_page_image(document_id: str, page_number: int, request: Request, db: Session = Depends(get_db)) -> FileResponse:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, document_id)
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
     if document and document.status == "deleted":
         raise HTTPException(status_code=410, detail="Original document was deleted")
     page = (
@@ -759,10 +815,13 @@ def get_document_page_image(document_id: str, page_number: int, db: Session = De
 def get_document_page_thumbnail(
     document_id: str,
     page_number: int,
+    request: Request,
     width: int = Query(default=96, ge=48, le=512),
     db: Session = Depends(get_db),
 ) -> FileResponse:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, document_id)
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
     if document and document.status == "deleted":
         raise HTTPException(status_code=410, detail="Original document was deleted")
     page = (
@@ -792,9 +851,11 @@ def get_document_page_thumbnail(
 
 
 @app.post("/api/schemas", response_model=SchemaRead)
-def create_schema(payload: SchemaCreate, db: Session = Depends(get_db)) -> SchemaRead:
-    _raise_if_schema_name_conflicts(db, payload.name)
+def create_schema(payload: SchemaCreate, request: Request, db: Session = Depends(get_db)) -> SchemaRead:
+    workspace_id = _current_workspace_id(request)
+    _raise_if_schema_name_conflicts(db, payload.name, workspace_id=workspace_id)
     schema = Schema(
+        workspace_id=workspace_id,
         name=payload.name,
         display_name=payload.display_name,
         description=payload.description,
@@ -825,12 +886,19 @@ def create_schema(payload: SchemaCreate, db: Session = Depends(get_db)) -> Schem
 
 @app.get("/api/schemas", response_model=list[SchemaRead])
 def list_schemas(
+    request: Request,
     templates: bool | None = None,
     include_ephemeral: bool = False,
     include_archived: bool = False,
     db: Session = Depends(get_db),
 ) -> list[SchemaRead]:
+    workspace_id = _current_workspace_id(request)
     query = db.query(Schema)
+    if workspace_id is not None:
+        if templates is True:
+            query = query.filter(or_(Schema.workspace_id == workspace_id, Schema.workspace_id.is_(None)))
+        else:
+            query = query.filter(Schema.workspace_id == workspace_id)
     if not include_ephemeral:
         query = query.filter(Schema.ephemeral == False)  # noqa: E712
     if not include_archived:
@@ -844,11 +912,12 @@ def list_schemas(
 @app.post("/api/schemas/recommendations", response_model=SchemaRecommendationRead)
 def recommend_schema(
     payload: SchemaRecommendationRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> SchemaRecommendationRead:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, payload.document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
     try:
         recommendation = recommend_schema_with_vlm([page.image_path for page in document.pages])
         recommendation_read = _schema_recommendation_read(recommendation)
@@ -879,13 +948,14 @@ def recommend_schema(
 @app.post("/api/schemas/description-recommendations", response_model=SchemaDescriptionRecommendationRead)
 def recommend_schema_description(
     payload: SchemaDescriptionRecommendationRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> SchemaDescriptionRecommendationRead:
+    workspace_id = _current_workspace_id(request)
     image_paths: list[str] = []
     if payload.document_id:
         document = db.get(Document, payload.document_id)
-        if not document:
-            raise HTTPException(status_code=404, detail="Document not found")
+        _ensure_workspace_scope(document, workspace_id, "Document not found")
         image_paths = [page.image_path for page in document.pages]
     try:
         recommendation = recommend_schema_description_with_vlm(
@@ -902,26 +972,31 @@ def recommend_schema_description(
 
 
 @app.get("/api/schemas/{schema_id}", response_model=SchemaRead)
-def get_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRead:
+def get_schema(schema_id: str, request: Request, db: Session = Depends(get_db)) -> SchemaRead:
+    workspace_id = _current_workspace_id(request)
     schema = db.get(Schema, schema_id)
-    if not schema:
-        raise HTTPException(status_code=404, detail="Schema not found")
+    _ensure_workspace_scope(schema, workspace_id, "Schema not found")
     return _schema_read(schema)
 
 
 @app.post("/api/schemas/{schema_id}/duplicate", response_model=SchemaRead)
-def duplicate_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRead:
+def duplicate_schema(schema_id: str, request: Request, db: Session = Depends(get_db)) -> SchemaRead:
+    workspace_id = _current_workspace_id(request)
     schema = db.get(Schema, schema_id)
     if not schema:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    if workspace_id is not None and schema.workspace_id not in {workspace_id, None}:
         raise HTTPException(status_code=404, detail="Schema not found")
     if schema.ephemeral:
         raise HTTPException(status_code=400, detail="Draft schemas cannot be duplicated from the library")
     schema_data = _schema_data(schema)
     existing_names = {
         row[0]
-        for row in db.query(Schema.name)
-        .filter(Schema.ephemeral == False, Schema.archived == False)  # noqa: E712
-        .all()
+        for row in _scope_query(
+            db.query(Schema.name).filter(Schema.ephemeral == False, Schema.archived == False),  # noqa: E712
+            Schema,
+            workspace_id,
+        ).all()
     }
     duplicated_name = _duplicate_name(schema.name, existing_names)
     duplicated_data = {
@@ -930,6 +1005,7 @@ def duplicate_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRea
         "display_name": duplicated_name,
     }
     duplicated = Schema(
+        workspace_id=workspace_id,
         name=duplicated_name,
         display_name=duplicated_name,
         description=schema.description,
@@ -957,10 +1033,10 @@ def duplicate_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRea
 
 
 @app.patch("/api/schemas/{schema_id}", response_model=SchemaRead)
-def update_schema(schema_id: str, payload: SchemaUpdate, db: Session = Depends(get_db)) -> SchemaRead:
+def update_schema(schema_id: str, payload: SchemaUpdate, request: Request, db: Session = Depends(get_db)) -> SchemaRead:
+    workspace_id = _current_workspace_id(request)
     schema = db.get(Schema, schema_id)
-    if not schema:
-        raise HTTPException(status_code=404, detail="Schema not found")
+    _ensure_workspace_scope(schema, workspace_id, "Schema not found")
 
     current = _schema_data(schema)
     next_schema_data = {
@@ -979,9 +1055,9 @@ def update_schema(schema_id: str, payload: SchemaUpdate, db: Session = Depends(g
     }
     _validate_schema_region_references(next_schema_data)
     if next_schema_data["name"].strip() == schema.name.strip():
-        _merge_duplicate_schema_names_into(db, schema, next_schema_data["name"])
+        _merge_duplicate_schema_names_into(db, schema, next_schema_data["name"], workspace_id=workspace_id)
     else:
-        _raise_if_schema_name_conflicts(db, next_schema_data["name"], schema_id=schema.id)
+        _raise_if_schema_name_conflicts(db, next_schema_data["name"], schema_id=schema.id, workspace_id=workspace_id)
 
     schema.name = next_schema_data["name"]
     schema.display_name = next_schema_data["display_name"]
@@ -1007,10 +1083,10 @@ def update_schema(schema_id: str, payload: SchemaUpdate, db: Session = Depends(g
 
 
 @app.delete("/api/schemas/{schema_id}", response_model=SchemaRead)
-def delete_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRead:
+def delete_schema(schema_id: str, request: Request, db: Session = Depends(get_db)) -> SchemaRead:
+    workspace_id = _current_workspace_id(request)
     schema = db.get(Schema, schema_id)
-    if not schema:
-        raise HTTPException(status_code=404, detail="Schema not found")
+    _ensure_workspace_scope(schema, workspace_id, "Schema not found")
     if schema.ephemeral:
         raise HTTPException(status_code=400, detail="Draft schemas cannot be archived from the library")
 
@@ -1031,8 +1107,10 @@ def delete_schema(schema_id: str, db: Session = Depends(get_db)) -> SchemaRead:
 
 
 @app.post("/api/document-classifiers", response_model=DocumentClassifierRead)
-def create_document_classifier(payload: DocumentClassifierCreate, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+def create_document_classifier(payload: DocumentClassifierCreate, request: Request, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+    workspace_id = _current_workspace_id(request)
     classifier = DocumentClassifier(
+        workspace_id=workspace_id,
         name=payload.name,
         description=payload.description,
         allow_unknown=payload.allow_unknown,
@@ -1056,10 +1134,13 @@ def create_document_classifier(payload: DocumentClassifierCreate, db: Session = 
 
 @app.get("/api/document-classifiers", response_model=list[DocumentClassifierRead])
 def list_document_classifiers(
+    request: Request,
     include_archived: bool = False,
     db: Session = Depends(get_db),
 ) -> list[DocumentClassifierRead]:
+    workspace_id = _current_workspace_id(request)
     query = db.query(DocumentClassifier)
+    query = _scope_query(query, DocumentClassifier, workspace_id)
     if not include_archived:
         query = query.filter(DocumentClassifier.archived == False)  # noqa: E712
     rows = query.order_by(DocumentClassifier.created_at.desc()).all()
@@ -1067,24 +1148,26 @@ def list_document_classifiers(
 
 
 @app.get("/api/document-classifiers/{classifier_id}", response_model=DocumentClassifierRead)
-def get_document_classifier(classifier_id: str, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+def get_document_classifier(classifier_id: str, request: Request, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+    workspace_id = _current_workspace_id(request)
     classifier = db.get(DocumentClassifier, classifier_id)
-    if not classifier:
-        raise HTTPException(status_code=404, detail="Document classifier not found")
+    _ensure_workspace_scope(classifier, workspace_id, "Document classifier not found")
     return _classifier_read(classifier)
 
 
 @app.post("/api/document-classifiers/{classifier_id}/duplicate", response_model=DocumentClassifierRead)
-def duplicate_document_classifier(classifier_id: str, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+def duplicate_document_classifier(classifier_id: str, request: Request, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+    workspace_id = _current_workspace_id(request)
     classifier = db.get(DocumentClassifier, classifier_id)
-    if not classifier:
-        raise HTTPException(status_code=404, detail="Document classifier not found")
+    _ensure_workspace_scope(classifier, workspace_id, "Document classifier not found")
     config = _classifier_data(classifier)
     existing_names = {
         row[0]
-        for row in db.query(DocumentClassifier.name)
-        .filter(DocumentClassifier.archived == False)  # noqa: E712
-        .all()
+        for row in _scope_query(
+            db.query(DocumentClassifier.name).filter(DocumentClassifier.archived == False),  # noqa: E712
+            DocumentClassifier,
+            workspace_id,
+        ).all()
     }
     duplicated_name = _duplicate_name(classifier.name, existing_names)
     duplicated_config = {
@@ -1092,6 +1175,7 @@ def duplicate_document_classifier(classifier_id: str, db: Session = Depends(get_
         "name": duplicated_name,
     }
     duplicated = DocumentClassifier(
+        workspace_id=workspace_id,
         name=duplicated_name,
         description=classifier.description,
         allow_unknown=classifier.allow_unknown,
@@ -1117,11 +1201,12 @@ def duplicate_document_classifier(classifier_id: str, db: Session = Depends(get_
 def update_document_classifier(
     classifier_id: str,
     payload: DocumentClassifierUpdate,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> DocumentClassifierRead:
+    workspace_id = _current_workspace_id(request)
     classifier = db.get(DocumentClassifier, classifier_id)
-    if not classifier:
-        raise HTTPException(status_code=404, detail="Document classifier not found")
+    _ensure_workspace_scope(classifier, workspace_id, "Document classifier not found")
     current = _classifier_data(classifier)
     next_config = {
         "name": payload.name if payload.name is not None else classifier.name,
@@ -1147,10 +1232,10 @@ def update_document_classifier(
 
 
 @app.delete("/api/document-classifiers/{classifier_id}", response_model=DocumentClassifierRead)
-def delete_document_classifier(classifier_id: str, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+def delete_document_classifier(classifier_id: str, request: Request, db: Session = Depends(get_db)) -> DocumentClassifierRead:
+    workspace_id = _current_workspace_id(request)
     classifier = db.get(DocumentClassifier, classifier_id)
-    if not classifier:
-        raise HTTPException(status_code=404, detail="Document classifier not found")
+    _ensure_workspace_scope(classifier, workspace_id, "Document classifier not found")
     classifier.archived = True
     log_audit_event(
         db,
@@ -1169,20 +1254,21 @@ def delete_document_classifier(classifier_id: str, db: Session = Depends(get_db)
 def create_classification_job(
     payload: ClassificationJobCreate,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ClassificationJobRead:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, payload.document_id)
     classifier = db.get(DocumentClassifier, payload.classifier_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    if not classifier or classifier.archived:
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
+    if not classifier or classifier.archived or (workspace_id is not None and classifier.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Document classifier not found")
     status = _execution_job_status_for_document(document)
     if status == "blocked":
         _raise_document_not_executable(document)
     if document.status == "ready":
         _repair_image_document_if_needed(document, db)
-    job = ClassificationJob(document_id=document.id, classifier_id=classifier.id, status=status)
+    job = ClassificationJob(workspace_id=workspace_id, document_id=document.id, classifier_id=classifier.id, status=status)
     db.add(job)
     db.flush()
     log_audit_event(
@@ -1203,10 +1289,10 @@ def create_classification_job(
 
 
 @app.get("/api/classification-jobs/{job_id}", response_model=ClassificationJobRead)
-def get_classification_job(job_id: str, db: Session = Depends(get_db)) -> ClassificationJobRead:
+def get_classification_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> ClassificationJobRead:
+    workspace_id = _current_workspace_id(request)
     job = db.get(ClassificationJob, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Classification job not found")
+    _ensure_workspace_scope(job, workspace_id, "Classification job not found")
     return _classification_job_read(job)
 
 
@@ -1214,11 +1300,14 @@ def get_classification_job(job_id: str, db: Session = Depends(get_db)) -> Classi
 def patch_classification_result(
     result_id: str,
     payload: ClassificationResultPatch,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ClassificationResultRead:
+    workspace_id = _current_workspace_id(request)
     result = db.get(ClassificationResult, result_id)
     if not result:
         raise HTTPException(status_code=404, detail="Classification result not found")
+    _ensure_workspace_scope(result.job, workspace_id, "Classification result not found")
     if payload.corrected_output is not None:
         result.corrected_output = json.dumps(payload.corrected_output, ensure_ascii=False)
     if payload.reviewed is not None:
@@ -1229,8 +1318,10 @@ def patch_classification_result(
 
 
 @app.post("/api/required-field-checklists", response_model=RequiredFieldChecklistRead)
-def create_required_field_checklist(payload: RequiredFieldChecklistCreate, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+def create_required_field_checklist(payload: RequiredFieldChecklistCreate, request: Request, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+    workspace_id = _current_workspace_id(request)
     checklist = RequiredFieldChecklist(
+        workspace_id=workspace_id,
         name=payload.name,
         description=payload.description,
         config_json=json.dumps(payload.model_dump(), ensure_ascii=False),
@@ -1253,10 +1344,13 @@ def create_required_field_checklist(payload: RequiredFieldChecklistCreate, db: S
 
 @app.get("/api/required-field-checklists", response_model=list[RequiredFieldChecklistRead])
 def list_required_field_checklists(
+    request: Request,
     include_archived: bool = False,
     db: Session = Depends(get_db),
 ) -> list[RequiredFieldChecklistRead]:
+    workspace_id = _current_workspace_id(request)
     query = db.query(RequiredFieldChecklist)
+    query = _scope_query(query, RequiredFieldChecklist, workspace_id)
     if not include_archived:
         query = query.filter(RequiredFieldChecklist.archived == False)  # noqa: E712
     rows = query.order_by(RequiredFieldChecklist.created_at.desc()).all()
@@ -1266,11 +1360,12 @@ def list_required_field_checklists(
 @app.post("/api/required-field-checklists/recommendations", response_model=RequiredFieldChecklistRecommendationRead)
 def recommend_required_field_checklist(
     payload: RequiredFieldChecklistRecommendationRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RequiredFieldChecklistRecommendationRead:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, payload.document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
     try:
         recommendation = recommend_required_field_checklist_with_vlm([page.image_path for page in document.pages])
         recommendation_read = _required_field_checklist_recommendation_read(recommendation)
@@ -1294,24 +1389,26 @@ def recommend_required_field_checklist(
 
 
 @app.get("/api/required-field-checklists/{checklist_id}", response_model=RequiredFieldChecklistRead)
-def get_required_field_checklist(checklist_id: str, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+def get_required_field_checklist(checklist_id: str, request: Request, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+    workspace_id = _current_workspace_id(request)
     checklist = db.get(RequiredFieldChecklist, checklist_id)
-    if not checklist:
-        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    _ensure_workspace_scope(checklist, workspace_id, "Required field checklist not found")
     return _checklist_read(checklist)
 
 
 @app.post("/api/required-field-checklists/{checklist_id}/duplicate", response_model=RequiredFieldChecklistRead)
-def duplicate_required_field_checklist(checklist_id: str, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+def duplicate_required_field_checklist(checklist_id: str, request: Request, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+    workspace_id = _current_workspace_id(request)
     checklist = db.get(RequiredFieldChecklist, checklist_id)
-    if not checklist:
-        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    _ensure_workspace_scope(checklist, workspace_id, "Required field checklist not found")
     config = _checklist_data(checklist)
     existing_names = {
         row[0]
-        for row in db.query(RequiredFieldChecklist.name)
-        .filter(RequiredFieldChecklist.archived == False)  # noqa: E712
-        .all()
+        for row in _scope_query(
+            db.query(RequiredFieldChecklist.name).filter(RequiredFieldChecklist.archived == False),  # noqa: E712
+            RequiredFieldChecklist,
+            workspace_id,
+        ).all()
     }
     duplicated_name = _duplicate_name(checklist.name, existing_names)
     duplicated_config = {
@@ -1319,6 +1416,7 @@ def duplicate_required_field_checklist(checklist_id: str, db: Session = Depends(
         "name": duplicated_name,
     }
     duplicated = RequiredFieldChecklist(
+        workspace_id=workspace_id,
         name=duplicated_name,
         description=checklist.description,
         config_json=json.dumps(duplicated_config, ensure_ascii=False),
@@ -1343,11 +1441,12 @@ def duplicate_required_field_checklist(checklist_id: str, db: Session = Depends(
 def update_required_field_checklist(
     checklist_id: str,
     payload: RequiredFieldChecklistUpdate,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RequiredFieldChecklistRead:
+    workspace_id = _current_workspace_id(request)
     checklist = db.get(RequiredFieldChecklist, checklist_id)
-    if not checklist:
-        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    _ensure_workspace_scope(checklist, workspace_id, "Required field checklist not found")
     current = _checklist_data(checklist)
     next_config = {
         "name": payload.name if payload.name is not None else checklist.name,
@@ -1373,10 +1472,10 @@ def update_required_field_checklist(
 
 
 @app.delete("/api/required-field-checklists/{checklist_id}", response_model=RequiredFieldChecklistRead)
-def delete_required_field_checklist(checklist_id: str, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+def delete_required_field_checklist(checklist_id: str, request: Request, db: Session = Depends(get_db)) -> RequiredFieldChecklistRead:
+    workspace_id = _current_workspace_id(request)
     checklist = db.get(RequiredFieldChecklist, checklist_id)
-    if not checklist:
-        raise HTTPException(status_code=404, detail="Required field checklist not found")
+    _ensure_workspace_scope(checklist, workspace_id, "Required field checklist not found")
     checklist.archived = True
     log_audit_event(
         db,
@@ -1395,20 +1494,21 @@ def delete_required_field_checklist(checklist_id: str, db: Session = Depends(get
 def create_required_field_check_job(
     payload: RequiredFieldCheckJobCreate,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RequiredFieldCheckJobRead:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, payload.document_id)
     checklist = db.get(RequiredFieldChecklist, payload.checklist_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    if not checklist or checklist.archived:
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
+    if not checklist or checklist.archived or (workspace_id is not None and checklist.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Required field checklist not found")
     status = _execution_job_status_for_document(document)
     if status == "blocked":
         _raise_document_not_executable(document)
     if document.status == "ready":
         _repair_image_document_if_needed(document, db)
-    job = RequiredFieldCheckJob(document_id=document.id, checklist_id=checklist.id, status=status)
+    job = RequiredFieldCheckJob(workspace_id=workspace_id, document_id=document.id, checklist_id=checklist.id, status=status)
     db.add(job)
     db.flush()
     log_audit_event(
@@ -1429,10 +1529,10 @@ def create_required_field_check_job(
 
 
 @app.get("/api/required-field-check-jobs/{job_id}", response_model=RequiredFieldCheckJobRead)
-def get_required_field_check_job(job_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckJobRead:
+def get_required_field_check_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> RequiredFieldCheckJobRead:
+    workspace_id = _current_workspace_id(request)
     job = db.get(RequiredFieldCheckJob, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Required field check job not found")
+    _ensure_workspace_scope(job, workspace_id, "Required field check job not found")
     return _required_field_job_read(job)
 
 
@@ -1440,11 +1540,14 @@ def get_required_field_check_job(job_id: str, db: Session = Depends(get_db)) -> 
 def patch_required_field_check_result(
     result_id: str,
     payload: RequiredFieldCheckResultPatch,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RequiredFieldCheckResultRead:
+    workspace_id = _current_workspace_id(request)
     result = db.get(RequiredFieldCheckResult, result_id)
     if not result:
         raise HTTPException(status_code=404, detail="Required field check result not found")
+    _ensure_workspace_scope(result.job, workspace_id, "Required field check result not found")
     if payload.corrected_output is not None:
         result.corrected_output = json.dumps(payload.corrected_output, ensure_ascii=False)
     if payload.reviewed is not None:
@@ -1458,13 +1561,14 @@ def patch_required_field_check_result(
 def create_extraction_job(
     payload: ExtractionJobCreate,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ExtractionJobRead:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, payload.document_id)
     schema = db.get(Schema, payload.schema_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    if not schema:
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
+    if not schema or (workspace_id is not None and schema.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Schema not found")
     status = _execution_job_status_for_document(document)
     if status == "blocked":
@@ -1473,6 +1577,7 @@ def create_extraction_job(
         _repair_image_document_if_needed(document, db)
 
     job = ExtractionJob(
+        workspace_id=workspace_id,
         document_id=document.id,
         schema_id=schema.id,
         schema_version=1,
@@ -1501,11 +1606,12 @@ def create_extraction_job(
 def create_draft_extraction_job(
     payload: DraftExtractionJobCreate,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ExtractionJobRead:
+    workspace_id = _current_workspace_id(request)
     document = db.get(Document, payload.document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+    _ensure_workspace_scope(document, workspace_id, "Document not found")
     status = _execution_job_status_for_document(document)
     if status == "blocked":
         _raise_document_not_executable(document)
@@ -1520,6 +1626,7 @@ def create_draft_extraction_job(
     _validate_schema_region_references(schema_data)
 
     schema = Schema(
+        workspace_id=workspace_id,
         name=draft_schema.name,
         display_name=draft_schema.display_name or draft_schema.name,
         description=draft_schema.description,
@@ -1534,6 +1641,7 @@ def create_draft_extraction_job(
     db.add(schema)
     db.flush()
     job = ExtractionJob(
+        workspace_id=workspace_id,
         document_id=document.id,
         schema_id=schema.id,
         schema_version=1,
@@ -1560,11 +1668,13 @@ def create_draft_extraction_job(
 
 @app.get("/api/extraction-jobs", response_model=list[ExtractionJobRead])
 def list_extraction_jobs(
+    request: Request,
     document_id: str | None = None,
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> list[ExtractionJobRead]:
-    query = db.query(ExtractionJob)
+    workspace_id = _current_workspace_id(request)
+    query = _scope_query(db.query(ExtractionJob), ExtractionJob, workspace_id)
     if document_id:
         query = query.filter(ExtractionJob.document_id == document_id)
     jobs = query.order_by(ExtractionJob.created_at.desc()).limit(limit).all()
@@ -1572,10 +1682,10 @@ def list_extraction_jobs(
 
 
 @app.get("/api/extraction-jobs/{job_id}", response_model=ExtractionJobRead)
-def get_extraction_job(job_id: str, db: Session = Depends(get_db)) -> ExtractionJobRead:
+def get_extraction_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> ExtractionJobRead:
+    workspace_id = _current_workspace_id(request)
     job = db.get(ExtractionJob, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Extraction job not found")
+    _ensure_workspace_scope(job, workspace_id, "Extraction job not found")
     return _job_read(job)
 
 
@@ -1583,11 +1693,14 @@ def get_extraction_job(job_id: str, db: Session = Depends(get_db)) -> Extraction
 def patch_extraction_result(
     result_id: str,
     payload: ExtractionResultPatch,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    workspace_id = _current_workspace_id(request)
     result = db.get(ExtractionResult, result_id)
     if not result:
         raise HTTPException(status_code=404, detail="Extraction result not found")
+    _ensure_workspace_scope(result.job, workspace_id, "Extraction result not found")
     if payload.corrected_output is not None:
         result.corrected_output = json.dumps(payload.corrected_output, ensure_ascii=False)
     if payload.reviewed_fields is not None:
@@ -1611,22 +1724,25 @@ def patch_extraction_result(
 @app.get("/api/extraction-results/{result_id}/export")
 def export_extraction_result(
     result_id: str,
+    request: Request,
     format: str = Query(default="json", pattern="^(json|csv|xlsx)$"),
     preset_id: str | None = None,
     db: Session = Depends(get_db),
 ) -> Response:
+    workspace_id = _current_workspace_id(request)
     result = db.get(ExtractionResult, result_id)
     if not result:
         raise HTTPException(status_code=404, detail="Extraction result not found")
 
     job = result.job or db.get(ExtractionJob, result.job_id)
+    _ensure_workspace_scope(job, workspace_id, "Extraction result not found")
     schema = db.get(Schema, job.schema_id) if job else None
     payload = json.loads(result.corrected_output) if result.corrected_output else json.loads(result.validated_output)
     original_payload = json.loads(result.validated_output)
     reviewed_fields = set(json.loads(result.reviewed_fields or "[]"))
     preset = db.get(ExportPreset, preset_id) if preset_id else None
-    if preset_id and not preset:
-        raise HTTPException(status_code=404, detail="Export preset not found")
+    if preset_id:
+        _ensure_workspace_scope(preset, workspace_id, "Export preset not found")
     export_payload = _apply_export_preset(payload, preset) if preset else payload
     original_export_payload = _apply_export_preset(original_payload, preset) if preset else original_payload
     log_audit_event(
@@ -1704,10 +1820,13 @@ def export_extraction_result(
 
 
 @app.post("/api/export-presets", response_model=ExportPresetRead)
-def create_export_preset(payload: ExportPresetCreate, db: Session = Depends(get_db)) -> ExportPresetRead:
-    if payload.schema_id and not db.get(Schema, payload.schema_id):
-        raise HTTPException(status_code=404, detail="Schema not found")
+def create_export_preset(payload: ExportPresetCreate, request: Request, db: Session = Depends(get_db)) -> ExportPresetRead:
+    workspace_id = _current_workspace_id(request)
+    if payload.schema_id:
+        schema = db.get(Schema, payload.schema_id)
+        _ensure_workspace_scope(schema, workspace_id, "Schema not found")
     preset = ExportPreset(
+        workspace_id=workspace_id,
         schema_id=payload.schema_id,
         name=payload.name.strip(),
         fields_json=json.dumps([field.model_dump() for field in payload.fields], ensure_ascii=False),
@@ -1728,9 +1847,12 @@ def create_export_preset(payload: ExportPresetCreate, db: Session = Depends(get_
 
 
 @app.get("/api/export-presets", response_model=list[ExportPresetRead])
-def list_export_presets(schema_id: str | None = None, db: Session = Depends(get_db)) -> list[ExportPresetRead]:
-    query = db.query(ExportPreset)
+def list_export_presets(request: Request, schema_id: str | None = None, db: Session = Depends(get_db)) -> list[ExportPresetRead]:
+    workspace_id = _current_workspace_id(request)
+    query = _scope_query(db.query(ExportPreset), ExportPreset, workspace_id)
     if schema_id:
+        schema = db.get(Schema, schema_id)
+        _ensure_workspace_scope(schema, workspace_id, "Schema not found")
         query = query.filter((ExportPreset.schema_id == schema_id) | (ExportPreset.schema_id.is_(None)))
     presets = query.order_by(ExportPreset.created_at.desc()).all()
     return [_export_preset_read(preset) for preset in presets]
@@ -1740,13 +1862,15 @@ def list_export_presets(schema_id: str | None = None, db: Session = Depends(get_
 def update_export_preset(
     preset_id: str,
     payload: ExportPresetUpdate,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ExportPresetRead:
+    workspace_id = _current_workspace_id(request)
     preset = db.get(ExportPreset, preset_id)
-    if not preset:
-        raise HTTPException(status_code=404, detail="Export preset not found")
-    if payload.schema_id and not db.get(Schema, payload.schema_id):
-        raise HTTPException(status_code=404, detail="Schema not found")
+    _ensure_workspace_scope(preset, workspace_id, "Export preset not found")
+    if payload.schema_id:
+        schema = db.get(Schema, payload.schema_id)
+        _ensure_workspace_scope(schema, workspace_id, "Schema not found")
     if payload.name is not None:
         preset.name = payload.name.strip()
     if "schema_id" in payload.model_fields_set:
@@ -1767,10 +1891,10 @@ def update_export_preset(
 
 
 @app.delete("/api/export-presets/{preset_id}")
-def delete_export_preset(preset_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+def delete_export_preset(preset_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    workspace_id = _current_workspace_id(request)
     preset = db.get(ExportPreset, preset_id)
-    if not preset:
-        raise HTTPException(status_code=404, detail="Export preset not found")
+    _ensure_workspace_scope(preset, workspace_id, "Export preset not found")
     log_audit_event(
         db,
         entity_type="export_preset",
@@ -1785,12 +1909,14 @@ def delete_export_preset(preset_id: str, db: Session = Depends(get_db)) -> dict[
 
 
 @app.post("/api/workflows", response_model=WorkflowDefinitionRead)
-def create_workflow(payload: WorkflowDefinitionCreate, db: Session = Depends(get_db)) -> WorkflowDefinitionRead:
+def create_workflow(payload: WorkflowDefinitionCreate, request: Request, db: Session = Depends(get_db)) -> WorkflowDefinitionRead:
+    workspace_id = _current_workspace_id(request)
     try:
-        validate_workflow_definition(payload.definition, db)
+        validate_workflow_definition(payload.definition, db, workspace_id=workspace_id)
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
     workflow = WorkflowDefinition(
+        workspace_id=workspace_id,
         name=payload.name.strip(),
         description=payload.description,
         definition_json=json.dumps(payload.definition, ensure_ascii=False),
@@ -1812,18 +1938,98 @@ def create_workflow(payload: WorkflowDefinitionCreate, db: Session = Depends(get
 
 
 @app.get("/api/workflows", response_model=list[WorkflowDefinitionRead])
-def list_workflows(include_archived: bool = False, db: Session = Depends(get_db)) -> list[WorkflowDefinitionRead]:
+def list_workflows(request: Request, include_archived: bool = False, db: Session = Depends(get_db)) -> list[WorkflowDefinitionRead]:
+    workspace_id = _current_workspace_id(request)
     query = db.query(WorkflowDefinition)
+    query = _scope_query(query, WorkflowDefinition, workspace_id)
     if not include_archived:
         query = query.filter(WorkflowDefinition.archived == False)  # noqa: E712
     workflows = query.order_by(WorkflowDefinition.created_at.desc()).all()
     return [WorkflowDefinitionRead(**workflow_definition_to_read(workflow, db)) for workflow in workflows]
 
 
+@app.post("/api/workflows/ai-draft", response_model=WorkflowAiDraftRead)
+def create_workflow_ai_draft(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    include_checklist: bool = Form(True),
+    db: Session = Depends(get_db),
+) -> WorkflowAiDraftRead:
+    workspace_id = _current_workspace_id(request)
+    image_paths = _save_workflow_ai_draft_images(files)
+    try:
+        schema_recommendation = _schema_recommendation_read(recommend_schema_with_vlm([str(path) for path in image_paths]))
+        schema_name = _available_scoped_name(
+            db,
+            Schema,
+            schema_recommendation.name or "AI 추천 schema",
+            workspace_id=workspace_id,
+        )
+        schema_draft = SchemaCreate(
+            name=schema_name,
+            display_name=schema_recommendation.display_name or schema_name,
+            description=schema_recommendation.description,
+            fields=schema_recommendation.fields,
+            regions=[],
+        )
+
+        checklist_draft = None
+        if include_checklist:
+            checklist_recommendation = _required_field_checklist_recommendation_read(
+                recommend_required_field_checklist_with_vlm([str(path) for path in image_paths])
+            )
+            checklist_draft = RequiredFieldChecklistCreate(
+                name=_available_scoped_name(
+                    db,
+                    RequiredFieldChecklist,
+                    checklist_recommendation.name or "AI 추천 checklist",
+                    workspace_id=workspace_id,
+                ),
+                description=checklist_recommendation.description,
+                regions=checklist_recommendation.regions,
+                items=checklist_recommendation.items,
+            )
+
+        definition = _workflow_ai_draft_definition(include_checklist=checklist_draft is not None)
+        workflow_name = _workflow_ai_draft_name(schema_draft, sample_count=len(image_paths))
+        draft_event_id = f"workflow_ai_draft_{uuid4().hex}"
+        log_audit_event(
+            db,
+            entity_type="workflow_ai_draft",
+            entity_id=draft_event_id,
+            action="created",
+            message="AI workflow draft generated without persisting sample images",
+            metadata={
+                "sample_count": len(image_paths),
+                "schema_field_count": len(schema_draft.fields),
+                "checklist_item_count": len(checklist_draft.items) if checklist_draft else 0,
+                "images_persisted": False,
+            },
+        )
+        db.commit()
+        return WorkflowAiDraftRead(
+            workflow_name=workflow_name,
+            schema_draft=schema_draft,
+            checklist_draft=checklist_draft,
+            definition=definition,
+            sample_count=len(image_paths),
+            images_persisted=False,
+            reasoning=schema_recommendation.reasoning,
+        )
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"VLM returned an invalid workflow draft recommendation: {exc}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=vlm_error_detail(exc)) from exc
+    finally:
+        for path in image_paths:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
+
 @app.get("/api/workflows/{workflow_id}", response_model=WorkflowDefinitionRead)
-def get_workflow(workflow_id: str, db: Session = Depends(get_db)) -> WorkflowDefinitionRead:
+def get_workflow(workflow_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowDefinitionRead:
+    workspace_id = _current_workspace_id(request)
     workflow = db.get(WorkflowDefinition, workflow_id)
-    if not workflow or workflow.archived:
+    if not workflow or workflow.archived or (workspace_id is not None and workflow.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Workflow not found")
     return WorkflowDefinitionRead(**workflow_definition_to_read(workflow, db))
 
@@ -1832,14 +2038,16 @@ def get_workflow(workflow_id: str, db: Session = Depends(get_db)) -> WorkflowDef
 def update_workflow(
     workflow_id: str,
     payload: WorkflowDefinitionUpdate,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> WorkflowDefinitionRead:
+    workspace_id = _current_workspace_id(request)
     workflow = db.get(WorkflowDefinition, workflow_id)
-    if not workflow or workflow.archived:
+    if not workflow or workflow.archived or (workspace_id is not None and workflow.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Workflow not found")
     if payload.definition is not None:
         try:
-            validate_workflow_definition(payload.definition, db)
+            validate_workflow_definition(payload.definition, db, workspace_id=workspace_id)
         except WorkflowDefinitionError as exc:
             raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
         workflow.definition_json = json.dumps(payload.definition, ensure_ascii=False)
@@ -1861,9 +2069,10 @@ def update_workflow(
 
 
 @app.delete("/api/workflows/{workflow_id}", response_model=WorkflowDefinitionRead)
-def delete_workflow(workflow_id: str, db: Session = Depends(get_db)) -> WorkflowDefinitionRead:
+def delete_workflow(workflow_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowDefinitionRead:
+    workspace_id = _current_workspace_id(request)
     workflow = db.get(WorkflowDefinition, workflow_id)
-    if not workflow:
+    if not workflow or (workspace_id is not None and workflow.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Workflow not found")
     workflow.archived = True
     log_audit_event(
@@ -1886,19 +2095,21 @@ async def create_workflow_run(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
     workflow = db.get(WorkflowDefinition, workflow_id)
-    if not workflow or workflow.archived:
+    if not workflow or workflow.archived or (workspace_id is not None and workflow.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Workflow not found")
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
     _validate_upload_file_count(files)
     try:
-        validate_workflow_definition(json.loads(workflow.definition_json), db)
+        validate_workflow_definition(json.loads(workflow.definition_json), db, workspace_id=workspace_id)
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
 
     run = WorkflowRun(
+        workspace_id=workspace_id,
         workflow_id=workflow.id,
         workflow_name=workflow.name,
         workflow_definition_json=workflow.definition_json,
@@ -1950,18 +2161,21 @@ async def create_workflow_run(
 def init_workflow_run(
     workflow_id: str,
     payload: WorkflowRunInitRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     workflow = db.get(WorkflowDefinition, workflow_id)
-    if not workflow or workflow.archived:
+    if not workflow or workflow.archived or (workspace_id is not None and workflow.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Workflow not found")
     _validate_declared_batch_file_count(payload.total_count)
     try:
-        validate_workflow_definition(json.loads(workflow.definition_json), db)
+        validate_workflow_definition(json.loads(workflow.definition_json), db, workspace_id=workspace_id)
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
 
     run = WorkflowRun(
+        workspace_id=workspace_id,
         workflow_id=workflow.id,
         workflow_name=workflow.name,
         workflow_definition_json=workflow.definition_json,
@@ -1989,16 +2203,18 @@ def create_workflow_run_from_documents(
     workflow_id: str,
     payload: WorkflowRunFromDocumentsRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     workflow = db.get(WorkflowDefinition, workflow_id)
-    if not workflow or workflow.archived:
+    if not workflow or workflow.archived or (workspace_id is not None and workflow.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Workflow not found")
     try:
-        validate_workflow_definition(json.loads(workflow.definition_json), db)
+        validate_workflow_definition(json.loads(workflow.definition_json), db, workspace_id=workspace_id)
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
-    documents = _documents_for_selection(payload.document_ids, db)
+    documents = _documents_for_selection(payload.document_ids, db, workspace_id=workspace_id)
     run, has_ready_items = _create_workflow_run_from_documents(workflow, documents, db)
     response = WorkflowRunRead(**workflow_run_to_read(run))
     if has_ready_items:
@@ -2015,10 +2231,10 @@ async def append_workflow_run_items(
     request: Request,
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status == "paused" and len(run.items) < run.total_count:
         run.status = "uploading"
         run.error_message = None
@@ -2034,11 +2250,12 @@ async def append_workflow_run_items(
 def start_workflow_run(
     run_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status not in {"uploading", "queued", "waiting"}:
         raise HTTPException(status_code=409, detail=f"Workflow run cannot be started from status {run.status}")
     if run.status == "waiting":
@@ -2074,21 +2291,22 @@ def start_workflow_run(
 @app.post("/api/workflow-runs/{run_id}/enqueue", response_model=WorkflowRunRead)
 def enqueue_workflow_run(
     run_id: str,
+    request: Request,
     payload: WorkflowRunEnqueueRequest | None = Body(default=None),
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     source_run = db.get(WorkflowRun, run_id)
-    if not source_run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(source_run, workspace_id, "Workflow run not found")
     if not source_run.items:
         raise HTTPException(status_code=422, detail="No uploaded workflow items are available to enqueue")
     _validate_workflow_enqueue_source(source_run)
     workflow_id = payload.workflow_id if payload and payload.workflow_id else source_run.workflow_id
     workflow = db.get(WorkflowDefinition, workflow_id)
-    if not workflow or workflow.archived:
+    if not workflow or workflow.archived or (workspace_id is not None and workflow.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Workflow not found")
     try:
-        validate_workflow_definition(json.loads(workflow.definition_json), db)
+        validate_workflow_definition(json.loads(workflow.definition_json), db, workspace_id=workspace_id)
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
 
@@ -2118,10 +2336,10 @@ def enqueue_workflow_run(
 
 
 @app.post("/api/workflow-runs/{run_id}/cancel-waiting", response_model=WorkflowRunRead)
-def cancel_waiting_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+def cancel_waiting_workflow_run(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status != "waiting":
         raise HTTPException(status_code=409, detail="Workflow run is not waiting in the queue")
     _cancel_waiting_workflow_run(run, db)
@@ -2131,10 +2349,10 @@ def cancel_waiting_workflow_run(run_id: str, db: Session = Depends(get_db)) -> W
 
 
 @app.delete("/api/workflow-runs/{run_id}/queue-entry")
-def delete_workflow_queue_entry(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+def delete_workflow_queue_entry(run_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if not run.queued_from_run_id:
         raise HTTPException(status_code=409, detail="Only queued workflow run entries can be removed")
     if run.status in {"completed", "completed_with_errors", "needs_review", "failed"}:
@@ -2168,10 +2386,10 @@ def delete_workflow_queue_entry(run_id: str, db: Session = Depends(get_db)) -> d
 
 
 @app.post("/api/workflow-runs/{run_id}/discard", response_model=WorkflowRunRead)
-def discard_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+def discard_workflow_run(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status in WORKFLOW_RUN_TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
     if run.status == "waiting":
@@ -2197,11 +2415,12 @@ def discard_workflow_run(run_id: str, db: Session = Depends(get_db)) -> Workflow
 def resume_workflow_run(
     run_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
     if run.status == "waiting":
@@ -2237,10 +2456,10 @@ def resume_workflow_run(
 
 
 @app.post("/api/workflow-runs/{run_id}/pause", response_model=WorkflowRunRead)
-def pause_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+def pause_workflow_run(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
     if run.status == "waiting":
@@ -2279,20 +2498,21 @@ def pause_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRu
 def restart_workflow_run(
     run_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     payload: WorkflowRunRestartRequest | None = Body(default=None),
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if not run.items:
         raise HTTPException(status_code=422, detail="No uploaded workflow items are available to restart")
     workflow_id = payload.workflow_id if payload and payload.workflow_id else run.workflow_id
     workflow = db.get(WorkflowDefinition, workflow_id)
-    if not workflow or workflow.archived:
+    if not workflow or workflow.archived or (workspace_id is not None and workflow.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Workflow not found")
     try:
-        validate_workflow_definition(json.loads(workflow.definition_json), db)
+        validate_workflow_definition(json.loads(workflow.definition_json), db, workspace_id=workspace_id)
     except WorkflowDefinitionError as exc:
         raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
 
@@ -2338,11 +2558,12 @@ def restart_workflow_run(
 def retry_failed_workflow_run(
     run_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status == "canceled":
         raise HTTPException(status_code=409, detail="Canceled workflow run cannot retry failed items")
     blocking_statuses = {"uploading", "preprocessing", "queued", "running", "paused"}
@@ -2392,36 +2613,38 @@ def retry_failed_workflow_run(
 
 
 @app.get("/api/workflow-runs", response_model=list[WorkflowRunRead])
-def list_workflow_runs(limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)) -> list[WorkflowRunRead]:
-    runs = db.query(WorkflowRun).order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc()).limit(limit).all()
+def list_workflow_runs(request: Request, limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)) -> list[WorkflowRunRead]:
+    workspace_id = _current_workspace_id(request)
+    runs = _scope_query(db.query(WorkflowRun), WorkflowRun, workspace_id).order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc()).limit(limit).all()
     return [WorkflowRunRead(**payload) for payload in workflow_runs_to_read(runs, include_items=False, db=db)]
 
 
 @app.get("/api/workflow-runs/{run_id}", response_model=WorkflowRunRead)
-def get_workflow_run(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+def get_workflow_run(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     return WorkflowRunRead(**workflow_run_to_read(run))
 
 
 @app.get("/api/workflow-runs/{run_id}/summary", response_model=WorkflowRunRead)
-def get_workflow_run_summary(run_id: str, db: Session = Depends(get_db)) -> WorkflowRunRead:
+def get_workflow_run_summary(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     return WorkflowRunRead(**workflow_run_to_read(run, include_items=False, db=db))
 
 
 @app.get("/api/workflow-runs/{run_id}/export")
 def export_workflow_run(
     run_id: str,
+    request: Request,
     format: str = Query(default="csv", pattern="^(json|csv|xlsx)$"),
     db: Session = Depends(get_db),
 ) -> Response:
+    workspace_id = _current_workspace_id(request)
     run = db.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     artifact = _build_export_artifact(db, "workflow_run", run.id, format)
     log_audit_event(
         db,
@@ -2439,27 +2662,32 @@ def export_workflow_run(
 def create_export_job(
     payload: ExportJobCreate,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ExportJobRead:
+    workspace_id = _current_workspace_id(request)
     job = _queue_export_job(
         db,
         background_tasks,
         owner_type=payload.owner_type,
         owner_id=payload.owner_id,
         format=payload.format,
+        workspace_id=workspace_id,
     )
     return _export_job_read(job)
 
 
 @app.get("/api/export-jobs", response_model=list[ExportJobRead])
 def list_export_jobs(
+    request: Request,
     owner_type: str | None = Query(default=None, pattern="^(workflow_run|batch|classification_batch|required_field_check_batch)$"),
     owner_id: str | None = Query(default=None),
     status: str | None = Query(default=None, pattern="^(queued|running|completed|failed)$"),
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> list[ExportJobRead]:
-    query = db.query(ExportJob)
+    workspace_id = _current_workspace_id(request)
+    query = _scope_query(db.query(ExportJob), ExportJob, workspace_id)
     if owner_type:
         query = query.filter(ExportJob.owner_type == owner_type)
     if owner_id:
@@ -2474,11 +2702,12 @@ def list_export_jobs(
 def retry_export_job(
     job_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ExportJobRead:
+    workspace_id = _current_workspace_id(request)
     source = db.get(ExportJob, job_id)
-    if not source:
-        raise HTTPException(status_code=404, detail="Export job not found")
+    _ensure_workspace_scope(source, workspace_id, "Export job not found")
     if source.status != "failed":
         raise HTTPException(status_code=409, detail="Only failed export jobs can be retried")
     job = _queue_export_job(
@@ -2488,23 +2717,24 @@ def retry_export_job(
         owner_id=source.owner_id,
         format=source.format,
         retry_source_job_id=source.id,
+        workspace_id=workspace_id,
     )
     return _export_job_read(job)
 
 
 @app.get("/api/export-jobs/{job_id}", response_model=ExportJobRead)
-def get_export_job(job_id: str, db: Session = Depends(get_db)) -> ExportJobRead:
+def get_export_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> ExportJobRead:
+    workspace_id = _current_workspace_id(request)
     job = db.get(ExportJob, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Export job not found")
+    _ensure_workspace_scope(job, workspace_id, "Export job not found")
     return _export_job_read(job)
 
 
 @app.get("/api/export-jobs/{job_id}/download")
-def download_export_job(job_id: str, db: Session = Depends(get_db)) -> FileResponse:
+def download_export_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> FileResponse:
+    workspace_id = _current_workspace_id(request)
     job = db.get(ExportJob, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Export job not found")
+    _ensure_workspace_scope(job, workspace_id, "Export job not found")
     if job.status != "completed" or not job.storage_path or not job.filename:
         raise HTTPException(status_code=409, detail="Export job is not ready for download")
     path = materialize_storage_ref(job.storage_path, suffix=Path(job.filename).suffix)
@@ -2523,16 +2753,17 @@ async def create_batch(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
     schema_id = _required_form_value(form, "schema_id")
     schema = db.get(Schema, schema_id)
-    if not schema:
+    if not schema or (workspace_id is not None and schema.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Schema not found")
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
     _validate_upload_file_count(files)
 
-    batch = Batch(schema_id=schema.id, schema_version=1, status="uploading", total_count=len(files))
+    batch = Batch(workspace_id=workspace_id, schema_id=schema.id, schema_version=1, status="uploading", total_count=len(files))
     db.add(batch)
     db.flush()
     log_audit_event(
@@ -2566,12 +2797,13 @@ async def create_batch(
 
 
 @app.post("/api/batches/init", response_model=BatchRead)
-def init_batch(payload: BatchInitRequest, db: Session = Depends(get_db)) -> BatchRead:
+def init_batch(payload: BatchInitRequest, request: Request, db: Session = Depends(get_db)) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     schema = db.get(Schema, payload.schema_id)
-    if not schema:
+    if not schema or (workspace_id is not None and schema.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Schema not found")
     _validate_declared_batch_file_count(payload.total_count)
-    batch = Batch(schema_id=schema.id, schema_version=1, status="uploading", total_count=payload.total_count)
+    batch = Batch(workspace_id=workspace_id, schema_id=schema.id, schema_version=1, status="uploading", total_count=payload.total_count)
     db.add(batch)
     db.flush()
     log_audit_event(
@@ -2591,12 +2823,14 @@ def init_batch(payload: BatchInitRequest, db: Session = Depends(get_db)) -> Batc
 def create_batch_from_documents(
     payload: BatchFromDocumentsRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     schema = db.get(Schema, payload.schema_id)
-    if not schema:
+    if not schema or (workspace_id is not None and schema.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Schema not found")
-    documents = _documents_for_selection(payload.document_ids, db)
+    documents = _documents_for_selection(payload.document_ids, db, workspace_id=workspace_id)
     batch, ready_job_ids = _create_extraction_batch_from_documents(schema, documents, db)
     response = _batch_read(batch)
     if ready_job_ids:
@@ -2607,10 +2841,10 @@ def create_batch_from_documents(
 
 @app.post("/api/batches/{batch_id}/items", response_model=BatchRead)
 async def append_batch_items(batch_id: str, request: Request, db: Session = Depends(get_db)) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
     batch = db.get(Batch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Batch not found")
     if batch.status not in {"uploading", "queued"}:
         raise HTTPException(status_code=409, detail="Batch already started")
     await _append_extraction_batch_items(batch, form, files, db)
@@ -2619,10 +2853,10 @@ async def append_batch_items(batch_id: str, request: Request, db: Session = Depe
 
 
 @app.post("/api/batches/{batch_id}/start", response_model=BatchRead)
-def start_batch(batch_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> BatchRead:
+def start_batch(batch_id: str, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(Batch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Batch not found")
     if batch.status not in {"uploading", "queued"}:
         return _batch_read(batch)
     _validate_owner_can_start(batch, batch.items)
@@ -2645,10 +2879,10 @@ def start_batch(batch_id: str, background_tasks: BackgroundTasks, db: Session = 
 
 
 @app.post("/api/batches/{batch_id}/discard", response_model=BatchRead)
-def discard_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
+def discard_batch(batch_id: str, request: Request, db: Session = Depends(get_db)) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(Batch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Batch not found")
     discarded_count = _discard_batch_items(batch, db)
     batch.status = "canceled"
     batch.completed_at = datetime.utcnow()
@@ -2666,10 +2900,10 @@ def discard_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
 
 
 @app.post("/api/batches/{batch_id}/resume", response_model=BatchRead)
-def resume_batch(batch_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> BatchRead:
+def resume_batch(batch_id: str, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(Batch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Batch not found")
     if batch.status in {"completed", "completed_with_errors", "failed", "canceled"}:
         raise HTTPException(status_code=409, detail="Batch is already terminal")
     if not batch.items:
@@ -2698,35 +2932,37 @@ def resume_batch(batch_id: str, background_tasks: BackgroundTasks, db: Session =
 
 @app.get("/api/batches", response_model=list[BatchRead])
 def list_batches(
+    request: Request,
     limit: int = Query(default=20, ge=1, le=100),
     include_items: bool = Query(default=True),
     db: Session = Depends(get_db),
 ) -> list[BatchRead]:
-    batches = db.query(Batch).order_by(Batch.created_at.desc()).limit(limit).all()
+    workspace_id = _current_workspace_id(request)
+    batches = _scope_query(db.query(Batch), Batch, workspace_id).order_by(Batch.created_at.desc()).limit(limit).all()
     return [_batch_read(batch, include_items=include_items, db=db) for batch in batches]
 
 
 @app.get("/api/batches/{batch_id}", response_model=BatchRead)
-def get_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
+def get_batch(batch_id: str, request: Request, db: Session = Depends(get_db)) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(Batch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Batch not found")
     return _batch_read(batch)
 
 
 @app.get("/api/batches/{batch_id}/summary", response_model=BatchRead)
-def get_batch_summary(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
+def get_batch_summary(batch_id: str, request: Request, db: Session = Depends(get_db)) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(Batch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Batch not found")
     return _batch_read(batch, include_items=False, db=db)
 
 
 @app.post("/api/batches/{batch_id}/cancel", response_model=BatchRead)
-def cancel_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
+def cancel_batch(batch_id: str, request: Request, db: Session = Depends(get_db)) -> BatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(Batch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Batch not found")
 
     canceled_count = 0
     now = datetime.utcnow()
@@ -2767,12 +3003,13 @@ def cancel_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchRead:
 @app.get("/api/batches/{batch_id}/export")
 def export_batch(
     batch_id: str,
+    request: Request,
     format: str = Query(default="csv", pattern="^(json|csv|xlsx)$"),
     db: Session = Depends(get_db),
 ) -> Response:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(Batch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Batch not found")
     artifact = _build_export_artifact(db, "batch", batch.id, format)
     log_audit_event(
         db,
@@ -2792,16 +3029,17 @@ async def create_classification_batch(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
     classifier_id = _required_form_value(form, "classifier_id")
     classifier = db.get(DocumentClassifier, classifier_id)
-    if not classifier or classifier.archived:
+    if not classifier or classifier.archived or (workspace_id is not None and classifier.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Document classifier not found")
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
     _validate_upload_file_count(files)
 
-    batch = ClassificationBatch(classifier_id=classifier.id, status="uploading", total_count=len(files))
+    batch = ClassificationBatch(workspace_id=workspace_id, classifier_id=classifier.id, status="uploading", total_count=len(files))
     db.add(batch)
     db.flush()
     log_audit_event(
@@ -2835,12 +3073,17 @@ async def create_classification_batch(
 
 
 @app.post("/api/classification-batches/init", response_model=ClassificationBatchRead)
-def init_classification_batch(payload: ClassificationBatchInitRequest, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+def init_classification_batch(
+    payload: ClassificationBatchInitRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     classifier = db.get(DocumentClassifier, payload.classifier_id)
-    if not classifier or classifier.archived:
+    if not classifier or classifier.archived or (workspace_id is not None and classifier.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Document classifier not found")
     _validate_declared_batch_file_count(payload.total_count)
-    batch = ClassificationBatch(classifier_id=classifier.id, status="uploading", total_count=payload.total_count)
+    batch = ClassificationBatch(workspace_id=workspace_id, classifier_id=classifier.id, status="uploading", total_count=payload.total_count)
     db.add(batch)
     db.flush()
     log_audit_event(
@@ -2860,12 +3103,14 @@ def init_classification_batch(payload: ClassificationBatchInitRequest, db: Sessi
 def create_classification_batch_from_documents(
     payload: ClassificationBatchFromDocumentsRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     classifier = db.get(DocumentClassifier, payload.classifier_id)
-    if not classifier or classifier.archived:
+    if not classifier or classifier.archived or (workspace_id is not None and classifier.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Document classifier not found")
-    documents = _documents_for_selection(payload.document_ids, db)
+    documents = _documents_for_selection(payload.document_ids, db, workspace_id=workspace_id)
     batch, ready_job_ids = _create_classification_batch_from_documents(classifier, documents, db)
     response = _classification_batch_read(batch)
     if ready_job_ids:
@@ -2876,10 +3121,10 @@ def create_classification_batch_from_documents(
 
 @app.post("/api/classification-batches/{batch_id}/items", response_model=ClassificationBatchRead)
 async def append_classification_batch_items(batch_id: str, request: Request, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
     batch = db.get(ClassificationBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Classification batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Classification batch not found")
     if batch.status not in {"uploading", "queued"}:
         raise HTTPException(status_code=409, detail="Classification batch already started")
     await _append_classification_batch_items(batch, form, files, db)
@@ -2888,10 +3133,15 @@ async def append_classification_batch_items(batch_id: str, request: Request, db:
 
 
 @app.post("/api/classification-batches/{batch_id}/start", response_model=ClassificationBatchRead)
-def start_classification_batch(batch_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+def start_classification_batch(
+    batch_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(ClassificationBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Classification batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Classification batch not found")
     if batch.status not in {"uploading", "queued"}:
         return _classification_batch_read(batch)
     _validate_owner_can_start(batch, batch.items)
@@ -2914,10 +3164,10 @@ def start_classification_batch(batch_id: str, background_tasks: BackgroundTasks,
 
 
 @app.post("/api/classification-batches/{batch_id}/discard", response_model=ClassificationBatchRead)
-def discard_classification_batch(batch_id: str, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+def discard_classification_batch(batch_id: str, request: Request, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(ClassificationBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Classification batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Classification batch not found")
     discarded_count = _discard_batch_items(batch, db)
     batch.status = "canceled"
     batch.completed_at = datetime.utcnow()
@@ -2938,11 +3188,12 @@ def discard_classification_batch(batch_id: str, db: Session = Depends(get_db)) -
 def resume_classification_batch(
     batch_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(ClassificationBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Classification batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Classification batch not found")
     if batch.status in {"completed", "completed_with_errors", "failed", "canceled"}:
         raise HTTPException(status_code=409, detail="Classification batch is already terminal")
     if not batch.items:
@@ -2971,35 +3222,37 @@ def resume_classification_batch(
 
 @app.get("/api/classification-batches", response_model=list[ClassificationBatchRead])
 def list_classification_batches(
+    request: Request,
     limit: int = Query(default=20, ge=1, le=100),
     include_items: bool = Query(default=True),
     db: Session = Depends(get_db),
 ) -> list[ClassificationBatchRead]:
-    batches = db.query(ClassificationBatch).order_by(ClassificationBatch.created_at.desc()).limit(limit).all()
+    workspace_id = _current_workspace_id(request)
+    batches = _scope_query(db.query(ClassificationBatch), ClassificationBatch, workspace_id).order_by(ClassificationBatch.created_at.desc()).limit(limit).all()
     return [_classification_batch_read(batch, include_items=include_items, db=db) for batch in batches]
 
 
 @app.get("/api/classification-batches/{batch_id}", response_model=ClassificationBatchRead)
-def get_classification_batch(batch_id: str, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+def get_classification_batch(batch_id: str, request: Request, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(ClassificationBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Classification batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Classification batch not found")
     return _classification_batch_read(batch)
 
 
 @app.get("/api/classification-batches/{batch_id}/summary", response_model=ClassificationBatchRead)
-def get_classification_batch_summary(batch_id: str, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+def get_classification_batch_summary(batch_id: str, request: Request, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(ClassificationBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Classification batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Classification batch not found")
     return _classification_batch_read(batch, include_items=False, db=db)
 
 
 @app.post("/api/classification-batches/{batch_id}/cancel", response_model=ClassificationBatchRead)
-def cancel_classification_batch(batch_id: str, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+def cancel_classification_batch(batch_id: str, request: Request, db: Session = Depends(get_db)) -> ClassificationBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(ClassificationBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Classification batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Classification batch not found")
     _cancel_module_batch(batch, "classification_batch", db)
     db.commit()
     db.refresh(batch)
@@ -3009,12 +3262,13 @@ def cancel_classification_batch(batch_id: str, db: Session = Depends(get_db)) ->
 @app.get("/api/classification-batches/{batch_id}/export")
 def export_classification_batch(
     batch_id: str,
+    request: Request,
     format: str = Query(default="csv", pattern="^(json|csv|xlsx)$"),
     db: Session = Depends(get_db),
 ) -> Response:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(ClassificationBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Classification batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Classification batch not found")
     artifact = _build_export_artifact(db, "classification_batch", batch.id, format)
     log_audit_event(
         db,
@@ -3034,16 +3288,17 @@ async def create_required_field_check_batch(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
     checklist_id = _required_form_value(form, "checklist_id")
     checklist = db.get(RequiredFieldChecklist, checklist_id)
-    if not checklist or checklist.archived:
+    if not checklist or checklist.archived or (workspace_id is not None and checklist.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Required field checklist not found")
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
     _validate_upload_file_count(files)
 
-    batch = RequiredFieldCheckBatch(checklist_id=checklist.id, status="uploading", total_count=len(files))
+    batch = RequiredFieldCheckBatch(workspace_id=workspace_id, checklist_id=checklist.id, status="uploading", total_count=len(files))
     db.add(batch)
     db.flush()
     log_audit_event(
@@ -3079,13 +3334,15 @@ async def create_required_field_check_batch(
 @app.post("/api/required-field-check-batches/init", response_model=RequiredFieldCheckBatchRead)
 def init_required_field_check_batch(
     payload: RequiredFieldCheckBatchInitRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     checklist = db.get(RequiredFieldChecklist, payload.checklist_id)
-    if not checklist or checklist.archived:
+    if not checklist or checklist.archived or (workspace_id is not None and checklist.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Required field checklist not found")
     _validate_declared_batch_file_count(payload.total_count)
-    batch = RequiredFieldCheckBatch(checklist_id=checklist.id, status="uploading", total_count=payload.total_count)
+    batch = RequiredFieldCheckBatch(workspace_id=workspace_id, checklist_id=checklist.id, status="uploading", total_count=payload.total_count)
     db.add(batch)
     db.flush()
     log_audit_event(
@@ -3105,12 +3362,14 @@ def init_required_field_check_batch(
 def create_required_field_check_batch_from_documents(
     payload: RequiredFieldCheckBatchFromDocumentsRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     checklist = db.get(RequiredFieldChecklist, payload.checklist_id)
-    if not checklist or checklist.archived:
+    if not checklist or checklist.archived or (workspace_id is not None and checklist.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Required field checklist not found")
-    documents = _documents_for_selection(payload.document_ids, db)
+    documents = _documents_for_selection(payload.document_ids, db, workspace_id=workspace_id)
     batch, ready_job_ids = _create_required_field_batch_from_documents(checklist, documents, db)
     response = _required_field_batch_read(batch)
     if ready_job_ids:
@@ -3125,10 +3384,10 @@ async def append_required_field_check_batch_items(
     request: Request,
     db: Session = Depends(get_db),
 ) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
     batch = db.get(RequiredFieldCheckBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Required field check batch not found")
     if batch.status not in {"uploading", "queued"}:
         raise HTTPException(status_code=409, detail="Required field check batch already started")
     await _append_required_field_batch_items(batch, form, files, db)
@@ -3140,11 +3399,12 @@ async def append_required_field_check_batch_items(
 def start_required_field_check_batch(
     batch_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(RequiredFieldCheckBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Required field check batch not found")
     if batch.status not in {"uploading", "queued"}:
         return _required_field_batch_read(batch)
     _validate_owner_can_start(batch, batch.items)
@@ -3167,10 +3427,10 @@ def start_required_field_check_batch(
 
 
 @app.post("/api/required-field-check-batches/{batch_id}/discard", response_model=RequiredFieldCheckBatchRead)
-def discard_required_field_check_batch(batch_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+def discard_required_field_check_batch(batch_id: str, request: Request, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(RequiredFieldCheckBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Required field check batch not found")
     discarded_count = _discard_batch_items(batch, db)
     batch.status = "canceled"
     batch.completed_at = datetime.utcnow()
@@ -3191,11 +3451,12 @@ def discard_required_field_check_batch(batch_id: str, db: Session = Depends(get_
 def resume_required_field_check_batch(
     batch_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(RequiredFieldCheckBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Required field check batch not found")
     if batch.status in {"completed", "completed_with_errors", "failed", "canceled"}:
         raise HTTPException(status_code=409, detail="Required field check batch is already terminal")
     if not batch.items:
@@ -3224,35 +3485,37 @@ def resume_required_field_check_batch(
 
 @app.get("/api/required-field-check-batches", response_model=list[RequiredFieldCheckBatchRead])
 def list_required_field_check_batches(
+    request: Request,
     limit: int = Query(default=20, ge=1, le=100),
     include_items: bool = Query(default=True),
     db: Session = Depends(get_db),
 ) -> list[RequiredFieldCheckBatchRead]:
-    batches = db.query(RequiredFieldCheckBatch).order_by(RequiredFieldCheckBatch.created_at.desc()).limit(limit).all()
+    workspace_id = _current_workspace_id(request)
+    batches = _scope_query(db.query(RequiredFieldCheckBatch), RequiredFieldCheckBatch, workspace_id).order_by(RequiredFieldCheckBatch.created_at.desc()).limit(limit).all()
     return [_required_field_batch_read(batch, include_items=include_items, db=db) for batch in batches]
 
 
 @app.get("/api/required-field-check-batches/{batch_id}", response_model=RequiredFieldCheckBatchRead)
-def get_required_field_check_batch(batch_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+def get_required_field_check_batch(batch_id: str, request: Request, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(RequiredFieldCheckBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Required field check batch not found")
     return _required_field_batch_read(batch)
 
 
 @app.get("/api/required-field-check-batches/{batch_id}/summary", response_model=RequiredFieldCheckBatchRead)
-def get_required_field_check_batch_summary(batch_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+def get_required_field_check_batch_summary(batch_id: str, request: Request, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(RequiredFieldCheckBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Required field check batch not found")
     return _required_field_batch_read(batch, include_items=False, db=db)
 
 
 @app.post("/api/required-field-check-batches/{batch_id}/cancel", response_model=RequiredFieldCheckBatchRead)
-def cancel_required_field_check_batch(batch_id: str, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+def cancel_required_field_check_batch(batch_id: str, request: Request, db: Session = Depends(get_db)) -> RequiredFieldCheckBatchRead:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(RequiredFieldCheckBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Required field check batch not found")
     _cancel_module_batch(batch, "required_field_check_batch", db)
     db.commit()
     db.refresh(batch)
@@ -3262,12 +3525,13 @@ def cancel_required_field_check_batch(batch_id: str, db: Session = Depends(get_d
 @app.get("/api/required-field-check-batches/{batch_id}/export")
 def export_required_field_check_batch(
     batch_id: str,
+    request: Request,
     format: str = Query(default="csv", pattern="^(json|csv|xlsx)$"),
     db: Session = Depends(get_db),
 ) -> Response:
+    workspace_id = _current_workspace_id(request)
     batch = db.get(RequiredFieldCheckBatch, batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Required field check batch not found")
+    _ensure_workspace_scope(batch, workspace_id, "Required field check batch not found")
     artifact = _build_export_artifact(db, "required_field_check_batch", batch.id, format)
     log_audit_event(
         db,
@@ -3283,6 +3547,7 @@ def export_required_field_check_batch(
 
 @app.get("/api/archive/search", response_model=list[ArchiveSearchResult])
 def archive_search(
+    request: Request,
     q: str | None = None,
     status: str | None = None,
     schema_id: str | None = None,
@@ -3290,11 +3555,13 @@ def archive_search(
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> list[ArchiveSearchResult]:
-    return _archive_search(db, q=q, status=status, schema_id=schema_id, document_type=document_type, limit=limit)
+    workspace_id = _current_workspace_id(request)
+    return _archive_search(db, workspace_id=workspace_id, q=q, status=status, schema_id=schema_id, document_type=document_type, limit=limit)
 
 
 @app.delete("/api/maintenance/parsing-history")
 def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
+    _require_workspace_admin_mode()
     settings = get_settings()
     counts = {
         "batches": db.query(Batch).count(),
@@ -3355,17 +3622,20 @@ def clear_parsing_history(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 @app.post("/api/maintenance/retention-cleanup")
 def run_retention_cleanup() -> dict[str, Any]:
+    _require_workspace_admin_mode()
     return _cleanup_expired_upload_data()
 
 
 @app.get("/api/audit-events", response_model=list[AuditEventRead])
 def list_audit_events(
+    request: Request,
     entity_type: str | None = None,
     entity_id: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> list[AuditEventRead]:
-    query = db.query(AuditEvent)
+    workspace_id = _current_workspace_id(request)
+    query = _scope_query(db.query(AuditEvent), AuditEvent, workspace_id)
     if entity_type:
         query = query.filter(AuditEvent.entity_type == entity_type)
     if entity_id:
@@ -3401,6 +3671,390 @@ def _document_read(document: Document) -> DocumentRead:
             for page in document.pages
         ],
     )
+
+
+def _load_bank_poc_template() -> dict[str, Any]:
+    template_path = PROJECT_ROOT / "docs" / "templates" / "bank-documents-poc.json"
+    try:
+        return json.loads(template_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Bank PoC template file is missing") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Bank PoC template file is invalid") from exc
+
+
+def _seed_bank_poc_schema(db: Session, payload: dict[str, Any], *, workspace_id: str | None) -> tuple[Schema, bool]:
+    schema_json = {
+        "name": payload["name"],
+        "display_name": payload.get("display_name"),
+        "description": payload.get("description"),
+        "regions": payload.get("regions", []),
+        "fields": payload["fields"],
+        "is_template": True,
+        "template_category": "bank_documents",
+        "pinned": True,
+    }
+    _validate_schema_region_references(schema_json)
+    existing = _find_active_by_name(db, Schema, payload["name"], workspace_id=workspace_id)
+    legacy_schema = _find_legacy_bank_poc_schema(db, workspace_id=workspace_id)
+    if existing:
+        _archive_legacy_bank_poc_schema(db, existing.id, workspace_id=workspace_id)
+        current_schema_json = existing.schema_json
+        existing.display_name = payload.get("display_name")
+        existing.description = payload.get("description")
+        existing.schema_json = json.dumps(schema_json, ensure_ascii=False)
+        existing.is_template = True
+        existing.template_category = "bank_documents"
+        existing.pinned = True
+        existing.archived = False
+        if current_schema_json != existing.schema_json:
+            existing.current_version = (existing.current_version or 1) + 1
+            log_audit_event(
+                db,
+                entity_type="schema",
+                entity_id=existing.id,
+                action="updated",
+                message=f"Updated schema {existing.name} from bank PoC template",
+                metadata={"template": "bank_documents_poc", "field_count": len(payload["fields"])},
+            )
+        return existing, False
+    if legacy_schema:
+        current_schema_json = legacy_schema.schema_json
+        legacy_schema.name = payload["name"]
+        legacy_schema.display_name = payload.get("display_name")
+        legacy_schema.description = payload.get("description")
+        legacy_schema.schema_json = json.dumps(schema_json, ensure_ascii=False)
+        legacy_schema.is_template = True
+        legacy_schema.template_category = "bank_documents"
+        legacy_schema.pinned = True
+        legacy_schema.archived = False
+        if current_schema_json != legacy_schema.schema_json:
+            legacy_schema.current_version = (legacy_schema.current_version or 1) + 1
+        log_audit_event(
+            db,
+            entity_type="schema",
+            entity_id=legacy_schema.id,
+            action="updated",
+            message=f"Updated legacy schema {legacy_schema.name} from bank PoC template",
+            metadata={"template": "bank_documents_poc", "field_count": len(payload["fields"])},
+        )
+        return legacy_schema, False
+
+    schema = Schema(
+        workspace_id=workspace_id,
+        name=payload["name"],
+        display_name=payload.get("display_name"),
+        description=payload.get("description"),
+        current_version=1,
+        schema_json=json.dumps(schema_json, ensure_ascii=False),
+        is_template=True,
+        template_category="bank_documents",
+        pinned=True,
+        ephemeral=False,
+        archived=False,
+    )
+    db.add(schema)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="schema",
+        entity_id=schema.id,
+        action="created",
+        message=f"Created schema {schema.name} from bank PoC template",
+        metadata={"template": "bank_documents_poc", "field_count": len(payload["fields"])},
+    )
+    return schema, True
+
+
+def _seed_bank_poc_classifier(db: Session, payload: dict[str, Any], *, workspace_id: str | None) -> tuple[DocumentClassifier, bool]:
+    config = {
+        "name": payload["name"],
+        "description": payload.get("description"),
+        "allow_unknown": bool(payload.get("allow_unknown", True)),
+        "classes": payload["classes"],
+    }
+    existing = _find_active_by_name(db, DocumentClassifier, payload["name"], workspace_id=workspace_id)
+    if existing:
+        next_config_json = json.dumps(config, ensure_ascii=False)
+        if (
+            existing.description != payload.get("description")
+            or existing.allow_unknown != bool(payload.get("allow_unknown", True))
+            or existing.config_json != next_config_json
+        ):
+            existing.description = payload.get("description")
+            existing.allow_unknown = bool(payload.get("allow_unknown", True))
+            existing.config_json = next_config_json
+            log_audit_event(
+                db,
+                entity_type="document_classifier",
+                entity_id=existing.id,
+                action="updated",
+                message=f"Updated classifier {existing.name} from bank PoC template",
+                metadata={"template": "bank_documents_poc", "class_count": len(payload["classes"])},
+            )
+        return existing, False
+
+    classifier = DocumentClassifier(
+        workspace_id=workspace_id,
+        name=payload["name"],
+        description=payload.get("description"),
+        allow_unknown=bool(payload.get("allow_unknown", True)),
+        config_json=json.dumps(config, ensure_ascii=False),
+        archived=False,
+    )
+    db.add(classifier)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="document_classifier",
+        entity_id=classifier.id,
+        action="created",
+        message=f"Created classifier {classifier.name} from bank PoC template",
+        metadata={"template": "bank_documents_poc", "class_count": len(payload["classes"])},
+    )
+    return classifier, True
+
+
+def _seed_bank_poc_checklist(db: Session, payload: dict[str, Any], *, workspace_id: str | None) -> tuple[RequiredFieldChecklist, bool]:
+    existing = _find_active_by_name(db, RequiredFieldChecklist, payload["name"], workspace_id=workspace_id)
+    if existing:
+        return existing, False
+
+    config = {
+        "name": payload["name"],
+        "description": payload.get("description"),
+        "regions": payload.get("regions", []),
+        "items": payload["items"],
+    }
+    _validate_checklist_region_references(config)
+    checklist = RequiredFieldChecklist(
+        workspace_id=workspace_id,
+        name=payload["name"],
+        description=payload.get("description"),
+        config_json=json.dumps(config, ensure_ascii=False),
+        archived=False,
+    )
+    db.add(checklist)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="required_field_checklist",
+        entity_id=checklist.id,
+        action="created",
+        message=f"Created checklist {checklist.name} from bank PoC template",
+        metadata={"template": "bank_documents_poc", "item_count": len(payload["items"])},
+    )
+    return checklist, True
+
+
+def _seed_bank_poc_workflow(
+    db: Session,
+    payload: dict[str, Any],
+    schema: Schema,
+    classifier: DocumentClassifier,
+    checklist: RequiredFieldChecklist,
+    *,
+    workspace_id: str | None,
+) -> tuple[WorkflowDefinition, bool]:
+    definition = _bank_poc_workflow_definition(schema.id, classifier.id, checklist.id)
+    validate_workflow_definition(definition, db, workspace_id=workspace_id)
+    existing = _find_active_by_name(db, WorkflowDefinition, payload["name"], workspace_id=workspace_id)
+    if existing:
+        existing.archived = False
+        if existing.description != payload.get("description") or existing.definition_json != json.dumps(definition, ensure_ascii=False):
+            existing.description = payload.get("description")
+            existing.definition_json = json.dumps(definition, ensure_ascii=False)
+            log_audit_event(
+                db,
+                entity_type="workflow_definition",
+                entity_id=existing.id,
+                action="updated",
+                message=f"Updated workflow {existing.name} from bank PoC template",
+                metadata={"template": "bank_documents_poc"},
+            )
+        return existing, False
+
+    workflow = WorkflowDefinition(
+        workspace_id=workspace_id,
+        name=payload["name"],
+        description=payload.get("description"),
+        definition_json=json.dumps(definition, ensure_ascii=False),
+        archived=False,
+    )
+    db.add(workflow)
+    db.flush()
+    log_audit_event(
+        db,
+        entity_type="workflow_definition",
+        entity_id=workflow.id,
+        action="created",
+        message=f"Created workflow {workflow.name} from bank PoC template",
+        metadata={"template": "bank_documents_poc"},
+    )
+    return workflow, True
+
+
+def _seed_bank_poc_sample_documents(
+    db: Session,
+    samples: list[dict[str, Any]],
+    *,
+    workspace_id: str | None,
+) -> tuple[list[Document], dict[str, bool]]:
+    if not samples:
+        samples = [
+            {"filename": "bank_00006.jpg", "source_path": "assets/sample/bank_00006.jpg"},
+            {"filename": "bank_00008.jpg", "source_path": "assets/sample/bank_00008.jpg"},
+            {"filename": "bank_00018.jpeg", "source_path": "assets/sample/bank_00018.jpeg"},
+        ]
+    documents: list[Document] = []
+    created: dict[str, bool] = {}
+    for sample in samples:
+        filename = str(sample["filename"])
+        source_path = str(sample["source_path"])
+        library_path = f"bank-poc/{filename}"
+        existing = (
+            _scope_query(db.query(Document), Document, workspace_id)
+            .filter(Document.library_path == library_path, Document.status != "deleted")
+            .order_by(Document.created_at.desc())
+            .first()
+        )
+        if existing:
+            documents.append(existing)
+            created[filename] = False
+            continue
+
+        local_path = PROJECT_ROOT / source_path
+        if not local_path.exists():
+            raise HTTPException(status_code=500, detail=f"Bank PoC sample document is missing: {source_path}")
+
+        with local_path.open("rb") as handle:
+            upload = LocalUpload(filename=filename, content_type=_sample_content_type(filename), file=handle)
+            document = _create_document_from_upload(upload, db, workspace_id=workspace_id)
+        document.library_path = library_path
+        document.ai_summary = f"은행 PoC 샘플 문서. 출처: {source_path}"
+        document.recommendation_reasoning = "사용자가 제공한 로컬 샘플 자산을 데모용으로 보관함에 등록했습니다."
+        _ensure_library_folder_records(db, _library_folder_path(library_path), workspace_id=workspace_id)
+        log_audit_event(
+            db,
+            entity_type="document",
+            entity_id=document.id,
+            action="seeded",
+            message="Seeded bank PoC sample document",
+            metadata={
+                "template": "bank_documents_poc",
+                "library_path": library_path,
+                "source_path": source_path,
+                "source_note": sample.get("source_note", "사용자 제공 로컬 샘플 자산"),
+            },
+        )
+        documents.append(document)
+        created[filename] = True
+    return documents, created
+
+
+def _bank_poc_sample_document_read(document: Document) -> dict[str, Any]:
+    payload = _document_read(document).model_dump()
+    payload["source_path"] = f"assets/sample/{document.filename}"
+    payload["source_note"] = "사용자 제공 로컬 샘플 자산"
+    return payload
+
+
+def _sample_content_type(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    return "application/octet-stream"
+
+
+def _find_legacy_bank_poc_schema(db: Session, *, workspace_id: str | None) -> Schema | None:
+    return _find_active_by_name(db, Schema, "bank_document_core_fields", workspace_id=workspace_id)
+
+
+def _archive_legacy_bank_poc_schema(db: Session, keep_schema_id: str, *, workspace_id: str | None) -> None:
+    legacy = _find_legacy_bank_poc_schema(db, workspace_id=workspace_id)
+    if not legacy or legacy.id == keep_schema_id:
+        return
+    legacy.archived = True
+    legacy.pinned = False
+    log_audit_event(
+        db,
+        entity_type="schema",
+        entity_id=legacy.id,
+        action="archived",
+        message="Archived legacy bank PoC schema after Korean schema migration",
+        metadata={"template": "bank_documents_poc", "replacement_schema_id": keep_schema_id},
+    )
+
+
+def _find_active_by_name(db: Session, model, name: str, *, workspace_id: str | None):
+    query = _scope_query(db.query(model), model, workspace_id).filter(model.name == name)
+    if hasattr(model, "archived"):
+        query = query.filter(model.archived == False)  # noqa: E712
+    return query.order_by(model.created_at.desc()).first()
+
+
+def _bank_poc_workflow_definition(schema_id: str, classifier_id: str, checklist_id: str) -> dict[str, Any]:
+    return {
+        "nodes": [
+            {"id": "input", "position": {"x": 40, "y": 260}, "data": {"kind": "input", "label": "문서 입력"}},
+            {
+                "id": "classifier",
+                "position": {"x": 220, "y": 260},
+                "data": {"kind": "classifier", "label": "은행 문서 분류", "config": {"classifier_id": classifier_id}},
+            },
+            {
+                "id": "branch",
+                "position": {"x": 400, "y": 230},
+                "data": {
+                    "kind": "branch",
+                    "label": "문서 종류 분기",
+                    "branchKeys": [
+                        "class:신청서",
+                        "class:동의서",
+                        "class:증빙문서",
+                        "unknown",
+                    ],
+                },
+            },
+            {
+                "id": "kie_application",
+                "position": {"x": 620, "y": 50},
+                "data": {"kind": "kie", "label": "신청서 핵심 정보 추출", "config": {"schema_id": schema_id}},
+            },
+            {
+                "id": "required_application",
+                "position": {"x": 970.3101983002833, "y": 43.8229461756374},
+                "data": {"kind": "required-checker", "label": "신청서 필수 항목 확인", "config": {"checklist_id": checklist_id}},
+            },
+            {
+                "id": "required_consent",
+                "position": {"x": 620, "y": 230},
+                "data": {"kind": "required-checker", "label": "동의서 필수 항목 확인", "config": {"checklist_id": checklist_id}},
+            },
+            {
+                "id": "kie_supporting",
+                "position": {"x": 620, "y": 410},
+                "data": {"kind": "kie", "label": "증빙 정보 추출", "config": {"schema_id": schema_id}},
+            },
+            {"id": "merge", "position": {"x": 964.9985835694051, "y": 234.41218130311614}, "data": {"kind": "merge", "label": "결과 병합"}},
+            {"id": "export", "position": {"x": 1120, "y": 230}, "data": {"kind": "export", "label": "Export"}},
+        ],
+        "edges": [
+            {"id": "input-classifier", "source": "input", "target": "classifier"},
+            {"id": "classifier-branch", "source": "classifier", "target": "branch"},
+            {"id": "branch-application", "source": "branch", "target": "kie_application", "sourceHandle": "class:신청서"},
+            {"id": "branch-consent", "source": "branch", "target": "required_consent", "sourceHandle": "class:동의서"},
+            {"id": "branch-supporting", "source": "branch", "target": "kie_supporting", "sourceHandle": "class:증빙문서"},
+            {"id": "branch-unknown", "source": "branch", "target": "merge", "sourceHandle": "unknown"},
+            {"id": "application-kie-required", "source": "kie_application", "target": "required_application"},
+            {"id": "application-required-merge", "source": "required_application", "target": "merge"},
+            {"id": "consent-required-merge", "source": "required_consent", "target": "merge"},
+            {"id": "supporting-kie-merge", "source": "kie_supporting", "target": "merge"},
+            {"id": "merge-export", "source": "merge", "target": "export"},
+        ],
+    }
 
 
 def _repair_image_document_if_needed(document: Document, db: Session) -> None:
@@ -3455,9 +4109,9 @@ def _raw_extraction_read(raw: RawExtraction) -> RawExtractionRead:
     )
 
 
-def _create_document_from_upload(file: UploadFile, db: Session) -> Document:
+def _create_document_from_upload(file: UploadFile, db: Session, *, workspace_id: str | None = None) -> Document:
     try:
-        document, original_path = _create_uploaded_document(file, db)
+        document, original_path = _create_uploaded_document(file, db, workspace_id=workspace_id)
         _preprocess_document_pages(document, original_path, db)
     except DocumentProcessingError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -3475,9 +4129,10 @@ def _persist_document_artifacts(original_path: Path, pages: list[dict[str, int |
     return original_ref, _persist_document_pages(document_key, pages)
 
 
-def _create_uploaded_document(file: UploadFile, db: Session) -> tuple[Document, Path]:
+def _create_uploaded_document(file: UploadFile, db: Session, *, workspace_id: str | None = None) -> tuple[Document, Path]:
     filename, original_path, size_bytes = save_upload_file(file)
     document = Document(
+        workspace_id=workspace_id,
         filename=filename,
         mime_type=file.content_type or "application/octet-stream",
         size_bytes=size_bytes,
@@ -3490,12 +4145,13 @@ def _create_uploaded_document(file: UploadFile, db: Session) -> tuple[Document, 
     return document, original_path
 
 
-def _create_failed_upload_document(file: UploadFile, message: str, db: Session) -> Document:
-    return _create_failed_upload_document_record(file.filename or "upload", file.content_type or "application/octet-stream", message, db)
+def _create_failed_upload_document(file: UploadFile, message: str, db: Session, *, workspace_id: str | None = None) -> Document:
+    return _create_failed_upload_document_record(file.filename or "upload", file.content_type or "application/octet-stream", message, db, workspace_id=workspace_id)
 
 
-def _create_failed_upload_document_record(filename: str, mime_type: str, message: str, db: Session) -> Document:
+def _create_failed_upload_document_record(filename: str, mime_type: str, message: str, db: Session, *, workspace_id: str | None = None) -> Document:
     document = Document(
+        workspace_id=workspace_id,
         filename=filename,
         mime_type=mime_type,
         size_bytes=0,
@@ -3602,8 +4258,9 @@ def _document_library_query(
     status: str | None = None,
     q: str | None = None,
     library_path: str | None = None,
+    workspace_id: str | None = None,
 ):
-    query = db.query(Document)
+    query = _scope_query(db.query(Document), Document, workspace_id)
     if not include_deleted:
         query = query.filter(Document.status != "deleted")
     if status:
@@ -3620,20 +4277,22 @@ def _document_library_query(
     return query
 
 
-def _ensure_library_folder_records(db: Session, folder_path: str) -> None:
+def _ensure_library_folder_records(db: Session, folder_path: str, *, workspace_id: str | None = None) -> None:
     for path in _library_folder_ancestors(folder_path):
         if not path:
             continue
-        if not _library_folder_record_exists(db, path):
-            db.add(DocumentLibraryFolder(path=path))
+        if not _library_folder_record_exists(db, path, workspace_id=workspace_id):
+            db.add(DocumentLibraryFolder(workspace_id=workspace_id, path=path))
 
 
-def _library_folder_record_exists(db: Session, path: str) -> bool:
-    if any(isinstance(item, DocumentLibraryFolder) and item.path == path for item in db.new):
+def _library_folder_record_exists(db: Session, path: str, *, workspace_id: str | None = None) -> bool:
+    if any(isinstance(item, DocumentLibraryFolder) and item.path == path and item.workspace_id == workspace_id for item in db.new):
         return True
-    if any(isinstance(item, DocumentLibraryFolder) and item.path == path for item in db.dirty):
+    if any(isinstance(item, DocumentLibraryFolder) and item.path == path and item.workspace_id == workspace_id for item in db.dirty):
         return True
-    return db.query(DocumentLibraryFolder.id).filter(DocumentLibraryFolder.path == path).one_or_none() is not None
+    query = db.query(DocumentLibraryFolder.id).filter(DocumentLibraryFolder.path == path)
+    query = _scope_query(query, DocumentLibraryFolder, workspace_id)
+    return query.one_or_none() is not None
 
 
 def _normalize_library_clipboard_payload(payload: DocumentLibraryClipboardRequest) -> tuple[list[str], list[str], str]:
@@ -3651,9 +4310,9 @@ def _folder_path_contains(folder_path: str, candidate: str) -> bool:
     return bool(folder and (target == folder or target.startswith(f"{folder}/")))
 
 
-def _existing_library_folder_paths(db: Session) -> set[str]:
-    paths = {row[0] for row in db.query(DocumentLibraryFolder.path).all()}
-    for row in db.query(Document.library_path).filter(Document.status != "deleted", Document.library_path.isnot(None)).all():
+def _existing_library_folder_paths(db: Session, *, workspace_id: str | None = None) -> set[str]:
+    paths = {row[0] for row in _scope_query(db.query(DocumentLibraryFolder.path), DocumentLibraryFolder, workspace_id).all()}
+    for row in _scope_query(db.query(Document.library_path), Document, workspace_id).filter(Document.status != "deleted", Document.library_path.isnot(None)).all():
         folder_path = _library_folder_path(row[0])
         paths.update(_library_folder_ancestors(folder_path))
     paths.discard("")
@@ -3668,7 +4327,7 @@ def _copy_name(name: str, attempt: int) -> str:
     return f"{stem} {marker}{suffix}"
 
 
-def _unique_library_document_path(db: Session, desired_path: str, *, exclude_document_ids: set[str] | None = None) -> str:
+def _unique_library_document_path(db: Session, desired_path: str, *, exclude_document_ids: set[str] | None = None, workspace_id: str | None = None) -> str:
     normalized = _normalize_library_path(desired_path)
     folder = _library_folder_path(normalized)
     name = _library_basename(normalized, "document")
@@ -3676,7 +4335,7 @@ def _unique_library_document_path(db: Session, desired_path: str, *, exclude_doc
     candidate = normalized
     attempt = 0
     while True:
-        query = db.query(Document.id).filter(Document.status != "deleted", Document.library_path == candidate)
+        query = _scope_query(db.query(Document.id), Document, workspace_id).filter(Document.status != "deleted", Document.library_path == candidate)
         if excluded:
             query = query.filter(~Document.id.in_(excluded))
         if query.first() is None:
@@ -3685,12 +4344,12 @@ def _unique_library_document_path(db: Session, desired_path: str, *, exclude_doc
         candidate = _join_library_path(folder, _copy_name(name, attempt))
 
 
-def _unique_library_folder_path(db: Session, desired_path: str, *, exclude_prefixes: set[str] | None = None) -> str:
+def _unique_library_folder_path(db: Session, desired_path: str, *, exclude_prefixes: set[str] | None = None, workspace_id: str | None = None) -> str:
     normalized = _normalize_library_path(desired_path)
     parent = _library_folder_path(normalized)
     name = _library_basename(normalized, "folder")
     excluded = exclude_prefixes or set()
-    existing_paths = _existing_library_folder_paths(db)
+    existing_paths = _existing_library_folder_paths(db, workspace_id=workspace_id)
     existing_paths = {
         path
         for path in existing_paths
@@ -3704,22 +4363,22 @@ def _unique_library_folder_path(db: Session, desired_path: str, *, exclude_prefi
     return candidate
 
 
-def _documents_in_library_folder(db: Session, folder_path: str) -> list[Document]:
+def _documents_in_library_folder(db: Session, folder_path: str, *, workspace_id: str | None = None) -> list[Document]:
     normalized = _normalize_library_path(folder_path)
     if not normalized:
         return []
     return (
-        db.query(Document)
+        _scope_query(db.query(Document), Document, workspace_id)
         .filter(Document.status.notin_(["deleted", "failed"]), Document.library_path.ilike(f"{normalized}/%"))
         .order_by(Document.library_path.asc(), Document.created_at.asc(), Document.id.asc())
         .all()
     )
 
 
-def _selected_library_documents(db: Session, document_ids: list[str]) -> list[Document]:
+def _selected_library_documents(db: Session, document_ids: list[str], *, workspace_id: str | None = None) -> list[Document]:
     if not document_ids:
         return []
-    documents = db.query(Document).filter(Document.id.in_(document_ids)).all()
+    documents = _scope_query(db.query(Document), Document, workspace_id).filter(Document.id.in_(document_ids)).all()
     by_id = {document.id: document for document in documents}
     missing = [document_id for document_id in document_ids if document_id not in by_id]
     if missing:
@@ -3730,10 +4389,10 @@ def _selected_library_documents(db: Session, document_ids: list[str]) -> list[Do
     return [by_id[document_id] for document_id in document_ids]
 
 
-def _move_library_entries(payload: DocumentLibraryClipboardRequest, db: Session) -> DocumentLibraryActionRead:
+def _move_library_entries(payload: DocumentLibraryClipboardRequest, db: Session, *, workspace_id: str | None = None) -> DocumentLibraryActionRead:
     document_ids, folder_paths, target_folder = _normalize_library_clipboard_payload(payload)
     if target_folder:
-        _ensure_library_folder_records(db, target_folder)
+        _ensure_library_folder_records(db, target_folder, workspace_id=workspace_id)
     moved_documents: list[Document] = []
     moved_document_ids: set[str] = set()
 
@@ -3745,21 +4404,21 @@ def _move_library_entries(payload: DocumentLibraryClipboardRequest, db: Session)
             new_folder_path = folder_path
         else:
             desired_folder_path = _join_library_path(target_folder, _library_basename(folder_path, "folder"))
-            new_folder_path = _unique_library_folder_path(db, desired_folder_path, exclude_prefixes={folder_path})
+            new_folder_path = _unique_library_folder_path(db, desired_folder_path, exclude_prefixes={folder_path}, workspace_id=workspace_id)
         if new_folder_path != folder_path:
-            _move_library_folder_records(db, folder_path, new_folder_path)
-            for document in _documents_in_library_folder(db, folder_path):
+            _move_library_folder_records(db, folder_path, new_folder_path, workspace_id=workspace_id)
+            for document in _documents_in_library_folder(db, folder_path, workspace_id=workspace_id):
                 suffix = _normalize_library_path(document.library_path).removeprefix(f"{folder_path}/")
-                document.library_path = _unique_library_document_path(db, _join_library_path(new_folder_path, suffix), exclude_document_ids={document.id})
+                document.library_path = _unique_library_document_path(db, _join_library_path(new_folder_path, suffix), exclude_document_ids={document.id}, workspace_id=workspace_id)
                 moved_documents.append(document)
                 moved_document_ids.add(document.id)
-        _ensure_library_folder_records(db, new_folder_path)
+        _ensure_library_folder_records(db, new_folder_path, workspace_id=workspace_id)
 
-    for document in _selected_library_documents(db, document_ids):
+    for document in _selected_library_documents(db, document_ids, workspace_id=workspace_id):
         if document.id in moved_document_ids:
             continue
         basename = _library_basename(document.library_path, document.filename)
-        document.library_path = _unique_library_document_path(db, _join_library_path(target_folder, basename), exclude_document_ids={document.id})
+        document.library_path = _unique_library_document_path(db, _join_library_path(target_folder, basename), exclude_document_ids={document.id}, workspace_id=workspace_id)
         moved_documents.append(document)
         moved_document_ids.add(document.id)
 
@@ -3773,16 +4432,16 @@ def _move_library_entries(payload: DocumentLibraryClipboardRequest, db: Session)
     )
     db.flush()
     return DocumentLibraryActionRead(
-        documents=[_document_read(document) for document in moved_documents],
-        folders=_document_tree_read(db).folders,
-    )
+            documents=[_document_read(document) for document in moved_documents],
+            folders=_document_tree_read(db, workspace_id=workspace_id).folders,
+        )
 
 
-def _move_library_folder_records(db: Session, source_folder: str, target_folder: str) -> None:
+def _move_library_folder_records(db: Session, source_folder: str, target_folder: str, *, workspace_id: str | None = None) -> None:
     source = _normalize_library_path(source_folder)
     target = _normalize_library_path(target_folder)
     rows = (
-        db.query(DocumentLibraryFolder)
+        _scope_query(db.query(DocumentLibraryFolder), DocumentLibraryFolder, workspace_id)
         .filter((DocumentLibraryFolder.path == source) | (DocumentLibraryFolder.path.ilike(f"{source}/%")))
         .order_by(DocumentLibraryFolder.path.asc())
         .all()
@@ -3792,10 +4451,10 @@ def _move_library_folder_records(db: Session, source_folder: str, target_folder:
         row.path = _join_library_path(target, suffix) if suffix else target
 
 
-def _copy_library_entries(payload: DocumentLibraryClipboardRequest, db: Session) -> tuple[DocumentLibraryActionRead, list[str]]:
+def _copy_library_entries(payload: DocumentLibraryClipboardRequest, db: Session, *, workspace_id: str | None = None) -> tuple[DocumentLibraryActionRead, list[str]]:
     document_ids, folder_paths, target_folder = _normalize_library_clipboard_payload(payload)
     if target_folder:
-        _ensure_library_folder_records(db, target_folder)
+        _ensure_library_folder_records(db, target_folder, workspace_id=workspace_id)
     copied_documents: list[Document] = []
     conversion_job_ids: list[str] = []
 
@@ -3803,29 +4462,29 @@ def _copy_library_entries(payload: DocumentLibraryClipboardRequest, db: Session)
         if _folder_path_contains(folder_path, target_folder):
             raise HTTPException(status_code=409, detail="A folder cannot be copied into itself")
         desired_folder_path = _join_library_path(target_folder, _library_basename(folder_path, "folder"))
-        new_folder_path = _unique_library_folder_path(db, desired_folder_path)
-        _ensure_library_folder_records(db, new_folder_path)
+        new_folder_path = _unique_library_folder_path(db, desired_folder_path, workspace_id=workspace_id)
+        _ensure_library_folder_records(db, new_folder_path, workspace_id=workspace_id)
         for explicit_folder in sorted(
-            [path for path in _existing_library_folder_paths(db) if path == folder_path or path.startswith(f"{folder_path}/")]
+            [path for path in _existing_library_folder_paths(db, workspace_id=workspace_id) if path == folder_path or path.startswith(f"{folder_path}/")]
         ):
             suffix = explicit_folder.removeprefix(folder_path).lstrip("/")
-            _ensure_library_folder_records(db, _join_library_path(new_folder_path, suffix) if suffix else new_folder_path)
-        for document in _documents_in_library_folder(db, folder_path):
+            _ensure_library_folder_records(db, _join_library_path(new_folder_path, suffix) if suffix else new_folder_path, workspace_id=workspace_id)
+        for document in _documents_in_library_folder(db, folder_path, workspace_id=workspace_id):
             suffix = _normalize_library_path(document.library_path).removeprefix(f"{folder_path}/")
             copied_document, conversion_job_id = _copy_library_document(
                 document,
-                _unique_library_document_path(db, _join_library_path(new_folder_path, suffix)),
+                _unique_library_document_path(db, _join_library_path(new_folder_path, suffix), workspace_id=workspace_id),
                 db,
             )
             copied_documents.append(copied_document)
             if conversion_job_id:
                 conversion_job_ids.append(conversion_job_id)
 
-    for document in _selected_library_documents(db, document_ids):
+    for document in _selected_library_documents(db, document_ids, workspace_id=workspace_id):
         basename = _library_basename(document.library_path, document.filename)
         copied_document, conversion_job_id = _copy_library_document(
             document,
-            _unique_library_document_path(db, _join_library_path(target_folder, basename)),
+            _unique_library_document_path(db, _join_library_path(target_folder, basename), workspace_id=workspace_id),
             db,
         )
         copied_documents.append(copied_document)
@@ -3844,7 +4503,7 @@ def _copy_library_entries(payload: DocumentLibraryClipboardRequest, db: Session)
     return (
         DocumentLibraryActionRead(
             documents=[_document_read(document) for document in copied_documents],
-            folders=_document_tree_read(db).folders,
+            folders=_document_tree_read(db, workspace_id=workspace_id).folders,
         ),
         conversion_job_ids,
     )
@@ -3864,6 +4523,7 @@ def _copy_library_document(source: Document, library_path: str, db: Session) -> 
     shutil.copy2(source_original, local_original)
 
     copied = Document(
+        workspace_id=source.workspace_id,
         filename=source.filename,
         mime_type=source.mime_type,
         size_bytes=source.size_bytes,
@@ -3926,10 +4586,11 @@ def _delete_library_document_payload(document: Document, db: Session) -> Documen
     return document
 
 
-def _create_queued_library_document(file: UploadFile, db: Session, *, library_path: str | None = None) -> tuple[Document, str]:
+def _create_queued_library_document(file: UploadFile, db: Session, *, library_path: str | None = None, workspace_id: str | None = None) -> tuple[Document, str]:
     filename, original_path, size_bytes = save_upload_file(file)
     display_path = _normalize_library_path(library_path) or filename
     document = Document(
+        workspace_id=workspace_id,
         filename=filename,
         mime_type=file.content_type or "application/octet-stream",
         size_bytes=size_bytes,
@@ -4167,14 +4828,14 @@ def _raise_document_not_executable(document: Document) -> None:
     raise HTTPException(status_code=422, detail=_document_not_executable_message(document))
 
 
-def _documents_for_selection(document_ids: list[str], db: Session) -> list[Document]:
+def _documents_for_selection(document_ids: list[str], db: Session, *, workspace_id: str | None = None) -> list[Document]:
     ordered_ids: list[str] = []
     seen: set[str] = set()
     for document_id in document_ids:
         if document_id not in seen:
             ordered_ids.append(document_id)
             seen.add(document_id)
-    documents = db.query(Document).filter(Document.id.in_(ordered_ids)).all()
+    documents = _scope_query(db.query(Document), Document, workspace_id).filter(Document.id.in_(ordered_ids)).all()
     by_id = {document.id: document for document in documents}
     missing = [document_id for document_id in ordered_ids if document_id not in by_id]
     if missing:
@@ -4183,7 +4844,7 @@ def _documents_for_selection(document_ids: list[str], db: Session) -> list[Docum
 
 
 def _create_extraction_batch_from_documents(schema: Schema, documents: list[Document], db: Session) -> tuple[Batch, list[str]]:
-    batch = Batch(schema_id=schema.id, schema_version=1, status="running", total_count=len(documents))
+    batch = Batch(workspace_id=schema.workspace_id, schema_id=schema.id, schema_version=1, status="running", total_count=len(documents))
     db.add(batch)
     db.flush()
     ready_job_ids: list[str] = []
@@ -4201,6 +4862,7 @@ def _create_extraction_batch_from_documents(schema: Schema, documents: list[Docu
         else:
             waiting_count += 1
         job = ExtractionJob(
+            workspace_id=schema.workspace_id,
             document_id=document.id,
             schema_id=schema.id,
             schema_version=1,
@@ -4237,7 +4899,7 @@ def _create_extraction_batch_from_documents(schema: Schema, documents: list[Docu
 
 
 def _create_classification_batch_from_documents(classifier: DocumentClassifier, documents: list[Document], db: Session) -> tuple[ClassificationBatch, list[str]]:
-    batch = ClassificationBatch(classifier_id=classifier.id, status="running", total_count=len(documents))
+    batch = ClassificationBatch(workspace_id=classifier.workspace_id, classifier_id=classifier.id, status="running", total_count=len(documents))
     db.add(batch)
     db.flush()
     ready_job_ids: list[str] = []
@@ -4255,6 +4917,7 @@ def _create_classification_batch_from_documents(classifier: DocumentClassifier, 
         else:
             waiting_count += 1
         job = ClassificationJob(
+            workspace_id=classifier.workspace_id,
             document_id=document.id,
             classifier_id=classifier.id,
             status=job_status,
@@ -4290,7 +4953,7 @@ def _create_classification_batch_from_documents(classifier: DocumentClassifier, 
 
 
 def _create_required_field_batch_from_documents(checklist: RequiredFieldChecklist, documents: list[Document], db: Session) -> tuple[RequiredFieldCheckBatch, list[str]]:
-    batch = RequiredFieldCheckBatch(checklist_id=checklist.id, status="running", total_count=len(documents))
+    batch = RequiredFieldCheckBatch(workspace_id=checklist.workspace_id, checklist_id=checklist.id, status="running", total_count=len(documents))
     db.add(batch)
     db.flush()
     ready_job_ids: list[str] = []
@@ -4308,6 +4971,7 @@ def _create_required_field_batch_from_documents(checklist: RequiredFieldChecklis
         else:
             waiting_count += 1
         job = RequiredFieldCheckJob(
+            workspace_id=checklist.workspace_id,
             document_id=document.id,
             checklist_id=checklist.id,
             status=job_status,
@@ -4352,6 +5016,7 @@ def _finish_batch_immediately_if_no_active_documents(batch: Any, waiting_count: 
 def _create_workflow_run_from_documents(workflow: WorkflowDefinition, documents: list[Document], db: Session) -> tuple[WorkflowRun, bool]:
     now = datetime.utcnow()
     run = WorkflowRun(
+        workspace_id=workflow.workspace_id,
         workflow_id=workflow.id,
         workflow_name=workflow.name,
         workflow_definition_json=workflow.definition_json,
@@ -4547,6 +5212,120 @@ def _required_field_checklist_recommendation_read(payload: dict[str, Any]) -> Re
     )
 
 
+def _save_workflow_ai_draft_images(files: list[UploadFile]) -> list[Path]:
+    if not files:
+        raise HTTPException(status_code=422, detail="At least one sample image is required")
+    if len(files) > WORKFLOW_AI_DRAFT_MAX_IMAGES:
+        raise HTTPException(status_code=413, detail=f"AI workflow draft supports up to {WORKFLOW_AI_DRAFT_MAX_IMAGES} sample images")
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="workflow_ai_draft_"))
+    saved_paths: list[Path] = []
+    try:
+        for index, file in enumerate(files, start=1):
+            suffix = Path(file.filename or "").suffix.lower()
+            if suffix not in WORKFLOW_AI_DRAFT_IMAGE_EXTENSIONS:
+                raise HTTPException(status_code=400, detail="Only PNG, JPG, and JPEG sample images are supported")
+            image_path = temp_dir / f"sample_{index}{suffix}"
+            size = 0
+            with image_path.open("wb") as destination:
+                while True:
+                    chunk = file.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > get_settings().upload_max_file_bytes:
+                        raise HTTPException(status_code=413, detail="Uploaded sample image is too large")
+                    destination.write(chunk)
+            if size <= 0:
+                raise HTTPException(status_code=400, detail="Uploaded sample image is empty")
+            read_image_size(image_path)
+            saved_paths.append(image_path)
+        return saved_paths
+    except HTTPException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    except DocumentProcessingError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _workflow_ai_draft_definition(*, include_checklist: bool) -> dict[str, Any]:
+    nodes = [
+        {
+            "id": "ai_input",
+            "type": "workflow",
+            "position": {"x": 0, "y": 150},
+            "data": {"kind": "input", "label": "문서 입력", "config": {}},
+        },
+        {
+            "id": "ai_kie",
+            "type": "workflow",
+            "position": {"x": 270, "y": 110},
+            "data": {"kind": "kie", "label": "핵심 정보 추출", "config": {}},
+        },
+        {
+            "id": "ai_merge",
+            "type": "workflow",
+            "position": {"x": 820 if include_checklist else 560, "y": 150},
+            "data": {"kind": "merge", "label": "결과 병합", "config": {}},
+        },
+        {
+            "id": "ai_export",
+            "type": "workflow",
+            "position": {"x": 1080 if include_checklist else 800, "y": 150},
+            "data": {"kind": "export", "label": "Export", "config": {}},
+        },
+    ]
+    if include_checklist:
+        nodes.insert(
+            2,
+            {
+                "id": "ai_required",
+                "type": "workflow",
+                "position": {"x": 560, "y": 110},
+                "data": {"kind": "required-checker", "label": "필수 항목 확인", "config": {}},
+            },
+        )
+        edges = [
+            {"id": "ai_input-out-ai_kie", "source": "ai_input", "target": "ai_kie"},
+            {"id": "ai_kie-out-ai_required", "source": "ai_kie", "target": "ai_required"},
+            {"id": "ai_required-out-ai_merge", "source": "ai_required", "target": "ai_merge"},
+            {"id": "ai_merge-out-ai_export", "source": "ai_merge", "target": "ai_export"},
+        ]
+    else:
+        edges = [
+            {"id": "ai_input-out-ai_kie", "source": "ai_input", "target": "ai_kie"},
+            {"id": "ai_kie-out-ai_merge", "source": "ai_kie", "target": "ai_merge"},
+            {"id": "ai_merge-out-ai_export", "source": "ai_merge", "target": "ai_export"},
+        ]
+    return {"nodes": nodes, "edges": edges}
+
+
+def _workflow_ai_draft_name(schema_draft: SchemaCreate, *, sample_count: int) -> str:
+    base = schema_draft.display_name or schema_draft.name or "AI 생성 워크플로우"
+    return f"{base} 워크플로우 초안 · 샘플 {sample_count}장"
+
+
+def _available_scoped_name(db: Session, model, desired: str, *, workspace_id: str | None) -> str:
+    base = desired.strip() or "AI 초안"
+    query = db.query(model.name).filter(model.name == base, model.archived == False)  # noqa: E712
+    if hasattr(model, "ephemeral"):
+        query = query.filter(model.ephemeral == False)  # noqa: E712
+    if workspace_id is not None and hasattr(model, "workspace_id"):
+        query = query.filter(model.workspace_id == workspace_id)
+    if not query.first():
+        return base
+    existing_names = {
+        row[0]
+        for row in _scope_query(
+            db.query(model.name).filter(model.archived == False),  # noqa: E712
+            model,
+            workspace_id,
+        ).all()
+    }
+    return _duplicate_name(base, existing_names)
+
+
 def _validate_checklist_region_references(checklist_data: dict[str, Any]) -> None:
     item_names = [item.get("item_name") for item in checklist_data.get("items", []) if isinstance(item, dict)]
     if len(item_names) != len(set(item_names)):
@@ -4600,11 +5379,13 @@ def _validate_schema_region_references(schema_data: dict[str, Any]) -> None:
         )
 
 
-def _raise_if_schema_name_conflicts(db: Session, name: str, schema_id: str | None = None) -> None:
+def _raise_if_schema_name_conflicts(db: Session, name: str, schema_id: str | None = None, workspace_id: str | None = None) -> None:
     normalized = name.strip()
     if not normalized:
         return
     query = db.query(Schema).filter(Schema.name == normalized, Schema.ephemeral == False, Schema.archived == False)  # noqa: E712
+    if workspace_id is not None:
+        query = query.filter(Schema.workspace_id == workspace_id)
     if schema_id:
         query = query.filter(Schema.id != schema_id)
     if query.first():
@@ -4622,16 +5403,17 @@ def _duplicate_name(name: str, existing_names: set[str], max_length: int = 120) 
     raise HTTPException(status_code=409, detail=f"Could not create a duplicate name for: {base}")
 
 
-def _merge_duplicate_schema_names_into(db: Session, schema: Schema, name: str) -> None:
+def _merge_duplicate_schema_names_into(db: Session, schema: Schema, name: str, workspace_id: str | None = None) -> None:
     normalized = name.strip()
     if not normalized:
         return
     duplicates = (
         db.query(Schema)
         .filter(Schema.name == normalized, Schema.ephemeral == False, Schema.archived == False, Schema.id != schema.id)  # noqa: E712
-        .all()
     )
-    for duplicate in duplicates:
+    if workspace_id is not None:
+        duplicates = duplicates.filter(Schema.workspace_id == workspace_id)
+    for duplicate in duplicates.all():
         db.query(ExtractionJob).filter(ExtractionJob.schema_id == duplicate.id).update(
             {ExtractionJob.schema_id: schema.id},
             synchronize_session=False,
@@ -4993,6 +5775,7 @@ def _create_restarted_workflow_run(
     db: Session,
 ) -> tuple[WorkflowRun, int]:
     new_run = WorkflowRun(
+        workspace_id=source_run.workspace_id,
         workflow_id=workflow.id,
         workflow_name=workflow.name,
         workflow_definition_json=workflow.definition_json,
@@ -5056,6 +5839,7 @@ def _create_waiting_workflow_run(
     group_id = _ensure_workflow_queue_group(source_run, db)
     queue_order = _next_workflow_queue_order(db, group_id)
     new_run = WorkflowRun(
+        workspace_id=source_run.workspace_id,
         workflow_id=workflow.id,
         workflow_name=workflow.name,
         workflow_definition_json=workflow.definition_json,
@@ -5587,7 +6371,7 @@ async def _append_workflow_upload_items(run: WorkflowRun, form: FormData, files:
             db.refresh(run)
             if not _owner_accepts_uploads(run):
                 continue
-            document, original_path = _create_uploaded_document(file, db)
+            document, original_path = _create_uploaded_document(file, db, workspace_id=run.workspace_id)
             item = WorkflowRunItem(
                 run_id=run.id,
                 document_id=document.id,
@@ -5656,7 +6440,7 @@ def _record_failed_workflow_upload_item(
     message: str,
     db: Session,
 ) -> None:
-    document = _create_failed_upload_document(file, message, db)
+    document = _create_failed_upload_document(file, message, db, workspace_id=run.workspace_id)
     item = WorkflowRunItem(
         run_id=run.id,
         document_id=document.id,
@@ -5703,7 +6487,13 @@ def _seal_missing_workflow_upload_items(run: WorkflowRun, db: Session) -> int:
     for ordinal, upload_index in enumerate(candidate_indexes[:missing_count], start=1):
         suffix = upload_index + 1 if upload_index is not None else existing_count + ordinal
         filename = f"missing_upload_{suffix:05d}"
-        document = _create_failed_upload_document_record(filename, "application/octet-stream", message, db)
+        document = _create_failed_upload_document_record(
+            filename,
+            "application/octet-stream",
+            message,
+            db,
+            workspace_id=run.workspace_id,
+        )
         db.add(
             WorkflowRunItem(
                 run_id=run.id,
@@ -5742,8 +6532,14 @@ async def _append_extraction_batch_items(batch: Batch, form: FormData, files: li
             db.refresh(batch)
             if not _owner_accepts_uploads(batch):
                 continue
-            document, original_path = _create_uploaded_document(file, db)
-            job = ExtractionJob(document_id=document.id, schema_id=batch.schema_id, schema_version=batch.schema_version, status="preprocessing")
+            document, original_path = _create_uploaded_document(file, db, workspace_id=batch.workspace_id)
+            job = ExtractionJob(
+                workspace_id=batch.workspace_id,
+                document_id=document.id,
+                schema_id=batch.schema_id,
+                schema_version=batch.schema_version,
+                status="preprocessing",
+            )
             db.add(job)
             db.flush()
             db.add(
@@ -5802,8 +6598,9 @@ def _record_failed_extraction_batch_item(
     message: str,
     db: Session,
 ) -> None:
-    document = _create_failed_upload_document(file, message, db)
+    document = _create_failed_upload_document(file, message, db, workspace_id=batch.workspace_id)
     job = ExtractionJob(
+        workspace_id=batch.workspace_id,
         document_id=document.id,
         schema_id=batch.schema_id,
         schema_version=batch.schema_version,
@@ -5837,8 +6634,13 @@ async def _append_classification_batch_items(batch: ClassificationBatch, form: F
             db.refresh(batch)
             if not _owner_accepts_uploads(batch):
                 continue
-            document, original_path = _create_uploaded_document(file, db)
-            job = ClassificationJob(document_id=document.id, classifier_id=batch.classifier_id, status="preprocessing")
+            document, original_path = _create_uploaded_document(file, db, workspace_id=batch.workspace_id)
+            job = ClassificationJob(
+                workspace_id=batch.workspace_id,
+                document_id=document.id,
+                classifier_id=batch.classifier_id,
+                status="preprocessing",
+            )
             db.add(job)
             db.flush()
             db.add(
@@ -5889,8 +6691,9 @@ def _record_failed_classification_batch_item(
     message: str,
     db: Session,
 ) -> None:
-    document = _create_failed_upload_document(file, message, db)
+    document = _create_failed_upload_document(file, message, db, workspace_id=batch.workspace_id)
     job = ClassificationJob(
+        workspace_id=batch.workspace_id,
         document_id=document.id,
         classifier_id=batch.classifier_id,
         status="failed",
@@ -5923,8 +6726,13 @@ async def _append_required_field_batch_items(batch: RequiredFieldCheckBatch, for
             db.refresh(batch)
             if not _owner_accepts_uploads(batch):
                 continue
-            document, original_path = _create_uploaded_document(file, db)
-            job = RequiredFieldCheckJob(document_id=document.id, checklist_id=batch.checklist_id, status="preprocessing")
+            document, original_path = _create_uploaded_document(file, db, workspace_id=batch.workspace_id)
+            job = RequiredFieldCheckJob(
+                workspace_id=batch.workspace_id,
+                document_id=document.id,
+                checklist_id=batch.checklist_id,
+                status="preprocessing",
+            )
             db.add(job)
             db.flush()
             db.add(
@@ -5975,8 +6783,9 @@ def _record_failed_required_field_batch_item(
     message: str,
     db: Session,
 ) -> None:
-    document = _create_failed_upload_document(file, message, db)
+    document = _create_failed_upload_document(file, message, db, workspace_id=batch.workspace_id)
     job = RequiredFieldCheckJob(
+        workspace_id=batch.workspace_id,
         document_id=document.id,
         checklist_id=batch.checklist_id,
         status="failed",
@@ -6241,9 +7050,10 @@ def _queue_export_job(
     owner_id: str,
     format: str,
     retry_source_job_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> ExportJob:
-    _validate_export_job_owner_exists(db, owner_type, owner_id)
-    job = ExportJob(owner_type=owner_type, owner_id=owner_id, format=format, status="queued")
+    _validate_export_job_owner_exists(db, owner_type, owner_id, workspace_id=workspace_id)
+    job = ExportJob(workspace_id=workspace_id, owner_type=owner_type, owner_id=owner_id, format=format, status="queued")
     db.add(job)
     db.flush()
     action = "retried" if retry_source_job_id else "created"
@@ -6269,7 +7079,7 @@ def _queue_export_job(
     return job
 
 
-def _validate_export_job_owner_exists(db: Session, owner_type: str, owner_id: str) -> None:
+def _validate_export_job_owner_exists(db: Session, owner_type: str, owner_id: str, *, workspace_id: str | None = None) -> None:
     if owner_type not in EXPORT_JOB_OWNER_TYPES:
         raise HTTPException(status_code=422, detail="Unsupported export owner type")
     owner_models: dict[str, tuple[Any, str]] = {
@@ -6282,7 +7092,8 @@ def _validate_export_job_owner_exists(db: Session, owner_type: str, owner_id: st
     if not owner_model:
         raise HTTPException(status_code=422, detail="Unsupported export owner type")
     model, not_found_detail = owner_model
-    if not db.get(model, owner_id):
+    owner = db.get(model, owner_id)
+    if not owner or (workspace_id is not None and getattr(owner, "workspace_id", None) != workspace_id):
         raise HTTPException(status_code=404, detail=not_found_detail)
 
 
@@ -6630,6 +7441,7 @@ def _apply_export_preset(payload: dict[str, Any], preset: ExportPreset) -> dict[
 def _archive_search(
     db: Session,
     *,
+    workspace_id: str | None = None,
     q: str | None,
     status: str | None,
     schema_id: str | None,
@@ -6637,12 +7449,20 @@ def _archive_search(
     limit: int,
 ) -> list[ArchiveSearchResult]:
     normalized_q = (q or "").strip().lower()
-    documents = db.query(Document).order_by(Document.created_at.desc()).limit(200).all()
+    if schema_id:
+        schema = db.get(Schema, schema_id)
+        _ensure_workspace_scope(schema, workspace_id, "Schema not found")
+    documents = _scope_query(db.query(Document), Document, workspace_id).order_by(Document.created_at.desc()).limit(200).all()
     results: list[ArchiveSearchResult] = []
     for document in documents:
         if document_type and document.document_type != document_type:
             continue
-        jobs = db.query(ExtractionJob).filter(ExtractionJob.document_id == document.id).order_by(ExtractionJob.created_at.desc()).all()
+        jobs = (
+            _scope_query(db.query(ExtractionJob), ExtractionJob, workspace_id)
+            .filter(ExtractionJob.document_id == document.id)
+            .order_by(ExtractionJob.created_at.desc())
+            .all()
+        )
         if not jobs:
             if status or schema_id:
                 continue

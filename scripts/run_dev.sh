@@ -32,6 +32,12 @@ then
   exit 1
 fi
 
+echo "Applying database migrations..."
+(
+  cd "${ROOT_DIR}/backend"
+  PYTHONDONTWRITEBYTECODE=1 "${ROOT_DIR}/.venv/bin/python" -m alembic upgrade head
+)
+
 install_frontend_dependencies() {
   if [[ -f "${ROOT_DIR}/frontend/package-lock.json" ]]; then
     (cd "${ROOT_DIR}/frontend" && npm ci)

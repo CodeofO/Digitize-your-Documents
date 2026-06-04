@@ -97,6 +97,28 @@ def _run_lightweight_migrations() -> None:
             ("execution_generation", "INTEGER NOT NULL DEFAULT 0"),
         ],
     }
+    scoped_tables = [
+        "documents",
+        "document_library_folders",
+        "schemas",
+        "extraction_jobs",
+        "raw_extractions",
+        "document_classifiers",
+        "classification_jobs",
+        "classification_batches",
+        "required_field_checklists",
+        "required_field_check_jobs",
+        "required_field_check_batches",
+        "batches",
+        "export_presets",
+        "export_jobs",
+        "workflow_definitions",
+        "workflow_runs",
+        "audit_events",
+    ]
+    for table_name in scoped_tables:
+        column_specs.setdefault(table_name, []).insert(0, ("workspace_id", "VARCHAR"))
+
     index_specs = [
         (
             "ix_workflow_runs_created_at_id",
@@ -174,6 +196,10 @@ def _run_lightweight_migrations() -> None:
             '"status", "created_at"',
         ),
     ]
+    index_specs.extend(
+        (f"ix_{table_name}_workspace_id", table_name, '"workspace_id"')
+        for table_name in scoped_tables
+    )
 
     with engine.begin() as connection:
         tables = {
