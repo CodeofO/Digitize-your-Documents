@@ -71,7 +71,7 @@ uv pip install -e 'backend[dev]'
 - React Flow 캔버스에서 문서 처리 모듈을 연결합니다.
 - `AI 생성`으로 샘플 이미지 최대 10장을 분석해 workflow/schema/checklist 초안을 만들 수 있습니다.
 - AI workflow draft 생성은 요청 처리 중 임시 공간만 사용하며, 샘플을 보관함에 저장하는 것은 별도 선택 동작입니다.
-- KIE 노드 선택 시 Workflow Builder 안에서 schema field를 바로 수정할 수 있으며, 저장/실행 시 schema 초안이 먼저 저장 또는 업데이트된 뒤 workflow에 연결됩니다.
+- KIE 노드 선택 시 Workflow Builder 안에서 기존 schema field를 수정하거나 새 schema 초안을 만들 수 있으며, 저장/실행 시 schema 초안이 먼저 저장 또는 업데이트된 뒤 workflow에 연결됩니다.
 - `업로드`로 새 문서를 보관함에 추가하거나, `문서 보관함`에서 기존 문서를 선택해 실행합니다.
 - 새 업로드는 먼저 보관함에 저장되고, workflow run은 보관함 document id를 참조합니다.
 - 보관함 문서를 선택하면 업로드를 반복하지 않고 같은 원본 payload를 재사용합니다.

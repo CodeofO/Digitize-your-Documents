@@ -19,7 +19,7 @@ The public application starts directly in the workspace. Runtime settings, docum
 
 The AI workflow draft API accepts up to 10 PNG/JPG/JPEG images, stores them only in temporary processing space for the request, and returns a draft workflow plus schema/checklist suggestions. Persisting sample documents is a separate explicit frontend action.
 
-Workflow Builder supports inline editing of KIE schema drafts. Saving a workflow materializes draft schemas and checklists before persisting the workflow definition.
+Workflow Builder supports inline editing of KIE schema drafts. A KIE node can start from an AI-generated draft, an existing saved schema, or a new blank schema draft created inside the builder. Saving or running a workflow materializes draft schemas and checklists before persisting the workflow definition.
 
 ## Core API Groups
 

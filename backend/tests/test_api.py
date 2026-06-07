@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 import zipfile
 
 import pytest
@@ -1540,6 +1541,63 @@ def test_workflow_ai_draft_rejects_more_than_ten_images() -> None:
             )
             assert response.status_code == 413, response.text
             assert "up to 10" in response.json()["detail"]
+    finally:
+        os.environ["VLM_PROVIDER"] = "openai"
+        get_settings.cache_clear()
+
+
+def test_workflow_ai_draft_can_be_edited_and_saved_as_workflow() -> None:
+    try:
+        os.environ["VLM_PROVIDER"] = "mock"
+        get_settings.cache_clear()
+        unique = uuid4().hex[:8]
+        with get_client() as client:
+            draft_response = client.post(
+                "/api/workflows/ai-draft",
+                files=[("files", ("sample.png", ONE_BY_ONE_PNG, "image/png"))],
+            )
+            assert draft_response.status_code == 200, draft_response.text
+            draft = draft_response.json()
+
+            schema_payload = draft["schema_draft"]
+            schema_payload["name"] = f"edited_ai_schema_{unique}"
+            schema_payload["display_name"] = "Edited AI Schema"
+            schema_payload["fields"][0]["key_name"] = "edited_customer_name"
+            schema_payload["fields"][0]["description"] = "Customer name edited inside Workflow Builder."
+            schema_payload["fields"][0]["judgement_enabled"] = True
+            schema_response = client.post("/api/schemas", json=schema_payload)
+            assert schema_response.status_code == 200, schema_response.text
+            schema = schema_response.json()
+            assert schema["fields"][0]["key_name"] == "edited_customer_name"
+            assert schema["fields"][0]["judgement_enabled"] is True
+
+            checklist_payload = draft["checklist_draft"]
+            assert checklist_payload is not None
+            checklist_payload["name"] = f"edited_ai_checklist_{unique}"
+            checklist_payload["items"][0]["item_name"] = "edited_required_item"
+            checklist_response = client.post("/api/required-field-checklists", json=checklist_payload)
+            assert checklist_response.status_code == 200, checklist_response.text
+            checklist = checklist_response.json()
+            assert checklist["items"][0]["item_name"] == "edited_required_item"
+
+            definition = draft["definition"]
+            for node in definition["nodes"]:
+                if node["data"]["kind"] == "kie":
+                    node["data"]["config"] = {"schema_id": schema["id"]}
+                if node["data"]["kind"] == "required-checker":
+                    node["data"]["config"] = {"checklist_id": checklist["id"]}
+
+            workflow_response = client.post(
+                "/api/workflows",
+                json={"name": f"edited_ai_workflow_{unique}", "definition": definition},
+            )
+            assert workflow_response.status_code == 200, workflow_response.text
+            workflow = workflow_response.json()
+            assert workflow["validation_warnings"] == []
+            kie_node = next(node for node in workflow["definition"]["nodes"] if node["data"]["kind"] == "kie")
+            required_node = next(node for node in workflow["definition"]["nodes"] if node["data"]["kind"] == "required-checker")
+            assert kie_node["data"]["config"]["schema_id"] == schema["id"]
+            assert required_node["data"]["config"]["checklist_id"] == checklist["id"]
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()

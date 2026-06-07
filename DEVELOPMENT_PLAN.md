@@ -14,6 +14,7 @@
 - Compact execution status panel and removal of the canvas run banner.
 - AI workflow draft generation from up to 10 sample images.
 - Inline KIE schema editing inside Workflow Builder.
+- Blank KIE nodes can now start a new schema draft directly inside Workflow Builder.
 - Draft materialization for schema/checklist assets during workflow save.
 - Public repository scope cleaned to focus on product features.
 

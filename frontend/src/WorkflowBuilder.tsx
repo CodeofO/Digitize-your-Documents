@@ -1277,8 +1277,10 @@ export function WorkflowBuilder({
   }
 
   function updateSchemaDraft(nodeId: string, updater: (draft: WorkflowSchemaDraft) => WorkflowSchemaDraft) {
-    const baseDraft = schemaDraftsByNodeId[nodeId] ?? schemaSummaryToDraft(schemas.find((schema) => schema.id === nodes.find((node) => node.id === nodeId)?.data.config?.schema_id));
-    if (!baseDraft) return;
+    const baseDraft =
+      schemaDraftsByNodeId[nodeId] ??
+      schemaSummaryToDraft(schemas.find((schema) => schema.id === nodes.find((node) => node.id === nodeId)?.data.config?.schema_id)) ??
+      emptyWorkflowSchemaDraft(nodeId);
     setSchemaDraftsByNodeId((current) => ({ ...current, [nodeId]: updater(baseDraft) }));
   }
 
@@ -1776,8 +1778,17 @@ function WorkflowNodeAssetEditor(props: {
       return (
         <section className="workflow-node-asset-editor">
           <div className="workflow-node-asset-head">
-            <strong>Schema</strong>
-            <span>선택된 schema가 없습니다.</span>
+            <div>
+              <strong>Schema 편집</strong>
+              <span>선택된 schema가 없습니다.</span>
+            </div>
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={() => props.onSchemaDraftChange(node.id, (draft) => draft)}
+            >
+              <Plus size={14} /> 새 schema 초안
+            </button>
           </div>
         </section>
       );
@@ -3749,6 +3760,26 @@ function schemaSummaryToDraft(schema: SchemaSummary | undefined): WorkflowSchema
     regions: schema.regions ?? [],
     fields: schema.fields
   });
+}
+
+function emptyWorkflowSchemaDraft(nodeId: string): WorkflowSchemaDraft {
+  const suffix = nodeId.replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || Date.now().toString(36);
+  return {
+    name: `workflow_schema_${suffix}`.slice(0, 120),
+    display_name: "Workflow schema",
+    description: "Workflow Builder에서 만든 schema 초안입니다.",
+    is_template: false,
+    template_category: null,
+    pinned: false,
+    regions: [],
+    fields: [
+      {
+        key_name: "field_1",
+        description: "추출할 값을 설명하세요.",
+        output_format: "string"
+      }
+    ]
+  };
 }
 
 function normalizeSchemaDraft(schema: WorkflowSchemaDraft): WorkflowSchemaDraft {
