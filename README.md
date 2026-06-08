@@ -110,6 +110,7 @@ uv pip install -e 'backend[dev]'
 | [DEVELOPMENT_DEFINITION.md](DEVELOPMENT_DEFINITION.md) | 제품 범위, public feature contract, 핵심 API 그룹, 검증 기준 |
 | [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) | 현재 focus, 최근 반영 기능, 다음 product task |
 | [ERROR_NOTE.md](ERROR_NOTE.md) | 장애/오류 원인, 수정, 재발 방지 기록 |
+| [docs/project-insights.md](docs/project-insights.md) | 제품/아키텍처/VLM/워크플로우 설계 인사이트 |
 | [docs/templates/bank-documents-poc.json](docs/templates/bank-documents-poc.json) | 은행 서류 데모용 schema/classifier/checklist/workflow template |
 | [docs/readme-media.html](docs/readme-media.html) | README 이미지 재생성용 media source |
 
@@ -172,6 +173,19 @@ VLM_PROVIDER=mock
 VLM_MODEL_NAME=mock-vlm
 ```
 
+로컬 OpenAI-compatible VLM으로 실제 추론할 때:
+
+```env
+VLM_PROVIDER=auto
+VLM_MODEL_NAME=google/gemma-4-26b-a4b
+VLM_BASE_URL=http://127.0.0.1:1234/v1
+VLM_API_KEY=
+VLM_TIMEOUT_SECONDS=600
+KIE_FIELD_GROUP_SIZE=1
+```
+
+로컬 26B급 모델은 공식 API보다 응답 시간이 길 수 있습니다. KIE 단일 실행 화면은 backend job이 `completed`, `needs_review`, `failed`, `canceled`로 끝날 때까지 계속 polling하며, 60초 이후에는 경과 시간을 표시합니다. provider request 자체의 최대 대기 시간은 `VLM_TIMEOUT_SECONDS`로 조정합니다.
+
 ## Verification
 
 Backend tests:
@@ -214,7 +228,10 @@ git diff --check
 | `WORKFLOW_MAX_WORKERS` | `16` | 문서별 workflow local 작업 동시성 |
 | `DOCUMENT_PAGE_MAX_LONG_EDGE` | `3000` | preview/VLM용 JPEG 긴 변 제한 |
 | `DOCUMENT_PAGE_JPEG_QUALITY` | `88` | preview/VLM용 JPEG 품질 |
+| `VLM_BASE_URL` | `""` | 로컬 또는 사설 OpenAI-compatible VLM endpoint |
+| `VLM_TIMEOUT_SECONDS` | `120` | provider request 1회 최대 대기 시간. 로컬 대형 모델은 300~900 권장 |
 | `VLM_MAX_CONCURRENT_REQUESTS` | `8` | provider로 나가는 AI 동시 요청 수 |
+| `KIE_FIELD_GROUP_SIZE` | `2` | KIE 요청 1회에 묶는 field 수. 로컬 VLM은 1로 줄이면 timeout/JSON 실패를 줄일 수 있음 |
 | `DATABASE_POOL_SIZE` | `8` | SQLAlchemy DB connection pool 크기 |
 | `DATABASE_MAX_OVERFLOW` | `0` | pool 크기를 넘는 임시 connection 허용 수 |
 | `DATABASE_POOL_TIMEOUT_SECONDS` | `30` | DB connection 대기 timeout |
@@ -223,7 +240,7 @@ git diff --check
 
 Workflow local blocking work는 `WORKFLOW_MAX_WORKERS` 크기의 전용 executor 큐로 제한합니다. 대량 문서 실행에서 worker 대기 자체가 Python default threadpool을 점유하지 않도록 하기 위한 구조입니다.
 
-Workflow 화면의 `처리 중`은 workflow item이 모듈 단계에 진입한 문서 수입니다. 실제 provider 동시 호출 수는 별도 KPI인 `AI 요청 중 / AI 요청 한도`, provider 호출 대기는 `AI 요청 대기`로 표시됩니다. async VLM 호출은 `VLM_TIMEOUT_SECONDS` 안에 완료되지 않으면 실패/재시도 경로로 수렴합니다.
+Workflow 화면의 `처리 중`은 workflow item이 모듈 단계에 진입한 문서 수입니다. 실제 provider 동시 호출 수는 별도 KPI인 `AI 요청 중 / AI 요청 한도`, provider 호출 대기는 `AI 요청 대기`로 표시됩니다. async VLM 호출은 `VLM_TIMEOUT_SECONDS` 안에 완료되지 않으면 실패/재시도 경로로 수렴합니다. KIE 단일 실행 화면은 frontend 자체 제한 시간으로 실패 처리하지 않고 backend job 상태를 계속 따라갑니다.
 
 운영에서 5,000장 이상 대량 처리를 자주 실행한다면 SQLite보다 Postgres 사용을 권장합니다.
 

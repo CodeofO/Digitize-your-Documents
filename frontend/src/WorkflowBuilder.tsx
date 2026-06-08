@@ -63,10 +63,33 @@ const WORKFLOW_RUN_SIDEBAR_WIDTH_KEY = "digitize_workflow_run_sidebar_width_v1";
 const WORKFLOW_RUN_SIDEBAR_DEFAULT_WIDTH = 420;
 const WORKFLOW_RUN_SIDEBAR_MIN_WIDTH = 340;
 const WORKFLOW_RUN_SIDEBAR_MAX_WIDTH = 520;
-const WORKFLOW_FIT_VIEW_PADDING = 0.34;
+const WORKFLOW_FIT_VIEW_PADDING = 0.16;
 const BANK_POC_TOUR_PENDING_KEY = "digitize_bank_poc_tour_pending_v1";
+const BANK_POC_WORKFLOW_NAME = "은행 서류 자동 분류 및 검수";
+const BANK_POC_COMPACT_NODE_POSITIONS: Record<string, { x: number; y: number }> = {
+  input: { x: 40, y: 240 },
+  classifier: { x: 250, y: 240 },
+  branch: { x: 460, y: 210 },
+  kie_application: { x: 670, y: 70 },
+  required_application: { x: 900, y: 70 },
+  required_consent: { x: 670, y: 240 },
+  kie_supporting: { x: 670, y: 410 },
+  merge: { x: 900, y: 300 },
+  export: { x: 1110, y: 300 }
+};
+const BANK_POC_CANVAS_VIEWPORT = { x: 70, y: 70, zoom: 0.72 };
+const BANK_POC_CANVAS_VIEWPORT_WITH_SIDEBAR = { x: 50, y: 100, zoom: 0.54 };
 const WORKFLOW_AI_DRAFT_MAX_IMAGES = 10;
 const WORKFLOW_AI_DRAFT_ACCEPT = ".png,.jpg,.jpeg";
+const WORKFLOW_EVIDENCE_TYPES = ["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"] as const;
+const WORKFLOW_CUSTOM_EVIDENCE_TYPE_VALUE = "__custom_evidence_type__";
+const WORKFLOW_EVIDENCE_TYPE_LABELS: Record<string, string> = {
+  text_or_handwriting: "문자/손글씨",
+  checkbox: "체크박스",
+  signature_or_stamp: "서명/도장",
+  visual_mark: "시각 표시",
+  other: "기타"
+};
 
 type WorkflowNodeKind = "input" | "classifier" | "branch" | "kie" | "required-checker" | "merge" | "export";
 type WorkflowResultFilter = "all" | "success" | "failed" | "waiting" | "running" | "review";
@@ -87,6 +110,7 @@ type WorkflowNodeContextMenu = {
 type ReactFlowScreenProjector = {
   screenToFlowPosition: (position: { x: number; y: number }) => { x: number; y: number };
   fitView?: (options?: { padding?: number; duration?: number }) => void;
+  setViewport?: (viewport: { x: number; y: number; zoom: number }, options?: { duration?: number }) => void;
 };
 
 type WorkflowNodeData = {
@@ -149,16 +173,33 @@ type SchemaSummary = {
   fields: WorkflowSchemaField[];
 };
 
+type WorkflowClassifierClass = {
+  class_name: string;
+  description: string;
+  signals: string[];
+};
+
+type WorkflowClassifierDraft = {
+  name: string;
+  description?: string | null;
+  allow_unknown: boolean;
+  classes: WorkflowClassifierClass[];
+};
+
 type ClassifierSummary = {
   id: string;
   name: string;
-  classes: { class_name: string; description: string; signals: string[] }[];
+  description?: string | null;
+  allow_unknown?: boolean;
+  classes: WorkflowClassifierClass[];
 };
 
 type ChecklistSummary = {
   id: string;
   name: string;
-  items: { item_name: string }[];
+  description?: string | null;
+  regions?: WorkflowSchemaRegion[];
+  items: WorkflowChecklistItem[];
 };
 
 type WorkflowChecklistItem = {
@@ -192,6 +233,17 @@ type WorkflowDefinition = {
   description: string | null;
   definition: { nodes: WorkflowNode[]; edges: WorkflowEdge[] };
   validation_warnings: string[];
+};
+
+type BankPocSeed = {
+  template_key: string;
+  created: Record<string, boolean>;
+  schema: SchemaSummary;
+  classifier: ClassifierSummary;
+  checklist: ChecklistSummary;
+  workflow: WorkflowDefinition;
+  sample_document: LibraryDocument | null;
+  sample_documents?: LibraryDocument[];
 };
 
 type WorkflowRunItem = {
@@ -287,6 +339,7 @@ type WorkflowDraft = {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   selectedNodeId: string | null;
+  classifierDraftsByNodeId?: Record<string, WorkflowClassifierDraft>;
   schemaDraftsByNodeId?: Record<string, WorkflowSchemaDraft>;
   checklistDraftsByNodeId?: Record<string, WorkflowChecklistDraft>;
 };
@@ -373,6 +426,9 @@ export function WorkflowBuilder({
   const [schemas, setSchemas] = useState<SchemaSummary[]>([]);
   const [classifiers, setClassifiers] = useState<ClassifierSummary[]>([]);
   const [checklists, setChecklists] = useState<ChecklistSummary[]>([]);
+  const [classifierDraftsByNodeId, setClassifierDraftsByNodeId] = useState<Record<string, WorkflowClassifierDraft>>(
+    () => initialDraft?.classifierDraftsByNodeId ?? {}
+  );
   const [schemaDraftsByNodeId, setSchemaDraftsByNodeId] = useState<Record<string, WorkflowSchemaDraft>>(
     () => initialDraft?.schemaDraftsByNodeId ?? {}
   );
@@ -389,7 +445,7 @@ export function WorkflowBuilder({
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [activeRunId, setActiveRunId] = useState("");
   const [manualRunSelection, setManualRunSelection] = useState(false);
-  const [runSidebarOpen, setRunSidebarOpen] = useState(true);
+  const [runSidebarOpen, setRunSidebarOpen] = useState(false);
   const [runSidebarWidth, setRunSidebarWidth] = useState(() =>
     clampWorkflowPaneWidth(
       readWorkflowResultPaneWidth(WORKFLOW_RUN_SIDEBAR_WIDTH_KEY, WORKFLOW_RUN_SIDEBAR_DEFAULT_WIDTH),
@@ -397,6 +453,7 @@ export function WorkflowBuilder({
       WORKFLOW_RUN_SIDEBAR_MAX_WIDTH
     )
   );
+  const [viewportRevision, setViewportRevision] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingRun, setIsStartingRun] = useState(false);
   const [runStartMessage, setRunStartMessage] = useState<string | null>(null);
@@ -406,6 +463,7 @@ export function WorkflowBuilder({
   const [demoTourStep, setDemoTourStep] = useState<number | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(initialDraft ? "복원됨" : null);
   const [nodeContextMenu, setNodeContextMenu] = useState<WorkflowNodeContextMenu | null>(null);
+  const [assetEditorDismissedNodeId, setAssetEditorDismissedNodeId] = useState<string | null>(null);
   const workflowStartAbortRef = useRef<AbortController | null>(null);
   const workflowStartRunIdRef = useRef<string>("");
   const workflowStartCancelRequestedRef = useRef(false);
@@ -417,6 +475,8 @@ export function WorkflowBuilder({
   const selectedNodeIdsRef = useRef<string[]>([]);
   const shiftKeyPressedRef = useRef(false);
   const ignoreNextNodeSelectChangeRef = useRef(false);
+  const starterWorkflowBootstrapAttemptedRef = useRef(false);
+  const starterWorkflowAutoLoadedRef = useRef(false);
 
   const processingRun = runs.find((run) => workflowRunIsProcessing(run)) ?? null;
   const pausedRun = runs.find((run) => workflowRunIsPaused(run)) ?? null;
@@ -425,6 +485,9 @@ export function WorkflowBuilder({
   const activeRun = selectedRun ?? liveRun ?? runs[0] ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const assetEditorNode = selectedNode && workflowNodeHasAssetEditor(selectedNode) && assetEditorDismissedNodeId !== selectedNode.id
+    ? selectedNode
+    : null;
   const selectedNodeIds = useMemo(
     () => Array.from(new Set(nodes.filter((node) => node.selected || node.id === selectedNodeId).map((node) => node.id))),
     [nodes, selectedNodeId]
@@ -434,8 +497,8 @@ export function WorkflowBuilder({
     [nodes, edges, schemas, classifiers, checklists, selectedNodeIds]
   );
   const validation = useMemo(
-    () => validateWorkflow(nodes, edges, schemaDraftsByNodeId, checklistDraftsByNodeId),
-    [nodes, edges, schemaDraftsByNodeId, checklistDraftsByNodeId]
+    () => validateWorkflow(nodes, edges, classifierDraftsByNodeId, schemaDraftsByNodeId, checklistDraftsByNodeId),
+    [nodes, edges, classifierDraftsByNodeId, schemaDraftsByNodeId, checklistDraftsByNodeId]
   );
   const runSidebarStyle = useMemo<CSSProperties>(() => ({ width: `${runSidebarWidth}px` }), [runSidebarWidth]);
   const isRunningRun = Boolean(processingRun);
@@ -459,6 +522,10 @@ export function WorkflowBuilder({
   useEffect(() => {
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    setAssetEditorDismissedNodeId(null);
+  }, [selectedNodeId]);
 
   useEffect(() => {
     if (!initialLibraryDocuments.length) return;
@@ -489,13 +556,21 @@ export function WorkflowBuilder({
   }, [activeRun?.id, activeRun?.status]);
 
   useEffect(() => {
+    const shouldUseBankPocViewport = isBankPocCanvas(workflowName, nodes);
+    const bankPocViewport = runSidebarOpen ? BANK_POC_CANVAS_VIEWPORT_WITH_SIDEBAR : BANK_POC_CANVAS_VIEWPORT;
     const timers = [120, 360, 760].map((delay) =>
       window.setTimeout(() => {
-        reactFlowInstanceRef.current?.fitView?.({ padding: WORKFLOW_FIT_VIEW_PADDING, duration: 240 });
+        const instance = reactFlowInstanceRef.current;
+        if (!instance) return;
+        if (shouldUseBankPocViewport && instance.setViewport) {
+          instance.setViewport(bankPocViewport, { duration: 240 });
+          return;
+        }
+        instance.fitView?.({ padding: WORKFLOW_FIT_VIEW_PADDING, duration: 240 });
       }, delay)
     );
     return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [runSidebarOpen, runSidebarWidth, activeWorkflowId, nodes.length, edges.length, schemas.length, classifiers.length, checklists.length, libraryDocuments.length]);
+  }, [runSidebarOpen, runSidebarWidth, activeWorkflowId, workflowName, viewportRevision, nodes.length, edges.length, schemas.length, classifiers.length, checklists.length, libraryDocuments.length]);
 
   useEffect(() => {
     if (!runs.length) {
@@ -525,13 +600,14 @@ export function WorkflowBuilder({
         nodes,
         edges,
         selectedNodeId,
+        classifierDraftsByNodeId,
         schemaDraftsByNodeId,
         checklistDraftsByNodeId
       });
       setDraftSavedAt(new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [activeWorkflowId, workflowName, nodes, edges, selectedNodeId, schemaDraftsByNodeId, checklistDraftsByNodeId]);
+  }, [activeWorkflowId, workflowName, nodes, edges, selectedNodeId, classifierDraftsByNodeId, schemaDraftsByNodeId, checklistDraftsByNodeId]);
 
   useEffect(() => {
     if (!nodeContextMenu) return;
@@ -724,11 +800,50 @@ export function WorkflowBuilder({
         api<ChecklistSummary[]>("/api/required-field-checklists"),
         api<WorkflowRun[]>(`/api/workflow-runs?limit=${WORKFLOW_RUN_HISTORY_LIMIT}`)
       ]);
+      const sortedRuns = sortWorkflowRunsByRegistration(loadedRuns);
+      if (
+        !starterWorkflowBootstrapAttemptedRef.current &&
+        shouldBootstrapBankPocStarterWorkflow({
+          activeWorkflowId,
+          checklists: loadedChecklists,
+          classifiers: loadedClassifiers,
+          initialDraft,
+          initialWorkflowId,
+          schemas: loadedSchemas,
+          workflows: loadedWorkflows
+        })
+      ) {
+        starterWorkflowBootstrapAttemptedRef.current = true;
+        setMessage("샘플 스키마와 데모 워크플로우를 준비하는 중입니다.");
+        const seeded = await api<BankPocSeed>("/api/templates/bank-documents-poc/seed", { method: "POST" });
+        const seededDocuments = seeded.sample_documents?.length
+          ? seeded.sample_documents
+          : seeded.sample_document
+            ? [seeded.sample_document]
+            : [];
+        setWorkflows(upsertById(loadedWorkflows, seeded.workflow));
+        setSchemas(upsertById(loadedSchemas, seeded.schema));
+        setClassifiers(upsertById(loadedClassifiers, seeded.classifier));
+        setChecklists(upsertById(loadedChecklists, seeded.checklist));
+        setRuns(sortedRuns);
+        if (!activeRunId && sortedRuns[0]) {
+          focusWorkflowRun((sortedRuns.find((run) => workflowRunIsLive(run)) ?? sortedRuns[0]).id, false);
+        }
+        setFiles([]);
+        setLibraryDocuments(seededDocuments);
+        starterWorkflowAutoLoadedRef.current = true;
+        loadWorkflowIntoCanvas(seeded.workflow);
+        setMessage(
+          seededDocuments.length
+            ? `샘플 스키마, 체크리스트, ${seededDocuments.length.toLocaleString()}개 보관 문서를 불러왔습니다.`
+            : "샘플 스키마와 체크리스트를 불러왔습니다."
+        );
+        return;
+      }
       setWorkflows(loadedWorkflows);
       setSchemas(loadedSchemas);
       setClassifiers(loadedClassifiers);
       setChecklists(loadedChecklists);
-      const sortedRuns = sortWorkflowRunsByRegistration(loadedRuns);
       setRuns(sortedRuns);
       if (!activeRunId && sortedRuns[0]) {
         focusWorkflowRun((sortedRuns.find((run) => workflowRunIsLive(run)) ?? sortedRuns[0]).id, false);
@@ -736,8 +851,20 @@ export function WorkflowBuilder({
       if (activeWorkflowId && !loadedWorkflows.some((workflow) => workflow.id === activeWorkflowId)) {
         setActiveWorkflowId("");
       }
-      if (!activeWorkflowId && !initialDraft && loadedWorkflows[0]) {
-        loadWorkflowIntoCanvas(loadedWorkflows[0]);
+      if (!starterWorkflowAutoLoadedRef.current) {
+        const starterWorkflow = starterWorkflowToAutoLoad({
+          activeWorkflowId,
+          checklists: loadedChecklists,
+          classifiers: loadedClassifiers,
+          initialDraft,
+          initialWorkflowId,
+          schemas: loadedSchemas,
+          workflows: loadedWorkflows
+        });
+        if (starterWorkflow) {
+          starterWorkflowAutoLoadedRef.current = true;
+          loadWorkflowIntoCanvas(starterWorkflow);
+        }
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "워크플로우 데이터를 불러오지 못했습니다.");
@@ -765,8 +892,10 @@ export function WorkflowBuilder({
     setNodes((workflow.definition.nodes?.length ? workflow.definition.nodes : defaultNodes).map(normalizeWorkflowNode));
     setEdges(normalizeWorkflowEdges(workflow.definition.edges?.length ? workflow.definition.edges : defaultEdges));
     setSelectedNodeId(workflow.definition.nodes?.[0]?.id ?? defaultNodes[0].id);
+    setClassifierDraftsByNodeId({});
     setSchemaDraftsByNodeId({});
     setChecklistDraftsByNodeId({});
+    setViewportRevision((current) => current + 1);
     setMessage(`불러온 워크플로우: ${workflow.name}`);
   }
 
@@ -776,8 +905,10 @@ export function WorkflowBuilder({
     setNodes(defaultNodes.map(normalizeWorkflowNode));
     setEdges(normalizeWorkflowEdges(defaultEdges));
     setSelectedNodeId(defaultNodes[1]?.id ?? defaultNodes[0]?.id ?? null);
+    setClassifierDraftsByNodeId({});
     setSchemaDraftsByNodeId({});
     setChecklistDraftsByNodeId({});
+    setViewportRevision((current) => current + 1);
     setMessage("새 워크플로우를 시작합니다.");
   }
 
@@ -820,12 +951,35 @@ export function WorkflowBuilder({
 
   async function materializeWorkflowDraftAssets(currentNodes: WorkflowNode[]) {
     let nextNodes = currentNodes;
+    const nextClassifierDrafts = { ...classifierDraftsByNodeId };
     const nextSchemaDrafts = { ...schemaDraftsByNodeId };
     const nextChecklistDrafts = { ...checklistDraftsByNodeId };
+    const savedClassifiers: ClassifierSummary[] = [];
     const savedSchemas: SchemaSummary[] = [];
     const savedChecklists: ChecklistSummary[] = [];
 
     for (const node of currentNodes) {
+      if (node.data.kind === "classifier") {
+        const draft = nextClassifierDrafts[node.id];
+        if (!draft) continue;
+        const classifierId = node.data.config?.classifier_id ?? "";
+        const saved = classifierId
+          ? await api<ClassifierSummary>(`/api/document-classifiers/${classifierId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(classifierDraftPayload(draft))
+            })
+          : await api<ClassifierSummary>("/api/document-classifiers", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(classifierDraftPayload(draft))
+            });
+        savedClassifiers.push(saved);
+        delete nextClassifierDrafts[node.id];
+        nextNodes = updateWorkflowNodeConfig(nextNodes, node.id, "classifier_id", saved.id);
+        nextNodes = syncBranchKeys(nextNodes, saved.id, [saved, ...classifiers.filter((classifier) => classifier.id !== saved.id)]);
+      }
+
       if (node.data.kind === "kie") {
         const draft = nextSchemaDrafts[node.id];
         if (!draft) continue;
@@ -867,6 +1021,10 @@ export function WorkflowBuilder({
       }
     }
 
+    if (savedClassifiers.length) {
+      setClassifiers((current) => [...savedClassifiers, ...current.filter((classifier) => !savedClassifiers.some((saved) => saved.id === classifier.id))]);
+      setClassifierDraftsByNodeId(nextClassifierDrafts);
+    }
     if (savedSchemas.length) {
       setSchemas((current) => [...savedSchemas, ...current.filter((schema) => !savedSchemas.some((saved) => saved.id === schema.id))]);
       setSchemaDraftsByNodeId(nextSchemaDrafts);
@@ -1284,8 +1442,22 @@ export function WorkflowBuilder({
     setSchemaDraftsByNodeId((current) => ({ ...current, [nodeId]: updater(baseDraft) }));
   }
 
-  function updateChecklistDraft(nodeId: string, draft: WorkflowChecklistDraft) {
-    setChecklistDraftsByNodeId((current) => ({ ...current, [nodeId]: draft }));
+  function updateClassifierDraft(nodeId: string, updater: (draft: WorkflowClassifierDraft) => WorkflowClassifierDraft) {
+    const baseDraft =
+      classifierDraftsByNodeId[nodeId] ??
+      classifierSummaryToDraft(classifiers.find((classifier) => classifier.id === nodes.find((node) => node.id === nodeId)?.data.config?.classifier_id)) ??
+      emptyWorkflowClassifierDraft(nodeId);
+    const nextDraft = updater(baseDraft);
+    setClassifierDraftsByNodeId((current) => ({ ...current, [nodeId]: nextDraft }));
+    setNodes((current) => syncBranchKeysFromClassNames(current, normalizeClassifierDraft(nextDraft).classes.map((item) => item.class_name)));
+  }
+
+  function updateChecklistDraft(nodeId: string, updater: (draft: WorkflowChecklistDraft) => WorkflowChecklistDraft) {
+    const baseDraft =
+      checklistDraftsByNodeId[nodeId] ??
+      checklistSummaryToDraft(checklists.find((checklist) => checklist.id === nodes.find((node) => node.id === nodeId)?.data.config?.checklist_id)) ??
+      emptyWorkflowChecklistDraft(nodeId);
+    setChecklistDraftsByNodeId((current) => ({ ...current, [nodeId]: updater(baseDraft) }));
   }
 
   function onAiDraftFileInput(event: ChangeEvent<HTMLInputElement>) {
@@ -1350,8 +1522,10 @@ export function WorkflowBuilder({
     setEdges(nextEdges);
     setSelectedNodeId(schemaNode?.id ?? nextNodes[0]?.id ?? null);
     setSelectedEdgeId(null);
+    setClassifierDraftsByNodeId({});
     setSchemaDraftsByNodeId(schemaNode ? { [schemaNode.id]: normalizeSchemaDraft(draft.schema_draft) } : {});
-    setChecklistDraftsByNodeId(checklistNode && draft.checklist_draft ? { [checklistNode.id]: draft.checklist_draft } : {});
+    setChecklistDraftsByNodeId(checklistNode && draft.checklist_draft ? { [checklistNode.id]: normalizeChecklistDraft(draft.checklist_draft) } : {});
+    setViewportRevision((current) => current + 1);
   }
 
   function onFileInput(event: ChangeEvent<HTMLInputElement>) {
@@ -1532,16 +1706,6 @@ export function WorkflowBuilder({
             />
           )}
 
-          <WorkflowNodeAssetEditor
-            selectedNode={selectedNode}
-            schemas={schemas}
-            schemaDraftsByNodeId={schemaDraftsByNodeId}
-            checklists={checklists}
-            checklistDraftsByNodeId={checklistDraftsByNodeId}
-            onSchemaDraftChange={updateSchemaDraft}
-            onChecklistDraftChange={updateChecklistDraft}
-          />
-
           <div className={`workflow-main-area ${runSidebarOpen ? "sidebar-open" : "sidebar-collapsed"}`}>
             <div className="workflow-canvas">
               <ReactFlow
@@ -1576,6 +1740,21 @@ export function WorkflowBuilder({
                 <Controls />
                 <MiniMap pannable zoomable />
               </ReactFlow>
+              <WorkflowNodeAssetEditor
+                selectedNode={assetEditorNode}
+                classifiers={classifiers}
+                classifierDraftsByNodeId={classifierDraftsByNodeId}
+                schemas={schemas}
+                schemaDraftsByNodeId={schemaDraftsByNodeId}
+                checklists={checklists}
+                checklistDraftsByNodeId={checklistDraftsByNodeId}
+                onClassifierDraftChange={updateClassifierDraft}
+                onSchemaDraftChange={updateSchemaDraft}
+                onChecklistDraftChange={updateChecklistDraft}
+                onClose={() => {
+                  if (assetEditorNode) setAssetEditorDismissedNodeId(assetEditorNode.id);
+                }}
+              />
               {nodeContextMenu && (
                 <div
                   ref={nodeContextMenuRef}
@@ -1758,16 +1937,173 @@ function WorkflowSelectedDocumentsStrip(props: {
 
 function WorkflowNodeAssetEditor(props: {
   selectedNode: WorkflowNode | null;
+  classifiers: ClassifierSummary[];
+  classifierDraftsByNodeId: Record<string, WorkflowClassifierDraft>;
   schemas: SchemaSummary[];
   schemaDraftsByNodeId: Record<string, WorkflowSchemaDraft>;
   checklists: ChecklistSummary[];
   checklistDraftsByNodeId: Record<string, WorkflowChecklistDraft>;
+  onClassifierDraftChange: (nodeId: string, updater: (draft: WorkflowClassifierDraft) => WorkflowClassifierDraft) => void;
   onSchemaDraftChange: (nodeId: string, updater: (draft: WorkflowSchemaDraft) => WorkflowSchemaDraft) => void;
-  onChecklistDraftChange: (nodeId: string, draft: WorkflowChecklistDraft) => void;
+  onChecklistDraftChange: (nodeId: string, updater: (draft: WorkflowChecklistDraft) => WorkflowChecklistDraft) => void;
+  onClose: () => void;
 }) {
   const node = props.selectedNode;
-  if (!node || node.data.kind === "input" || node.data.kind === "merge" || node.data.kind === "export" || node.data.kind === "branch" || node.data.kind === "classifier") {
+  if (!node || !workflowNodeHasAssetEditor(node)) {
     return null;
+  }
+
+  if (node.data.kind === "classifier") {
+    const savedClassifier = props.classifiers.find((classifier) => classifier.id === node.data.config?.classifier_id);
+    const classifierDraft = props.classifierDraftsByNodeId[node.id];
+    const editableClassifier = classifierDraft ?? classifierSummaryToDraft(savedClassifier);
+    if (!editableClassifier) {
+      return (
+        <section className="workflow-node-asset-editor" aria-label="분류기 편집">
+          <div className="workflow-node-asset-head">
+            <div>
+              <strong>Classifier 편집</strong>
+              <span>선택된 classifier가 없습니다.</span>
+            </div>
+            <div className="workflow-node-asset-actions">
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={() => props.onClassifierDraftChange(node.id, (draft) => draft)}
+              >
+                <Plus size={14} /> 새 classifier 초안
+              </button>
+              <button type="button" className="icon-only" onClick={props.onClose} aria-label="편집 닫기">
+                <X size={15} />
+              </button>
+            </div>
+          </div>
+        </section>
+      );
+    }
+    const updateDraft = (updater: (draft: WorkflowClassifierDraft) => WorkflowClassifierDraft) => props.onClassifierDraftChange(node.id, updater);
+    return (
+      <section className="workflow-node-asset-editor" aria-label="분류기 편집">
+        <div className="workflow-node-asset-head">
+          <div>
+            <strong>Classifier 편집</strong>
+            <span>{classifierDraft ? "저장 대기 중인 변경사항" : savedClassifier ? `${savedClassifier.name} 수정` : "새 분류기 초안"}</span>
+          </div>
+          <div className="workflow-node-asset-actions">
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={() =>
+                updateDraft((draft) => ({
+                  ...draft,
+                  classes: [
+                    ...draft.classes,
+                    {
+                      class_name: `class_${draft.classes.length + 1}`,
+                      description: "분류 기준을 설명하세요.",
+                      signals: []
+                    }
+                  ]
+                }))
+              }
+            >
+              <Plus size={14} /> 클래스 추가
+            </button>
+            <button type="button" className="icon-only" onClick={props.onClose} aria-label="편집 닫기">
+              <X size={15} />
+            </button>
+          </div>
+        </div>
+        <div className="module-config-editor workflow-asset-config-editor">
+          <div className="module-form-grid workflow-classifier-form-grid">
+            <label>
+              <span>설정 이름</span>
+              <input
+                value={editableClassifier.name}
+                onChange={(event) => updateDraft((draft) => ({ ...draft, name: event.target.value }))}
+                aria-label="classifier 이름"
+              />
+            </label>
+            <label className="module-toggle-row classifier-outcome-note">
+              <span>결과 범위</span>
+              <strong>{editableClassifier.allow_unknown ? "사용자 정의 class 또는 unknown" : "사용자 정의 class"}</strong>
+            </label>
+          </div>
+          <label>
+            <span>설명</span>
+            <textarea
+              value={editableClassifier.description ?? ""}
+              onChange={(event) => updateDraft((draft) => ({ ...draft, description: event.target.value }))}
+              aria-label="classifier 설명"
+              rows={2}
+            />
+          </label>
+          <label className="module-toggle-row workflow-asset-toggle-row">
+            <span>unknown 허용</span>
+            <input
+              type="checkbox"
+              checked={editableClassifier.allow_unknown}
+              onChange={(event) => updateDraft((draft) => ({ ...draft, allow_unknown: event.target.checked }))}
+            />
+          </label>
+          <div className="module-section-title workflow-asset-section-title">
+            <CheckSquare size={16} />
+            <strong>문서 클래스</strong>
+          </div>
+          <div className="module-table-wrap workflow-asset-table-wrap">
+            <table className="module-config-table classifier-table workflow-classifier-config-table">
+              <thead>
+                <tr>
+                  <th>문서 클래스</th>
+                  <th>설명</th>
+                  <th>판단 신호</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {editableClassifier.classes.map((candidate, index) => (
+                  <tr key={`${candidate.class_name}-${index}`}>
+                    <td>
+                      <input
+                        value={candidate.class_name}
+                        onChange={(event) => updateDraft((draft) => updateClassifierDraftClass(draft, index, { class_name: event.target.value }))}
+                        aria-label="분류 클래스명"
+                      />
+                    </td>
+                    <td>
+                      <textarea
+                        value={candidate.description ?? ""}
+                        onChange={(event) => updateDraft((draft) => updateClassifierDraftClass(draft, index, { description: event.target.value }))}
+                        aria-label="분류 클래스 설명"
+                      />
+                    </td>
+                    <td>
+                      <textarea
+                        value={formatClassifierSignals(candidate.signals ?? [])}
+                        onChange={(event) => updateDraft((draft) => updateClassifierDraftClass(draft, index, { signals: parseClassifierSignals(event.target.value) }))}
+                        aria-label="분류 시그널"
+                        placeholder="쉼표 또는 줄바꿈으로 구분"
+                      />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="icon-only danger-plain"
+                        onClick={() => updateDraft((draft) => ({ ...draft, classes: draft.classes.filter((_, classIndex) => classIndex !== index) }))}
+                        disabled={editableClassifier.classes.length <= 1}
+                        aria-label="분류 클래스 삭제"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    );
   }
 
   if (node.data.kind === "kie") {
@@ -1782,13 +2118,18 @@ function WorkflowNodeAssetEditor(props: {
               <strong>Schema 편집</strong>
               <span>선택된 schema가 없습니다.</span>
             </div>
-            <button
-              type="button"
-              className="secondary compact"
-              onClick={() => props.onSchemaDraftChange(node.id, (draft) => draft)}
-            >
-              <Plus size={14} /> 새 schema 초안
-            </button>
+            <div className="workflow-node-asset-actions">
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={() => props.onSchemaDraftChange(node.id, (draft) => draft)}
+              >
+                <Plus size={14} /> 새 schema 초안
+              </button>
+              <button type="button" className="icon-only" onClick={props.onClose} aria-label="편집 닫기">
+                <X size={15} />
+              </button>
+            </div>
           </div>
         </section>
       );
@@ -1801,172 +2142,329 @@ function WorkflowNodeAssetEditor(props: {
             <strong>Schema 편집</strong>
             <span>{schemaDraft ? "저장 대기 중인 변경사항" : savedSchema ? `${savedSchema.name} 수정` : "AI 생성 초안"}</span>
           </div>
-          <button
-            type="button"
-            className="secondary compact"
-            onClick={() =>
-              updateDraft((draft) => ({
-                ...draft,
-                fields: [
-                  ...draft.fields,
-                  {
-                    key_name: `field_${draft.fields.length + 1}`,
-                    description: "추출할 값을 설명하세요.",
-                    output_format: "string"
-                  }
-                ]
-              }))
-            }
-          >
-            <Plus size={14} /> 필드 추가
-          </button>
-        </div>
-        <div className="workflow-schema-inline-meta">
-          <input
-            value={editableSchema.name}
-            onChange={(event) => updateDraft((draft) => ({ ...draft, name: event.target.value }))}
-            aria-label="schema 이름"
-          />
-          <input
-            value={editableSchema.display_name ?? ""}
-            onChange={(event) => updateDraft((draft) => ({ ...draft, display_name: event.target.value }))}
-            aria-label="schema 표시 이름"
-          />
-          <textarea
-            value={editableSchema.description ?? ""}
-            onChange={(event) => updateDraft((draft) => ({ ...draft, description: event.target.value }))}
-            aria-label="schema 설명"
-            rows={2}
-          />
-        </div>
-        <div className="workflow-schema-inline-table">
-          <div className="schema-field-head">
-            <span>필드명</span>
-            <span>설명</span>
-            <span>형식</span>
-            <span>AI 검수</span>
-            <span>삭제</span>
+          <div className="workflow-node-asset-actions">
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={() =>
+                updateDraft((draft) => ({
+                  ...draft,
+                  fields: [
+                    ...draft.fields,
+                    {
+                      key_name: `field_${draft.fields.length + 1}`,
+                      description: "추출할 값을 설명하세요.",
+                      output_format: "string"
+                    }
+                  ]
+                }))
+              }
+            >
+              <Plus size={14} /> 필드 추가
+            </button>
+            <button type="button" className="icon-only" onClick={props.onClose} aria-label="편집 닫기">
+              <X size={15} />
+            </button>
           </div>
-          {editableSchema.fields.map((field, index) => (
-            <div className="schema-field-row workflow-schema-field-row" key={`${field.key_name}-${index}`}>
+        </div>
+        <div className="module-config-editor workflow-asset-config-editor">
+          <div className="module-form-grid workflow-schema-form-grid">
+            <label>
+              <span>Schema 이름</span>
               <input
-                value={field.key_name}
-                onChange={(event) => updateDraft((draft) => updateSchemaDraftField(draft, index, { key_name: event.target.value }))}
-                aria-label="필드명"
+                value={editableSchema.name}
+                onChange={(event) => updateDraft((draft) => ({ ...draft, name: event.target.value }))}
+                aria-label="schema 이름"
               />
+            </label>
+            <label>
+              <span>표시 이름</span>
+              <input
+                value={editableSchema.display_name ?? ""}
+                onChange={(event) => updateDraft((draft) => ({ ...draft, display_name: event.target.value }))}
+                aria-label="schema 표시 이름"
+              />
+            </label>
+            <label>
+              <span>설명</span>
               <textarea
-                className="schema-description-input"
-                value={field.description}
-                onChange={(event) => updateDraft((draft) => updateSchemaDraftField(draft, index, { description: event.target.value }))}
-                aria-label="필드 설명"
+                value={editableSchema.description ?? ""}
+                onChange={(event) => updateDraft((draft) => ({ ...draft, description: event.target.value }))}
+                aria-label="schema 설명"
+                rows={2}
               />
-              <select
-                value={field.output_format}
-                onChange={(event) => updateDraft((draft) => updateSchemaDraftField(draft, index, { output_format: event.target.value as WorkflowOutputFormat }))}
-                aria-label="출력 형식"
-              >
-                <option value="string">string</option>
-                <option value="float">float</option>
-                <option value="bool">bool</option>
-                <option value="date">date</option>
-              </select>
-              <label className="schema-judgement-toggle">
-                <input
-                  type="checkbox"
-                  checked={Boolean(field.judgement_enabled)}
-                  onChange={(event) => updateDraft((draft) => updateSchemaDraftField(draft, index, { judgement_enabled: event.target.checked }))}
-                />
-                사용
-              </label>
-              <button
-                type="button"
-                className="icon-only"
-                onClick={() => updateDraft((draft) => ({ ...draft, fields: draft.fields.filter((_, fieldIndex) => fieldIndex !== index) }))}
-                disabled={editableSchema.fields.length <= 1}
-                aria-label="필드 삭제"
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
-          ))}
+            </label>
+          </div>
+          <div className="module-section-title workflow-asset-section-title">
+            <Sparkles size={16} />
+            <strong>Schema 필드</strong>
+          </div>
+          <div className="module-table-wrap workflow-asset-table-wrap">
+            <table className="module-config-table workflow-schema-config-table">
+              <thead>
+                <tr>
+                  <th>필드명</th>
+                  <th>설명</th>
+                  <th>타입</th>
+                  <th>영역</th>
+                  <th>AI 검수</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {editableSchema.fields.map((field, index) => (
+                  <tr key={`${field.key_name}-${index}`}>
+                    <td>
+                      <input
+                        value={field.key_name}
+                        onChange={(event) => updateDraft((draft) => updateSchemaDraftField(draft, index, { key_name: event.target.value }))}
+                        aria-label="필드명"
+                      />
+                    </td>
+                    <td>
+                      <textarea
+                        className="schema-description-input"
+                        value={field.description}
+                        onChange={(event) => updateDraft((draft) => updateSchemaDraftField(draft, index, { description: event.target.value }))}
+                        aria-label="필드 설명"
+                      />
+                    </td>
+                    <td>
+                      <select
+                        value={field.output_format}
+                        onChange={(event) => updateDraft((draft) => updateSchemaDraftField(draft, index, { output_format: event.target.value as WorkflowOutputFormat }))}
+                        aria-label="출력 형식"
+                      >
+                        <option value="string">string</option>
+                        <option value="float">float</option>
+                        <option value="bool">bool</option>
+                        <option value="date">date</option>
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        value={field.region_id ?? ""}
+                        onChange={(event) => updateDraft((draft) => updateSchemaDraftField(draft, index, { region_id: event.target.value || null }))}
+                        aria-label="영역"
+                      >
+                        <option value="">-</option>
+                        {(editableSchema.regions ?? []).map((region) => (
+                          <option key={region.id} value={region.id}>
+                            {region.name}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <label className="workflow-table-toggle">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(field.judgement_enabled)}
+                          onChange={(event) => updateDraft((draft) => updateSchemaDraftField(draft, index, { judgement_enabled: event.target.checked }))}
+                        />
+                        <span>{field.judgement_enabled ? "사용" : "미사용"}</span>
+                      </label>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="icon-only danger-plain"
+                        onClick={() => updateDraft((draft) => ({ ...draft, fields: draft.fields.filter((_, fieldIndex) => fieldIndex !== index) }))}
+                        disabled={editableSchema.fields.length <= 1}
+                        aria-label="필드 삭제"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
     );
   }
 
   if (node.data.kind === "required-checker") {
-    const checklistDraft = props.checklistDraftsByNodeId[node.id];
     const savedChecklist = props.checklists.find((checklist) => checklist.id === node.data.config?.checklist_id);
-    if (!checklistDraft) {
-      return savedChecklist ? null : (
+    const checklistDraft = props.checklistDraftsByNodeId[node.id];
+    const editableChecklist = checklistDraft ?? checklistSummaryToDraft(savedChecklist);
+    if (!editableChecklist) {
+      return (
         <section className="workflow-node-asset-editor">
           <div className="workflow-node-asset-head">
-            <strong>Checklist</strong>
-            <span>선택된 checklist가 없습니다.</span>
+            <div>
+              <strong>Checklist 편집</strong>
+              <span>선택된 checklist가 없습니다.</span>
+            </div>
+            <div className="workflow-node-asset-actions">
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={() => props.onChecklistDraftChange(node.id, (draft) => draft)}
+              >
+                <Plus size={14} /> 새 checklist 초안
+              </button>
+              <button type="button" className="icon-only" onClick={props.onClose} aria-label="편집 닫기">
+                <X size={15} />
+              </button>
+            </div>
           </div>
         </section>
       );
     }
+    const updateDraft = (updater: (draft: WorkflowChecklistDraft) => WorkflowChecklistDraft) => props.onChecklistDraftChange(node.id, updater);
     return (
       <section className="workflow-node-asset-editor compact-list">
         <div className="workflow-node-asset-head">
           <div>
-            <strong>Checklist 초안</strong>
-            <span>{checklistDraft.items.length.toLocaleString()}개 항목</span>
+            <strong>Checklist 편집</strong>
+            <span>{checklistDraft ? "저장 대기 중인 변경사항" : savedChecklist ? `${savedChecklist.name} 수정` : "새 checklist 초안"} · {editableChecklist.items.length.toLocaleString()}개 항목</span>
           </div>
-          <button
-            type="button"
-            className="secondary compact"
-            onClick={() =>
-              props.onChecklistDraftChange(node.id, {
-                ...checklistDraft,
-                items: [
-                  ...checklistDraft.items,
-                  {
-                    item_name: `항목 ${checklistDraft.items.length + 1}`,
-                    description: "확인할 항목을 설명하세요.",
-                    evidence_type: "text_or_handwriting",
-                    required: true
-                  }
-                ]
-              })
-            }
-          >
-            <Plus size={14} /> 항목 추가
-          </button>
+          <div className="workflow-node-asset-actions">
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={() =>
+                updateDraft((draft) => ({
+                  ...draft,
+                  items: [
+                    ...draft.items,
+                    {
+                      item_name: `항목 ${draft.items.length + 1}`,
+                      description: "확인할 항목을 설명하세요.",
+                      evidence_type: "text_or_handwriting",
+                      required: true
+                    }
+                  ]
+                }))
+              }
+            >
+              <Plus size={14} /> 항목 추가
+            </button>
+            <button type="button" className="icon-only" onClick={props.onClose} aria-label="편집 닫기">
+              <X size={15} />
+            </button>
+          </div>
         </div>
-        <div className="workflow-checklist-inline-list">
-          {checklistDraft.items.map((item, index) => (
-            <div key={`${item.item_name}-${index}`}>
+        <div className="module-config-editor workflow-asset-config-editor">
+          <div className="module-form-grid workflow-checklist-form-grid">
+            <label>
+              <span>설정 이름</span>
               <input
-                value={item.item_name}
-                onChange={(event) => props.onChecklistDraftChange(node.id, updateChecklistDraftItem(checklistDraft, index, { item_name: event.target.value }))}
-                aria-label="체크리스트 항목명"
+                value={editableChecklist.name}
+                onChange={(event) => updateDraft((draft) => ({ ...draft, name: event.target.value }))}
+                aria-label="checklist 이름"
               />
-              <input
-                value={item.description}
-                onChange={(event) => props.onChecklistDraftChange(node.id, updateChecklistDraftItem(checklistDraft, index, { description: event.target.value }))}
-                aria-label="체크리스트 설명"
+            </label>
+            <label>
+              <span>설명</span>
+              <textarea
+                value={editableChecklist.description ?? ""}
+                onChange={(event) => updateDraft((draft) => ({ ...draft, description: event.target.value }))}
+                aria-label="checklist 설명"
+                rows={2}
               />
-              <label>
-                <input
-                  type="checkbox"
-                  checked={item.required}
-                  onChange={(event) => props.onChecklistDraftChange(node.id, updateChecklistDraftItem(checklistDraft, index, { required: event.target.checked }))}
-                />
-                필수
-              </label>
-              <button
-                type="button"
-                className="icon-only"
-                onClick={() => props.onChecklistDraftChange(node.id, { ...checklistDraft, items: checklistDraft.items.filter((_, itemIndex) => itemIndex !== index) })}
-                disabled={checklistDraft.items.length <= 1}
-                aria-label="체크리스트 항목 삭제"
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
-          ))}
+            </label>
+          </div>
+          <div className="module-section-title workflow-asset-section-title">
+            <CheckSquare size={16} />
+            <strong>필요 부분 체크</strong>
+          </div>
+          <div className="module-table-wrap workflow-asset-table-wrap">
+            <table className="module-config-table checklist-table workflow-checklist-config-table">
+              <thead>
+                <tr>
+                  <th>체크 항목</th>
+                  <th>설명</th>
+                  <th>증거 유형</th>
+                  <th>필수</th>
+                  <th>영역</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {editableChecklist.items.map((item, index) => (
+                  <tr key={`${item.item_name}-${index}`}>
+                    <td>
+                      <input
+                        value={item.item_name}
+                        onChange={(event) => updateDraft((draft) => updateChecklistDraftItem(draft, index, { item_name: event.target.value }))}
+                        aria-label="체크리스트 항목명"
+                      />
+                    </td>
+                    <td>
+                      <textarea
+                        value={item.description ?? ""}
+                        onChange={(event) => updateDraft((draft) => updateChecklistDraftItem(draft, index, { description: event.target.value }))}
+                        aria-label="체크리스트 설명"
+                      />
+                    </td>
+                    <td>
+                      <div className="evidence-type-control">
+                        <select
+                          value={workflowEvidenceTypeIsPreset(item.evidence_type || "text_or_handwriting") ? item.evidence_type || "text_or_handwriting" : WORKFLOW_CUSTOM_EVIDENCE_TYPE_VALUE}
+                          onChange={(event) =>
+                            updateDraft((draft) => updateChecklistDraftItem(draft, index, { evidence_type: event.target.value === WORKFLOW_CUSTOM_EVIDENCE_TYPE_VALUE ? "" : event.target.value }))
+                          }
+                          aria-label="증거 타입"
+                        >
+                          {WORKFLOW_EVIDENCE_TYPES.map((type) => (
+                            <option key={type} value={type}>
+                              {WORKFLOW_EVIDENCE_TYPE_LABELS[type]}
+                            </option>
+                          ))}
+                          <option value={WORKFLOW_CUSTOM_EVIDENCE_TYPE_VALUE}>직접 입력</option>
+                        </select>
+                        {!workflowEvidenceTypeIsPreset(item.evidence_type || "text_or_handwriting") && (
+                          <input
+                            value={item.evidence_type || ""}
+                            placeholder="증거 유형 입력"
+                            onChange={(event) => updateDraft((draft) => updateChecklistDraftItem(draft, index, { evidence_type: event.target.value }))}
+                            aria-label="직접 입력 증거 타입"
+                          />
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={item.required ?? true}
+                        onChange={(event) => updateDraft((draft) => updateChecklistDraftItem(draft, index, { required: event.target.checked }))}
+                        aria-label="필수 여부"
+                      />
+                    </td>
+                    <td>
+                      <select
+                        value={item.region_id ?? ""}
+                        onChange={(event) => updateDraft((draft) => updateChecklistDraftItem(draft, index, { region_id: event.target.value || null }))}
+                        aria-label="체크리스트 영역"
+                      >
+                        <option value="">-</option>
+                        {(editableChecklist.regions ?? []).map((region) => (
+                          <option key={region.id} value={region.id}>
+                            {region.name}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="icon-only danger-plain"
+                        onClick={() => updateDraft((draft) => ({ ...draft, items: draft.items.filter((_, itemIndex) => itemIndex !== index) }))}
+                        disabled={editableChecklist.items.length <= 1}
+                        aria-label="체크리스트 항목 삭제"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
     );
@@ -2011,23 +2509,23 @@ function AiWorkflowDraftDialog(props: {
           </div>
         )}
         <div className="ai-workflow-options">
-          <label>
+          <label className="ai-workflow-option">
             <input
               type="checkbox"
               checked={props.includeChecklist}
               onChange={(event) => props.onIncludeChecklistChange(event.target.checked)}
               disabled={props.isGenerating}
             />
-            필수 항목 확인 초안 포함
+            <span>필수 항목 확인 초안 포함</span>
           </label>
-          <label>
+          <label className="ai-workflow-option">
             <input
               type="checkbox"
               checked={props.persistSamples}
               onChange={(event) => props.onPersistSamplesChange(event.target.checked)}
               disabled={props.isGenerating}
             />
-            샘플 문서를 보관함에 저장
+            <span>샘플 문서를 보관함에 저장</span>
           </label>
         </div>
         <div className="modal-actions">
@@ -3829,12 +4327,125 @@ function schemaDraftPayload(draft: WorkflowSchemaDraft) {
   };
 }
 
-function checklistDraftPayload(draft: WorkflowChecklistDraft) {
+function classifierSummaryToDraft(classifier: ClassifierSummary | undefined): WorkflowClassifierDraft | null {
+  if (!classifier) return null;
+  return normalizeClassifierDraft({
+    name: classifier.name,
+    description: classifier.description ?? null,
+    allow_unknown: classifier.allow_unknown ?? true,
+    classes: classifier.classes ?? []
+  });
+}
+
+function emptyWorkflowClassifierDraft(nodeId: string): WorkflowClassifierDraft {
+  const suffix = nodeId.replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || Date.now().toString(36);
   return {
-    name: draft.name.trim() || "AI 추천 checklist",
+    name: `workflow_classifier_${suffix}`.slice(0, 120),
+    description: "Workflow Builder에서 만든 classifier 초안입니다.",
+    allow_unknown: true,
+    classes: [
+      {
+        class_name: "class_1",
+        description: "분류 기준을 설명하세요.",
+        signals: []
+      }
+    ]
+  };
+}
+
+function normalizeClassifierDraft(draft: WorkflowClassifierDraft): WorkflowClassifierDraft {
+  return {
+    name: draft.name || "AI 추천 classifier",
+    description: draft.description ?? null,
+    allow_unknown: draft.allow_unknown ?? true,
+    classes: draft.classes.length ? draft.classes.map(normalizeClassifierClass) : [{
+      class_name: "class_1",
+      description: "분류 기준을 설명하세요.",
+      signals: []
+    }]
+  };
+}
+
+function normalizeClassifierClass(candidate: WorkflowClassifierClass): WorkflowClassifierClass {
+  return {
+    class_name: candidate.class_name || "class",
+    description: candidate.description || "분류 기준을 설명하세요.",
+    signals: (candidate.signals ?? []).map((signal) => signal.trim()).filter(Boolean)
+  };
+}
+
+function classifierDraftPayload(draft: WorkflowClassifierDraft) {
+  const normalized = normalizeClassifierDraft(draft);
+  return {
+    name: normalized.name.trim() || "AI 추천 classifier",
+    description: normalized.description?.trim() || null,
+    allow_unknown: Boolean(normalized.allow_unknown),
+    classes: normalized.classes.map((candidate) => ({
+      class_name: candidate.class_name.trim() || "class",
+      description: candidate.description.trim() || "분류 기준을 설명하세요.",
+      signals: candidate.signals.map((signal) => signal.trim()).filter(Boolean)
+    }))
+  };
+}
+
+function checklistSummaryToDraft(checklist: ChecklistSummary | undefined): WorkflowChecklistDraft | null {
+  if (!checklist) return null;
+  return normalizeChecklistDraft({
+    name: checklist.name,
+    description: checklist.description ?? null,
+    regions: checklist.regions ?? [],
+    items: checklist.items ?? []
+  });
+}
+
+function emptyWorkflowChecklistDraft(nodeId: string): WorkflowChecklistDraft {
+  const suffix = nodeId.replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || Date.now().toString(36);
+  return {
+    name: `workflow_checklist_${suffix}`.slice(0, 120),
+    description: "Workflow Builder에서 만든 checklist 초안입니다.",
+    regions: [],
+    items: [
+      {
+        item_name: "항목 1",
+        description: "확인할 항목을 설명하세요.",
+        evidence_type: "text_or_handwriting",
+        required: true
+      }
+    ]
+  };
+}
+
+function normalizeChecklistDraft(draft: WorkflowChecklistDraft): WorkflowChecklistDraft {
+  return {
+    name: draft.name || "AI 추천 checklist",
     description: draft.description ?? null,
     regions: draft.regions ?? [],
-    items: draft.items.map((item) => ({
+    items: draft.items.length ? draft.items.map(normalizeChecklistItem) : [{
+      item_name: "항목 1",
+      description: "확인할 항목을 설명하세요.",
+      evidence_type: "text_or_handwriting",
+      required: true
+    }]
+  };
+}
+
+function normalizeChecklistItem(item: WorkflowChecklistItem): WorkflowChecklistItem {
+  return {
+    item_name: item.item_name || "항목",
+    description: item.description || "확인할 항목을 설명하세요.",
+    evidence_type: item.evidence_type || "text_or_handwriting",
+    required: item.required ?? true,
+    region_id: item.region_id ?? null
+  };
+}
+
+function checklistDraftPayload(draft: WorkflowChecklistDraft) {
+  const normalized = normalizeChecklistDraft(draft);
+  return {
+    name: normalized.name.trim() || "AI 추천 checklist",
+    description: normalized.description?.trim() || null,
+    regions: normalized.regions ?? [],
+    items: normalized.items.map((item) => ({
       item_name: item.item_name.trim() || "항목",
       description: item.description.trim() || "확인할 항목을 설명하세요.",
       evidence_type: item.evidence_type || "text_or_handwriting",
@@ -3851,6 +4462,13 @@ function updateSchemaDraftField(draft: WorkflowSchemaDraft, index: number, patch
   };
 }
 
+function updateClassifierDraftClass(draft: WorkflowClassifierDraft, index: number, patch: Partial<WorkflowClassifierClass>): WorkflowClassifierDraft {
+  return {
+    ...draft,
+    classes: draft.classes.map((candidate, classIndex) => (classIndex === index ? { ...candidate, ...patch } : candidate))
+  };
+}
+
 function updateChecklistDraftItem(draft: WorkflowChecklistDraft, index: number, patch: Partial<WorkflowChecklistItem>): WorkflowChecklistDraft {
   return {
     ...draft,
@@ -3858,21 +4476,157 @@ function updateChecklistDraftItem(draft: WorkflowChecklistDraft, index: number, 
   };
 }
 
+function formatClassifierSignals(signals: string[]) {
+  return signals.join(", ");
+}
+
+function parseClassifierSignals(value: string) {
+  return value.split(/[,\n]+/).map((signal) => signal.trim()).filter(Boolean);
+}
+
+function workflowEvidenceTypeIsPreset(value: string) {
+  return WORKFLOW_EVIDENCE_TYPES.includes(value as (typeof WORKFLOW_EVIDENCE_TYPES)[number]);
+}
+
 function isWorkflowAiDraftImage(file: File) {
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
   return ["png", "jpg", "jpeg"].includes(extension);
 }
 
+function workflowNodeHasAssetEditor(node: WorkflowNode) {
+  return node.data.kind === "classifier" || node.data.kind === "kie" || node.data.kind === "required-checker";
+}
+
 function syncBranchKeys(nodes: WorkflowNode[], classifierId: string, classifiers: ClassifierSummary[]) {
   const classifier = classifiers.find((item) => item.id === classifierId);
+  return syncBranchKeysFromClassNames(nodes, classifier?.classes.map((item) => item.class_name) ?? []);
+}
+
+function syncBranchKeysFromClassNames(nodes: WorkflowNode[], classNames: string[]) {
   const branchKeys = [
-    ...(classifier?.classes.map((item) => `class:${item.class_name}`) ?? []),
+    ...classNames.map((className) => className.trim()).filter(Boolean).map((className) => `class:${className}`),
     UNKNOWN_BRANCH_KEY
   ];
   return nodes.map((node) => {
     if (node.data.kind !== "branch") return node;
     return { ...node, data: { ...node.data, branchKeys } };
   });
+}
+
+function shouldBootstrapBankPocStarterWorkflow(params: {
+  activeWorkflowId: string;
+  checklists: ChecklistSummary[];
+  classifiers: ClassifierSummary[];
+  initialDraft: WorkflowDraft | null;
+  initialWorkflowId: string;
+  schemas: SchemaSummary[];
+  workflows: WorkflowDefinition[];
+}) {
+  if (params.initialWorkflowId || !isStarterWorkflowDraft(params.initialDraft)) return false;
+  const bankWorkflow = params.workflows.find(isBankPocWorkflow);
+  if (bankWorkflow) {
+    return bankPocWorkflowNeedsRefresh(bankWorkflow, params.schemas, params.classifiers, params.checklists);
+  }
+  return !params.activeWorkflowId && !params.workflows.length && !params.schemas.length && !params.classifiers.length && !params.checklists.length;
+}
+
+function starterWorkflowToAutoLoad(params: {
+  activeWorkflowId: string;
+  checklists: ChecklistSummary[];
+  classifiers: ClassifierSummary[];
+  initialDraft: WorkflowDraft | null;
+  initialWorkflowId: string;
+  schemas: SchemaSummary[];
+  workflows: WorkflowDefinition[];
+}) {
+  if (params.initialWorkflowId || !isStarterWorkflowDraft(params.initialDraft)) return null;
+  if (params.activeWorkflowId) {
+    const activeWorkflow = params.workflows.find((workflow) => workflow.id === params.activeWorkflowId);
+    return activeWorkflow && isBankPocWorkflow(activeWorkflow) ? activeWorkflow : null;
+  }
+  return (
+    params.workflows.find((workflow) => isBankPocWorkflow(workflow) && bankPocWorkflowIsConnected(workflow, params.schemas, params.classifiers, params.checklists)) ??
+    params.workflows[0] ??
+    null
+  );
+}
+
+function isStarterWorkflowDraft(draft: WorkflowDraft | null) {
+  if (!draft) return true;
+  if (
+    Object.keys(draft.classifierDraftsByNodeId ?? {}).length ||
+    Object.keys(draft.schemaDraftsByNodeId ?? {}).length ||
+    Object.keys(draft.checklistDraftsByNodeId ?? {}).length
+  ) return false;
+  if (draft.workflowName === BANK_POC_WORKFLOW_NAME) return true;
+  if (draft.activeWorkflowId) return false;
+  if (draft.nodes.length !== defaultNodes.length || draft.edges.length !== defaultEdges.length) return false;
+  return draft.nodes.every((node, index) => {
+    const defaultNode = defaultNodes[index];
+    return (
+      node.id === defaultNode.id &&
+      node.data.kind === defaultNode.data.kind &&
+      node.data.label === defaultNode.data.label &&
+      workflowNodeConfigIsEmpty(node) &&
+      Math.abs(node.position.x - defaultNode.position.x) < 0.5 &&
+      Math.abs(node.position.y - defaultNode.position.y) < 0.5
+    );
+  });
+}
+
+function workflowNodeConfigIsEmpty(node: WorkflowNode) {
+  return !Object.values(node.data.config ?? {}).some((value) => String(value || "").trim());
+}
+
+function isBankPocWorkflow(workflow: WorkflowDefinition) {
+  return workflow.name === BANK_POC_WORKFLOW_NAME;
+}
+
+function isBankPocCanvas(workflowName: string, nodes: WorkflowNode[]) {
+  if (workflowName !== BANK_POC_WORKFLOW_NAME) return false;
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  return Object.keys(BANK_POC_COMPACT_NODE_POSITIONS).every((nodeId) => nodeIds.has(nodeId));
+}
+
+function bankPocWorkflowNeedsRefresh(
+  workflow: WorkflowDefinition,
+  schemas: SchemaSummary[],
+  classifiers: ClassifierSummary[],
+  checklists: ChecklistSummary[]
+) {
+  return (
+    Boolean(workflow.validation_warnings.length) ||
+    !bankPocWorkflowIsConnected(workflow, schemas, classifiers, checklists) ||
+    !bankPocWorkflowUsesCompactLayout(workflow)
+  );
+}
+
+function bankPocWorkflowIsConnected(
+  workflow: WorkflowDefinition,
+  schemas: SchemaSummary[],
+  classifiers: ClassifierSummary[],
+  checklists: ChecklistSummary[]
+) {
+  const schemaIds = new Set(schemas.map((schema) => schema.id));
+  const classifierIds = new Set(classifiers.map((classifier) => classifier.id));
+  const checklistIds = new Set(checklists.map((checklist) => checklist.id));
+  return workflow.definition.nodes.every((node) => {
+    if (node.data.kind === "classifier") return classifierIds.has(node.data.config?.classifier_id ?? "");
+    if (node.data.kind === "kie") return schemaIds.has(node.data.config?.schema_id ?? "");
+    if (node.data.kind === "required-checker") return checklistIds.has(node.data.config?.checklist_id ?? "");
+    return true;
+  });
+}
+
+function bankPocWorkflowUsesCompactLayout(workflow: WorkflowDefinition) {
+  return Object.entries(BANK_POC_COMPACT_NODE_POSITIONS).every(([nodeId, position]) => {
+    const node = workflow.definition.nodes.find((item) => item.id === nodeId);
+    return Boolean(node && Math.abs(node.position.x - position.x) < 0.5 && Math.abs(node.position.y - position.y) < 0.5);
+  });
+}
+
+function upsertById<T extends { id: string }>(items: T[], item: T) {
+  return [item, ...items.filter((current) => current.id !== item.id)];
 }
 
 function readWorkflowDraft(): WorkflowDraft | null {
@@ -3887,6 +4641,7 @@ function readWorkflowDraft(): WorkflowDraft | null {
       nodes: parsed.nodes.map(normalizeWorkflowNode),
       edges: normalizeWorkflowEdges(parsed.edges as WorkflowEdge[]),
       selectedNodeId: typeof parsed.selectedNodeId === "string" ? parsed.selectedNodeId : parsed.nodes[0]?.id ?? null,
+      classifierDraftsByNodeId: isRecord(parsed.classifierDraftsByNodeId) ? parsed.classifierDraftsByNodeId as Record<string, WorkflowClassifierDraft> : {},
       schemaDraftsByNodeId: isRecord(parsed.schemaDraftsByNodeId) ? parsed.schemaDraftsByNodeId as Record<string, WorkflowSchemaDraft> : {},
       checklistDraftsByNodeId: isRecord(parsed.checklistDraftsByNodeId) ? parsed.checklistDraftsByNodeId as Record<string, WorkflowChecklistDraft> : {}
     };
@@ -3917,6 +4672,7 @@ function writeWorkflowDraft(draft: WorkflowDraft) {
           animated: false,
           data: edge.data
         })),
+        classifierDraftsByNodeId: draft.classifierDraftsByNodeId ?? {},
         schemaDraftsByNodeId: draft.schemaDraftsByNodeId ?? {},
         checklistDraftsByNodeId: draft.checklistDraftsByNodeId ?? {}
       })
@@ -3955,6 +4711,7 @@ function validateConnection(connection: Connection, nodes: WorkflowNode[], edges
 function validateWorkflow(
   nodes: WorkflowNode[],
   edges: WorkflowEdge[],
+  classifierDraftsByNodeId: Record<string, WorkflowClassifierDraft> = {},
   schemaDraftsByNodeId: Record<string, WorkflowSchemaDraft> = {},
   checklistDraftsByNodeId: Record<string, WorkflowChecklistDraft> = {}
 ) {
@@ -3971,7 +4728,9 @@ function validateWorkflow(
       warnings.push(`${node.data.label} 노드는 현재 실행 경로에 연결되어 있지 않습니다.`);
       return;
     }
-    if (node.data.kind === "classifier" && !node.data.config?.classifier_id) errors.push("문서 분류 노드에 classifier를 선택하세요.");
+    if (node.data.kind === "classifier" && !node.data.config?.classifier_id && !classifierDraftsByNodeId[node.id]) {
+      errors.push("문서 분류 노드에 classifier를 선택하세요.");
+    }
     if (node.data.kind === "kie" && !node.data.config?.schema_id && !schemaDraftsByNodeId[node.id]) errors.push("KIE 노드에 schema를 선택하세요.");
     if (node.data.kind === "required-checker" && !node.data.config?.checklist_id && !checklistDraftsByNodeId[node.id]) {
       errors.push("필수 항목 확인 노드에 checklist를 선택하세요.");

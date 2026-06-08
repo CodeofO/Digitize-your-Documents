@@ -13,18 +13,21 @@
 - Workflow Builder save fallback for stale drafts.
 - Compact execution status panel and removal of the canvas run banner.
 - AI workflow draft generation from up to 10 sample images.
-- Inline KIE schema editing inside Workflow Builder.
+- Workflow Builder node asset editing now covers schema fields, classifier classes, and required-field checklists with module-style table editors.
 - Blank KIE nodes can now start a new schema draft directly inside Workflow Builder.
 - Draft materialization for schema/checklist assets during workflow save.
+- VLM settings now support OpenAI-compatible `base_url`, local no-key endpoints, request timeout tuning, and KIE field group tuning.
+- KIE result review marks low-confidence model output as `needs_review` and keeps frontend polling open for long local VLM inference.
+- README workflow screenshots are generated from the PoC UI smoke flow.
 - Public repository scope cleaned to focus on product features.
 
 ## Next Product Tasks
 
 - Add stronger draft preview before applying AI-generated workflows.
-- Add better duplicate-field and missing-schema warnings in Workflow Builder.
 - Add fixture-based UI checks for AI workflow draft application.
 - Improve export preset editing inside result review.
 - Add more sample document templates with clear source notes.
+- Add explicit cancel/retry controls for long-running single KIE jobs.
 
 ## Working Rules
 

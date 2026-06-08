@@ -204,9 +204,25 @@ def _assert_seed_payload(seeded: dict[str, Any]) -> None:
     for expected in ["신청서", "동의서", "증빙문서", "class:신청서", "class:동의서", "class:증빙문서"]:
         if expected not in payload_text:
             raise AssertionError(f"seed payload does not include Korean demo label: {expected}")
-    for expected in ["required_application", "merge", "970.3101983002833", "964.9985835694051"]:
-        if expected not in payload_text:
-            raise AssertionError(f"seed payload does not include saved canvas layout marker: {expected}")
+    nodes = {
+        node.get("id"): node
+        for node in seeded.get("workflow", {}).get("definition", {}).get("nodes", [])
+        if isinstance(node, dict)
+    }
+    expected_positions = {
+        "input": {"x": 40, "y": 240},
+        "classifier": {"x": 250, "y": 240},
+        "branch": {"x": 460, "y": 210},
+        "kie_application": {"x": 670, "y": 70},
+        "required_application": {"x": 900, "y": 70},
+        "required_consent": {"x": 670, "y": 240},
+        "kie_supporting": {"x": 670, "y": 410},
+        "merge": {"x": 900, "y": 300},
+        "export": {"x": 1110, "y": 300},
+    }
+    for node_id, position in expected_positions.items():
+        if nodes.get(node_id, {}).get("position") != position:
+            raise AssertionError(f"seed payload has unexpected canvas position for {node_id}: {nodes.get(node_id)}")
 
 
 def _wait_for_document_ready(base_url: str, document_id: str) -> dict[str, Any]:

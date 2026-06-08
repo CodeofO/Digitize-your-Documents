@@ -332,6 +332,7 @@ def get_vlm_settings() -> VlmSettingsRead:
     return VlmSettingsRead(
         provider=resolve_vlm_api_style(settings),
         model_name=settings.resolved_vlm_model_name,
+        base_url=settings.vlm_base_url,
         libreoffice_path=settings.libreoffice_path or DEFAULT_LIBREOFFICE_PATH,
         reasoning_effort=settings.vlm_reasoning_effort,
         verbosity=settings.vlm_verbosity,
@@ -340,6 +341,7 @@ def get_vlm_settings() -> VlmSettingsRead:
         service_tier=settings.vlm_service_tier,
         workflow_max_workers=settings.workflow_max_workers,
         vlm_max_concurrent_requests=settings.vlm_max_concurrent_requests,
+        vlm_timeout_seconds=settings.vlm_timeout_seconds,
         kie_field_group_size=settings.kie_field_group_size,
         has_api_key=bool(settings.resolved_vlm_api_key),
         env_path=str(ROOT_ENV_PATH),
@@ -361,6 +363,7 @@ def update_vlm_settings(payload: VlmSettingsUpdate, request: Request, db: Sessio
     updates = {
         "VLM_PROVIDER": provider,
         "VLM_MODEL_NAME": payload.model_name.strip(),
+        "VLM_BASE_URL": (payload.base_url or "").strip(),
         "LIBREOFFICE_PATH": (payload.libreoffice_path or "").strip() or DEFAULT_LIBREOFFICE_PATH,
         "VLM_REASONING_EFFORT": (payload.reasoning_effort or "minimal").strip(),
         "VLM_VERBOSITY": (payload.verbosity or "low").strip(),
@@ -369,6 +372,7 @@ def update_vlm_settings(payload: VlmSettingsUpdate, request: Request, db: Sessio
         "VLM_SERVICE_TIER": (payload.service_tier or "").strip(),
         "WORKFLOW_MAX_WORKERS": str(payload.workflow_max_workers or get_settings().workflow_max_workers),
         "VLM_MAX_CONCURRENT_REQUESTS": str(payload.vlm_max_concurrent_requests or get_settings().vlm_max_concurrent_requests),
+        "VLM_TIMEOUT_SECONDS": str(payload.vlm_timeout_seconds or get_settings().vlm_timeout_seconds),
         "KIE_FIELD_GROUP_SIZE": str(payload.kie_field_group_size or get_settings().kie_field_group_size),
     }
     api_key = (payload.api_key or "").strip()
@@ -3816,10 +3820,6 @@ def _seed_bank_poc_classifier(db: Session, payload: dict[str, Any], *, workspace
 
 
 def _seed_bank_poc_checklist(db: Session, payload: dict[str, Any], *, workspace_id: str | None) -> tuple[RequiredFieldChecklist, bool]:
-    existing = _find_active_by_name(db, RequiredFieldChecklist, payload["name"], workspace_id=workspace_id)
-    if existing:
-        return existing, False
-
     config = {
         "name": payload["name"],
         "description": payload.get("description"),
@@ -3827,6 +3827,22 @@ def _seed_bank_poc_checklist(db: Session, payload: dict[str, Any], *, workspace_
         "items": payload["items"],
     }
     _validate_checklist_region_references(config)
+    existing = _find_active_by_name(db, RequiredFieldChecklist, payload["name"], workspace_id=workspace_id)
+    if existing:
+        next_config_json = json.dumps(config, ensure_ascii=False)
+        if existing.description != payload.get("description") or existing.config_json != next_config_json:
+            existing.description = payload.get("description")
+            existing.config_json = next_config_json
+            log_audit_event(
+                db,
+                entity_type="required_field_checklist",
+                entity_id=existing.id,
+                action="updated",
+                message=f"Updated checklist {existing.name} from bank PoC template",
+                metadata={"template": "bank_documents_poc", "item_count": len(payload["items"])},
+            )
+        return existing, False
+
     checklist = RequiredFieldChecklist(
         workspace_id=workspace_id,
         name=payload["name"],
@@ -3998,15 +4014,15 @@ def _find_active_by_name(db: Session, model, name: str, *, workspace_id: str | N
 def _bank_poc_workflow_definition(schema_id: str, classifier_id: str, checklist_id: str) -> dict[str, Any]:
     return {
         "nodes": [
-            {"id": "input", "position": {"x": 40, "y": 260}, "data": {"kind": "input", "label": "문서 입력"}},
+            {"id": "input", "position": {"x": 40, "y": 240}, "data": {"kind": "input", "label": "문서 입력"}},
             {
                 "id": "classifier",
-                "position": {"x": 220, "y": 260},
+                "position": {"x": 250, "y": 240},
                 "data": {"kind": "classifier", "label": "은행 문서 분류", "config": {"classifier_id": classifier_id}},
             },
             {
                 "id": "branch",
-                "position": {"x": 400, "y": 230},
+                "position": {"x": 460, "y": 210},
                 "data": {
                     "kind": "branch",
                     "label": "문서 종류 분기",
@@ -4020,26 +4036,26 @@ def _bank_poc_workflow_definition(schema_id: str, classifier_id: str, checklist_
             },
             {
                 "id": "kie_application",
-                "position": {"x": 620, "y": 50},
+                "position": {"x": 670, "y": 70},
                 "data": {"kind": "kie", "label": "신청서 핵심 정보 추출", "config": {"schema_id": schema_id}},
             },
             {
                 "id": "required_application",
-                "position": {"x": 970.3101983002833, "y": 43.8229461756374},
+                "position": {"x": 900, "y": 70},
                 "data": {"kind": "required-checker", "label": "신청서 필수 항목 확인", "config": {"checklist_id": checklist_id}},
             },
             {
                 "id": "required_consent",
-                "position": {"x": 620, "y": 230},
+                "position": {"x": 670, "y": 240},
                 "data": {"kind": "required-checker", "label": "동의서 필수 항목 확인", "config": {"checklist_id": checklist_id}},
             },
             {
                 "id": "kie_supporting",
-                "position": {"x": 620, "y": 410},
+                "position": {"x": 670, "y": 410},
                 "data": {"kind": "kie", "label": "증빙 정보 추출", "config": {"schema_id": schema_id}},
             },
-            {"id": "merge", "position": {"x": 964.9985835694051, "y": 234.41218130311614}, "data": {"kind": "merge", "label": "결과 병합"}},
-            {"id": "export", "position": {"x": 1120, "y": 230}, "data": {"kind": "export", "label": "Export"}},
+            {"id": "merge", "position": {"x": 900, "y": 300}, "data": {"kind": "merge", "label": "결과 병합"}},
+            {"id": "export", "position": {"x": 1110, "y": 300}, "data": {"kind": "export", "label": "Export"}},
         ],
         "edges": [
             {"id": "input-classifier", "source": "input", "target": "classifier"},

@@ -5,6 +5,9 @@ from typing import Any
 from app.schemas import FieldDefinition
 
 
+LOW_CONFIDENCE_THRESHOLD = 0.75
+
+
 def validate_extracted_values(
     raw_values: dict[str, Any],
     fields: list[FieldDefinition],
@@ -25,6 +28,8 @@ def validate_extracted_values(
 
         value, page, confidence, evidence, metadata_warnings = _unpack_extraction_item(raw_item)
         field_warnings.extend(metadata_warnings)
+        if confidence is not None and confidence < LOW_CONFIDENCE_THRESHOLD:
+            field_warnings.append("low_confidence")
         normalized_value, normalization_warnings = _normalize_value(value, field.output_format)
         field_warnings.extend(normalization_warnings)
 

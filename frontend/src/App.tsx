@@ -52,6 +52,8 @@ const DEFAULT_UPLOAD_CHUNK_FILES = 10;
 const BATCH_FILE_ROW_HEIGHT = 84;
 const BATCH_FILE_OVERSCAN = 8;
 const DEFAULT_MAX_BATCH_UPLOAD_FILES = 10000;
+const EXTRACTION_TERMINAL_STATUSES = new Set(["completed", "failed", "needs_review", "canceled"]);
+const EXTRACTION_LONG_RUNNING_NOTICE_MS = 60_000;
 const SAMPLE_SCHEMA_FIELDS: FieldDefinition[] = [
   {
     key_name: "문서번호",
@@ -272,6 +274,7 @@ type SystemStatus = {
 type VlmSettings = {
   provider: string;
   model_name: string | null;
+  base_url: string | null;
   libreoffice_path: string | null;
   reasoning_effort: string | null;
   verbosity: string | null;
@@ -280,6 +283,7 @@ type VlmSettings = {
   service_tier: string | null;
   workflow_max_workers: number;
   vlm_max_concurrent_requests: number;
+  vlm_timeout_seconds: number;
   kie_field_group_size: number;
   has_api_key: boolean;
   env_path: string;
@@ -476,6 +480,10 @@ const initialFields: SchemaField[] = [
     output_format: "string"
   }
 ];
+
+function extractionValuesFromResult(result: ExtractionResult | null | undefined): Record<string, ExtractionValue> {
+  return result?.corrected_output?.values ?? result?.validated_output.values ?? {};
+}
 
 function modeFromLocation(): AppMode {
   const hash = window.location.hash.replace("#", "");
@@ -853,6 +861,7 @@ export default function App() {
   const [schemaJsonInput, setSchemaJsonInput] = useState("");
   const [job, setJob] = useState<ExtractionJob | null>(null);
   const [edits, setEdits] = useState<Record<string, ExtractionValue>>({});
+  const [editsResultId, setEditsResultId] = useState<string | null>(null);
   const [editedKeys, setEditedKeys] = useState<string[]>([]);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
   const [activePage, setActivePage] = useState(0);
@@ -875,6 +884,7 @@ export default function App() {
   const [homeRequiredBatches, setHomeRequiredBatches] = useState<HomeModuleBatch[]>([]);
   const [vlmApiKey, setVlmApiKey] = useState("");
   const [vlmModelName, setVlmModelName] = useState("");
+  const [vlmBaseUrl, setVlmBaseUrl] = useState("");
   const [libreOfficePath, setLibreOfficePath] = useState("/Applications/LibreOffice.app/Contents/MacOS/soffice");
   const [vlmReasoningEffort, setVlmReasoningEffort] = useState("minimal");
   const [vlmVerbosity, setVlmVerbosity] = useState("low");
@@ -883,6 +893,7 @@ export default function App() {
   const [vlmServiceTier, setVlmServiceTier] = useState("");
   const [workflowMaxWorkers, setWorkflowMaxWorkers] = useState("16");
   const [vlmMaxConcurrentRequests, setVlmMaxConcurrentRequests] = useState("128");
+  const [vlmTimeoutSeconds, setVlmTimeoutSeconds] = useState("120");
   const [kieFieldGroupSize, setKieFieldGroupSize] = useState("2");
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1034,7 +1045,9 @@ export default function App() {
   const activeRegionPage = document ? activePage : 0;
 
   const result = job?.result ?? null;
-  const currentValues = Object.keys(edits).length ? edits : result?.corrected_output?.values ?? result?.validated_output.values ?? {};
+  const resultValues = extractionValuesFromResult(result);
+  const currentValues =
+    result && editsResultId === result.id && Object.keys(edits).length ? edits : resultValues;
   const templates = recentSchemas.filter((item) => item.is_template || item.pinned);
   const schemaNameConflict = useMemo(
     () => findSavedSchemaNameConflict(schemaName, recentSchemas, schema?.ephemeral ? null : schema),
@@ -1044,6 +1057,22 @@ export default function App() {
     () => validateFields(schemaPayloadFields, schemaPayloadRegions),
     [schemaPayloadFields, schemaPayloadRegions]
   );
+
+  function applyResultReviewState(nextResult: ExtractionResult) {
+    setEdits(extractionValuesFromResult(nextResult));
+    setEditsResultId(nextResult.id);
+    setReviewedFields(nextResult.reviewed_fields ?? []);
+    setEditedKeys([]);
+    setReviewFilter("all");
+  }
+
+  function clearResultReviewState() {
+    setEdits({});
+    setEditsResultId(null);
+    setEditedKeys([]);
+    setReviewedFields([]);
+  }
+
   const activeSchemaSummary = {
     name: schema?.display_name || schema?.name || schemaName.trim() || "Untitled schema",
     fieldCount: schemaPayloadFields.length,
@@ -1292,10 +1321,7 @@ export default function App() {
         applySchema(loadedSchema);
         setJob(loadedJob);
         if (loadedJob.result) {
-          setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
-          setReviewedFields(loadedJob.result.reviewed_fields ?? []);
-          setEditedKeys([]);
-          setReviewFilter("all");
+          applyResultReviewState(loadedJob.result);
           void loadAuditEvents("extraction_result", loadedJob.result.id);
         }
         setStep(saved.step ?? (loadedJob.result ? "review" : "schema"));
@@ -1359,6 +1385,7 @@ export default function App() {
       const settings = await api<VlmSettings>("/api/settings/vlm");
       setVlmSettings(settings);
       setVlmModelName(settings.model_name ?? "");
+      setVlmBaseUrl(settings.base_url ?? "");
       setLibreOfficePath(settings.libreoffice_path ?? "/Applications/LibreOffice.app/Contents/MacOS/soffice");
       setVlmReasoningEffort(settings.reasoning_effort ?? "minimal");
       setVlmVerbosity(settings.verbosity ?? "low");
@@ -1367,6 +1394,7 @@ export default function App() {
       setVlmServiceTier(settings.service_tier ?? "");
       setWorkflowMaxWorkers(String(settings.workflow_max_workers ?? 16));
       setVlmMaxConcurrentRequests(String(settings.vlm_max_concurrent_requests ?? 128));
+      setVlmTimeoutSeconds(String(settings.vlm_timeout_seconds ?? 120));
       setKieFieldGroupSize(String(settings.kie_field_group_size ?? 2));
     } catch {
       setVlmSettings(null);
@@ -1384,6 +1412,7 @@ export default function App() {
         body: JSON.stringify({
           api_key: vlmApiKey,
           model_name: vlmModelName,
+          base_url: vlmBaseUrl,
           libreoffice_path: libreOfficePath,
           reasoning_effort: vlmReasoningEffort,
           verbosity: vlmVerbosity,
@@ -1392,6 +1421,7 @@ export default function App() {
           service_tier: vlmServiceTier,
           workflow_max_workers: Number.parseInt(workflowMaxWorkers, 10) || 16,
           vlm_max_concurrent_requests: Number.parseInt(vlmMaxConcurrentRequests, 10) || 128,
+          vlm_timeout_seconds: Number.parseInt(vlmTimeoutSeconds, 10) || 120,
           kie_field_group_size: Number.parseInt(kieFieldGroupSize, 10) || 2,
           provider: "auto"
         })
@@ -1429,9 +1459,7 @@ export default function App() {
       setRecentJobs([]);
       setRecentRawExtractions([]);
       setArchiveResults([]);
-      setEdits({});
-      setEditedKeys([]);
-      setReviewedFields([]);
+      clearResultReviewState();
       setAuditEvents([]);
       setReviewFilter("all");
       setStep("upload");
@@ -1781,14 +1809,18 @@ export default function App() {
       setActiveBatchId(null);
       setActiveBatchItemId(null);
       setJob(created);
-      const completed = await pollJob(created.job_id);
+      clearResultReviewState();
+      const completed = await pollJob(created.job_id, {
+        onProgress: (nextJob, elapsedMs) => {
+          setJob(nextJob);
+          if (elapsedMs >= EXTRACTION_LONG_RUNNING_NOTICE_MS) {
+            setBusy(`핵심 정보 추출 중 · ${formatElapsedTime(elapsedMs)} 경과 · 로컬 VLM은 수 분 이상 걸릴 수 있습니다`);
+          }
+        }
+      });
       setJob(completed);
       if (completed.result) {
-        const nextValues = completed.result.corrected_output?.values ?? completed.result.validated_output.values;
-        setEdits(nextValues);
-        setEditedKeys([]);
-        setReviewedFields(completed.result.reviewed_fields ?? []);
-        setReviewFilter("all");
+        applyResultReviewState(completed.result);
         setStep("review");
         void loadAuditEvents("extraction_result", completed.result.id);
       }
@@ -1810,7 +1842,7 @@ export default function App() {
     try {
       const correctedOutput: ValidatedOutput = {
         ...(result.corrected_output ?? result.validated_output),
-        values: edits
+        values: currentValues
       };
       const updated = await api<ExtractionResult>(`/api/extraction-results/${result.id}`, {
         method: "PATCH",
@@ -1818,7 +1850,7 @@ export default function App() {
         body: JSON.stringify({ corrected_output: correctedOutput, reviewed_fields: reviewedFields })
       });
       setJob((current) => (current ? { ...current, result: updated } : current));
-      setReviewedFields(updated.reviewed_fields ?? []);
+      applyResultReviewState(updated);
       await loadAuditEvents("extraction_result", updated.id);
       await refreshHistory();
     } catch (err) {
@@ -1843,13 +1875,11 @@ export default function App() {
         const loadedSchema = await api<SavedSchema>(`/api/schemas/${jobs[0].schema_id}`);
         applySchema(loadedSchema);
         if (jobs[0].result) {
-          setEdits(jobs[0].result.corrected_output?.values ?? jobs[0].result.validated_output.values);
-          setReviewedFields(jobs[0].result.reviewed_fields ?? []);
-          setEditedKeys([]);
-          setReviewFilter("all");
+          applyResultReviewState(jobs[0].result);
           setStep("review");
           void loadAuditEvents("extraction_result", jobs[0].result.id);
         } else {
+          clearResultReviewState();
           setStep("schema");
         }
       } else {
@@ -1946,13 +1976,11 @@ export default function App() {
     }
     setJob(loadedJob);
     if (loadedJob.result) {
-      setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
-      setReviewedFields(loadedJob.result.reviewed_fields ?? []);
-      setEditedKeys([]);
-      setReviewFilter("all");
+      applyResultReviewState(loadedJob.result);
       setStep("review");
       void loadAuditEvents("extraction_result", loadedJob.result.id);
     } else {
+      clearResultReviewState();
       setStep(options.forceReviewStep ? "review" : "schema");
     }
   }
@@ -2029,10 +2057,7 @@ export default function App() {
       }
       setJob(loadedJob);
       if (loadedJob.result && (loadedJob.result_id !== job?.result_id || !result)) {
-        setEdits(loadedJob.result.corrected_output?.values ?? loadedJob.result.validated_output.values);
-        setReviewedFields(loadedJob.result.reviewed_fields ?? []);
-        setEditedKeys([]);
-        setReviewFilter("all");
+        applyResultReviewState(loadedJob.result);
         setStep("review");
         void loadAuditEvents("extraction_result", loadedJob.result.id);
       }
@@ -2051,9 +2076,7 @@ export default function App() {
     }
     if (options.clearExtractionState === false) return;
     setJob(null);
-    setEdits({});
-    setEditedKeys([]);
-    setReviewedFields([]);
+    clearResultReviewState();
     setAuditEvents([]);
   }
 
@@ -2064,9 +2087,7 @@ export default function App() {
     setJob(null);
     setActiveBatchId(null);
     setActiveBatchItemId(null);
-    setEdits({});
-    setEditedKeys([]);
-    setReviewedFields([]);
+    clearResultReviewState();
     setAuditEvents([]);
     setReviewFilter("all");
     setStep("upload");
@@ -2186,17 +2207,23 @@ export default function App() {
   }
 
   function updateEdit(key: string, rawValue: string) {
+    if (!result) return;
     const field = fields.find((item) => item.key_name === key);
     const parsed = parseEditedValue(rawValue, field?.output_format ?? "string");
+    setEditsResultId(result.id);
     setEditedKeys((current) => (current.includes(key) ? current : [...current, key]));
-    setEdits((current) => ({
-      ...current,
-      [key]: {
-        ...current[key],
-        value: parsed,
-        normalized_value: parsed
-      }
-    }));
+    setEdits((current) => {
+      const baseValues =
+        editsResultId === result.id && Object.keys(current).length ? current : resultValues;
+      return {
+        ...baseValues,
+        [key]: {
+          ...baseValues[key],
+          value: parsed,
+          normalized_value: parsed
+        }
+      };
+    });
   }
 
   function toggleReviewed(key: string) {
@@ -2398,6 +2425,7 @@ export default function App() {
       setActiveBatchItemId(null);
       setDocument(null);
       setJob(null);
+      clearResultReviewState();
       setBatchMessage("배치 기록만 남기고 업로드 산출물을 정리했습니다.");
       await refreshBatches();
     } catch (err) {
@@ -3022,6 +3050,7 @@ export default function App() {
           vlmSettings={vlmSettings}
           vlmApiKey={vlmApiKey}
           vlmModelName={vlmModelName}
+          vlmBaseUrl={vlmBaseUrl}
           libreOfficePath={libreOfficePath}
           reasoningEffort={vlmReasoningEffort}
           verbosity={vlmVerbosity}
@@ -3030,11 +3059,13 @@ export default function App() {
           serviceTier={vlmServiceTier}
           workflowMaxWorkers={workflowMaxWorkers}
           vlmMaxConcurrentRequests={vlmMaxConcurrentRequests}
+          vlmTimeoutSeconds={vlmTimeoutSeconds}
           kieFieldGroupSize={kieFieldGroupSize}
           settingsMessage={settingsMessage}
           busy={busy}
           onVlmApiKey={setVlmApiKey}
           onVlmModelName={setVlmModelName}
+          onVlmBaseUrl={setVlmBaseUrl}
           onLibreOfficePath={setLibreOfficePath}
           onReasoningEffort={setVlmReasoningEffort}
           onVerbosity={setVlmVerbosity}
@@ -3043,6 +3074,7 @@ export default function App() {
           onServiceTier={setVlmServiceTier}
           onWorkflowMaxWorkers={setWorkflowMaxWorkers}
           onVlmMaxConcurrentRequests={setVlmMaxConcurrentRequests}
+          onVlmTimeoutSeconds={setVlmTimeoutSeconds}
           onKieFieldGroupSize={setKieFieldGroupSize}
           onSave={() => void saveVlmSettings()}
           onClearParsingHistory={() => void clearParsingHistory()}
@@ -4032,6 +4064,7 @@ function SettingsDialog(props: {
   vlmSettings: VlmSettings | null;
   vlmApiKey: string;
   vlmModelName: string;
+  vlmBaseUrl: string;
   libreOfficePath: string;
   reasoningEffort: string;
   verbosity: string;
@@ -4040,11 +4073,13 @@ function SettingsDialog(props: {
   serviceTier: string;
   workflowMaxWorkers: string;
   vlmMaxConcurrentRequests: string;
+  vlmTimeoutSeconds: string;
   kieFieldGroupSize: string;
   settingsMessage: string | null;
   busy: string | null;
   onVlmApiKey: (value: string) => void;
   onVlmModelName: (value: string) => void;
+  onVlmBaseUrl: (value: string) => void;
   onLibreOfficePath: (value: string) => void;
   onReasoningEffort: (value: string) => void;
   onVerbosity: (value: string) => void;
@@ -4053,6 +4088,7 @@ function SettingsDialog(props: {
   onServiceTier: (value: string) => void;
   onWorkflowMaxWorkers: (value: string) => void;
   onVlmMaxConcurrentRequests: (value: string) => void;
+  onVlmTimeoutSeconds: (value: string) => void;
   onKieFieldGroupSize: (value: string) => void;
   onSave: () => void;
   onClearParsingHistory: () => void;
@@ -4087,9 +4123,21 @@ function SettingsDialog(props: {
           <SettingsField label="Model name">
             <input
               value={props.vlmModelName}
-              placeholder="gpt-4.1-mini"
+              placeholder="gpt-4.1-mini 또는 로컬 모델명"
               disabled={!settingsWritable}
               onChange={(event) => props.onVlmModelName(event.target.value)}
+            />
+          </SettingsField>
+          <SettingsField
+            label="Base URL"
+            wide
+            help="로컬 VLM이나 사설 OpenAI-compatible 서버를 사용할 때 입력합니다. 예: http://127.0.0.1:11434/v1"
+          >
+            <input
+              value={props.vlmBaseUrl}
+              placeholder="비워두면 기본 provider endpoint 사용"
+              disabled={!settingsWritable}
+              onChange={(event) => props.onVlmBaseUrl(event.target.value)}
             />
           </SettingsField>
           <SettingsField label="LibreOffice path" wide>
@@ -4154,6 +4202,18 @@ function SettingsDialog(props: {
               placeholder="128"
               disabled={!settingsWritable}
               onChange={(event) => props.onVlmMaxConcurrentRequests(event.target.value)}
+            />
+          </SettingsField>
+          <SettingsField
+            label="VLM timeout 초"
+            help="로컬 26B급 모델은 300~900초처럼 길게 잡으세요. 화면은 서버 job이 끝날 때까지 계속 대기합니다."
+          >
+            <input
+              inputMode="numeric"
+              value={props.vlmTimeoutSeconds}
+              placeholder="120"
+              disabled={!settingsWritable}
+              onChange={(event) => props.onVlmTimeoutSeconds(event.target.value)}
             />
           </SettingsField>
           <SettingsField label="KIE field group 크기">
@@ -5433,7 +5493,7 @@ function ReviewPanel(props: {
                 {aiReviewLabel(value)}
               </span>
               <span className={value?.warnings?.length ? "warn-text" : "muted"}>
-                {value?.warnings?.length ? value.warnings.join(", ") : "정상"}
+                {value?.warnings?.length ? value.warnings.map(formatFieldWarning).join(", ") : "정상"}
               </span>
               <label className="review-check">
                 <input
@@ -5595,13 +5655,24 @@ function clientFileId(file: File, index: number) {
   return `${index}:${relativePath || file.name}:${file.size}:${file.lastModified}`;
 }
 
-async function pollJob(jobId: string): Promise<ExtractionJob> {
-  for (let attempt = 0; attempt < 75; attempt += 1) {
+async function pollJob(
+  jobId: string,
+  options: { onProgress?: (job: ExtractionJob, elapsedMs: number) => void } = {}
+): Promise<ExtractionJob> {
+  const startedAt = Date.now();
+  while (true) {
     const job = await api<ExtractionJob>(`/api/extraction-jobs/${jobId}`);
-    if (["completed", "failed", "needs_review"].includes(job.status)) return job;
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    if (EXTRACTION_TERMINAL_STATUSES.has(job.status)) return job;
+    const elapsedMs = Date.now() - startedAt;
+    options.onProgress?.(job, elapsedMs);
+    await new Promise((resolve) => setTimeout(resolve, extractionPollDelayMs(elapsedMs)));
   }
-  throw new Error("제한 시간 안에 추출이 끝나지 않았습니다.");
+}
+
+function extractionPollDelayMs(elapsedMs: number) {
+  if (elapsedMs < EXTRACTION_LONG_RUNNING_NOTICE_MS) return 800;
+  if (elapsedMs < 5 * 60_000) return 1_500;
+  return 3_000;
 }
 
 function validateFields(fields: FieldDefinition[], regions: SchemaRegion[] = []) {
@@ -5664,6 +5735,25 @@ function reviewFilterLabel(filter: ReviewFilter) {
     ai_review_failed: "AI 검수 실패"
   };
   return labels[filter];
+}
+
+function formatFieldWarning(warning: string) {
+  if (warning.startsWith("invalid_type:")) {
+    return `형식 확인(${warning.slice("invalid_type:".length)})`;
+  }
+  const labels: Record<string, string> = {
+    missing: "누락",
+    low_confidence: "낮은 신뢰도",
+    invalid_page: "페이지 오류",
+    invalid_confidence: "신뢰도 오류",
+    invalid_date: "날짜 형식 확인",
+    ai_review_failed: "AI 검수 실패",
+    ai_correction_failed: "AI 보정 실패",
+    ai_correction_discarded_null: "AI 보정 보류",
+    ai_correction_low_confidence: "AI 보정 신뢰도 낮음",
+    ai_correction_large_change: "AI 보정 변화량 큼"
+  };
+  return labels[warning] ?? warning;
 }
 
 function aiReviewLabel(value?: ExtractionValue) {
@@ -6001,4 +6091,12 @@ function batchIsActive(batch: Batch) {
 function formatConfidence(value: number | null | undefined) {
   if (value === null || value === undefined) return "-";
   return `${Math.round(value * 100)}%`;
+}
+
+function formatElapsedTime(elapsedMs: number) {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (!minutes) return `${seconds}초`;
+  return seconds ? `${minutes}분 ${seconds}초` : `${minutes}분`;
 }

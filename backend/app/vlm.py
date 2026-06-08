@@ -522,11 +522,19 @@ def resolve_vlm_api_style(settings=None) -> str:
 
 
 def _ensure_vlm_credentials(settings) -> None:
-    if not settings.resolved_vlm_api_key or not settings.resolved_vlm_model_name:
+    api_style = resolve_vlm_api_style(settings)
+    base_url = (settings.vlm_base_url or "").strip()
+    if not settings.resolved_vlm_model_name:
         raise VlmRuntimeError(
             "VLM_CREDENTIALS_MISSING",
-            "VLM API key and model name are required.",
-            "Save API key and model name in Home Setting, or use VLM_PROVIDER=mock for a local demo.",
+            "VLM model name is required.",
+            "Save model name in Home Setting, or use VLM_PROVIDER=mock for a local demo.",
+        )
+    if not settings.resolved_vlm_api_key and not (base_url and api_style == "openai_compatible"):
+        raise VlmRuntimeError(
+            "VLM_CREDENTIALS_MISSING",
+            "VLM API key is required unless VLM_BASE_URL points to a local OpenAI-compatible server.",
+            "Save API key and model name in Home Setting, set VLM_BASE_URL for a local VLM, or use VLM_PROVIDER=mock for a local demo.",
         )
 
 
@@ -734,15 +742,17 @@ async def _invoke_google_genai_async(
 
 def _build_llm_kwargs() -> dict[str, Any]:
     settings = get_settings()
+    base_url = (settings.vlm_base_url or "").strip()
+    api_key = settings.resolved_vlm_api_key or ("local-vlm" if base_url else None)
     llm_kwargs: dict[str, Any] = {
         "model": settings.resolved_vlm_model_name,
-        "api_key": settings.resolved_vlm_api_key,
+        "api_key": api_key,
         "temperature": settings.vlm_temperature,
         "timeout": settings.vlm_timeout_seconds,
         "max_retries": settings.vlm_max_retries,
     }
-    if settings.vlm_base_url:
-        llm_kwargs["base_url"] = settings.vlm_base_url
+    if base_url:
+        llm_kwargs["base_url"] = base_url
 
     reasoning_effort = _clean_optional_text(settings.vlm_reasoning_effort)
     if reasoning_effort:

@@ -1386,13 +1386,32 @@ textarea {
 }
 
 .workflow-node-asset-editor {
-  background: #f8fbff;
-  border-bottom: 1px solid var(--tds-gray-200);
+  animation: workflow-asset-editor-in 160ms ease-out;
+  background: rgba(248, 251, 255, 0.98);
+  border: 1px solid rgba(189, 203, 224, 0.82);
+  border-radius: 8px;
+  box-shadow: 0 18px 42px rgba(25, 31, 40, 0.16);
   display: grid;
   gap: 10px;
-  max-height: 310px;
+  max-height: min(68vh, calc(100% - 32px));
   overflow: auto;
-  padding: 10px 12px;
+  padding: 12px;
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  width: min(880px, calc(100% - 32px));
+  z-index: 36;
+}
+
+@keyframes workflow-asset-editor-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .workflow-node-asset-head {
@@ -1402,9 +1421,17 @@ textarea {
   justify-content: space-between;
 }
 
-.workflow-node-asset-head div {
+.workflow-node-asset-head .workflow-node-asset-actions {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.workflow-node-asset-head > div:not(.workflow-node-asset-actions) {
   display: grid;
   gap: 2px;
+  min-width: 0;
 }
 
 .workflow-node-asset-head strong {
@@ -1417,68 +1444,113 @@ textarea {
   font-size: 12px;
 }
 
-.workflow-schema-inline-meta {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(130px, 0.8fr) minmax(160px, 1fr) minmax(240px, 2fr);
+.workflow-asset-config-editor {
+  gap: 10px;
+  margin-top: 0;
 }
 
-.workflow-schema-inline-meta input,
-.workflow-schema-inline-meta textarea {
-  background: #ffffff;
-  border: 1px solid var(--tds-gray-200);
-  border-radius: 8px;
-  color: var(--tds-gray-900);
-  font: inherit;
-  min-height: 36px;
-  padding: 8px 10px;
+.workflow-schema-form-grid {
+  grid-template-columns: minmax(130px, 0.8fr) minmax(150px, 0.9fr) minmax(240px, 1.6fr);
 }
 
-.workflow-schema-inline-meta textarea {
+.workflow-classifier-form-grid {
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr);
+}
+
+.workflow-checklist-form-grid {
+  grid-template-columns: minmax(180px, 0.8fr) minmax(320px, 1.4fr);
+}
+
+.workflow-asset-config-editor > label textarea,
+.workflow-asset-config-editor .module-form-grid textarea {
   line-height: 1.4;
+  min-height: 44px;
   resize: vertical;
 }
 
-.workflow-schema-inline-table {
-  border: 1px solid var(--tds-gray-200);
-  border-radius: 8px;
-  overflow-x: auto;
+.workflow-asset-toggle-row {
+  max-width: 240px;
 }
 
-.workflow-schema-inline-table .schema-field-head,
-.workflow-schema-field-row {
-  grid-template-columns: minmax(130px, 1fr) minmax(260px, 2fr) 100px 90px 44px;
+.workflow-asset-toggle-row input {
+  width: auto;
+}
+
+.workflow-asset-section-title {
+  margin-top: 2px;
+}
+
+.workflow-asset-table-wrap {
+  background: #ffffff;
+}
+
+.workflow-schema-config-table {
+  min-width: 820px;
+}
+
+.workflow-classifier-config-table {
   min-width: 720px;
 }
 
-.workflow-checklist-inline-list {
-  display: grid;
-  gap: 8px;
+.workflow-checklist-config-table {
+  min-width: 820px;
 }
 
-.workflow-checklist-inline-list > div {
+.workflow-schema-config-table th:nth-child(1),
+.workflow-schema-config-table td:nth-child(1) {
+  width: 18%;
+}
+
+.workflow-schema-config-table th:nth-child(2),
+.workflow-schema-config-table td:nth-child(2) {
+  width: 34%;
+}
+
+.workflow-schema-config-table th:nth-child(3),
+.workflow-schema-config-table td:nth-child(3) {
+  width: 14%;
+}
+
+.workflow-schema-config-table th:nth-child(4),
+.workflow-schema-config-table td:nth-child(4) {
+  width: 16%;
+}
+
+.workflow-schema-config-table th:nth-child(5),
+.workflow-schema-config-table td:nth-child(5) {
+  text-align: center;
+  width: 92px;
+}
+
+.workflow-schema-config-table th:nth-child(6),
+.workflow-schema-config-table td:nth-child(6) {
+  width: 44px;
+}
+
+.workflow-node-asset-editor .module-config-table textarea {
+  min-height: 42px;
+}
+
+.workflow-node-asset-editor .module-config-table input[type="checkbox"] {
+  min-height: 0;
+  width: auto;
+}
+
+.workflow-node-asset-editor .module-config-table .icon-only {
+  margin: 2px auto;
+}
+
+.workflow-table-toggle {
   align-items: center;
-  display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(120px, 0.8fr) minmax(220px, 1.5fr) auto 40px;
-}
-
-.workflow-checklist-inline-list input[type="text"],
-.workflow-checklist-inline-list input:not([type]) {
-  background: #ffffff;
-  border: 1px solid var(--tds-gray-200);
-  border-radius: 8px;
-  min-height: 34px;
-  padding: 7px 9px;
-}
-
-.workflow-checklist-inline-list label {
-  align-items: center;
-  color: var(--tds-gray-700);
+  color: #425049;
   display: inline-flex;
   font-size: 12px;
   font-weight: 700;
   gap: 6px;
+  justify-content: center;
+  min-height: 38px;
+  padding: 8px 6px;
+  width: 100%;
   white-space: nowrap;
 }
 
@@ -1530,15 +1602,29 @@ textarea {
 .ai-workflow-options {
   display: grid;
   gap: 8px;
+  justify-items: start;
 }
 
-.ai-workflow-options label {
-  align-items: center;
+.ai-workflow-option {
+  align-items: start;
   color: var(--tds-gray-700);
-  display: inline-flex;
+  display: grid;
   font-size: 13px;
   font-weight: 700;
+  grid-template-columns: 16px minmax(0, 1fr);
   gap: 8px;
+  line-height: 1.35;
+  max-width: 100%;
+}
+
+.ai-workflow-option input {
+  height: 16px;
+  margin: 1px 0 0;
+  width: 16px;
+}
+
+.ai-workflow-option span {
+  min-width: 0;
 }
 
 .workflow-validation span {
@@ -2323,6 +2409,14 @@ textarea {
 
   .workflow-canvas {
     min-height: 460px;
+  }
+
+  .workflow-node-asset-editor {
+    left: 12px;
+    max-height: calc(100% - 24px);
+    right: 12px;
+    top: 12px;
+    width: auto;
   }
 
   .workflow-main-area {
@@ -7264,6 +7358,22 @@ pre {
   .settings-grid,
   .feature-grid,
   .diff-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-node-asset-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workflow-node-asset-head .workflow-node-asset-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .workflow-schema-form-grid,
+  .workflow-classifier-form-grid,
+  .workflow-checklist-form-grid {
     grid-template-columns: 1fr;
   }
 

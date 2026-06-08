@@ -264,27 +264,33 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
             json={
                 "api_key": "test-secret",
                 "model_name": "test-model",
+                "base_url": "http://127.0.0.1:11434/v1",
                 "libreoffice_path": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
                 "provider": "openai",
                 "workflow_max_workers": 11,
                 "vlm_max_concurrent_requests": 7,
+                "vlm_timeout_seconds": 600,
                 "kie_field_group_size": 3,
             },
         )
         assert response.status_code == 200, response.text
         payload = response.json()
+        assert payload["base_url"] == "http://127.0.0.1:11434/v1"
         assert payload["libreoffice_path"] == "/Applications/LibreOffice.app/Contents/MacOS/soffice"
         assert "vlm_max_concurrent_requests" in payload
         assert payload["workflow_max_workers"] == 11
+        assert payload["vlm_timeout_seconds"] == 600
         assert "batch_max_workers" not in payload
         assert "kie_field_group_size" in payload
         assert payload["runtime_settings_writable"] is True
 
     contents = env_path.read_text(encoding="utf-8")
+    assert 'VLM_BASE_URL="http://127.0.0.1:11434/v1"' in contents
     assert 'LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"' in contents
     assert "BATCH_MAX_WORKERS" not in contents
     assert 'WORKFLOW_MAX_WORKERS="11"' in contents
     assert 'VLM_MAX_CONCURRENT_REQUESTS="7"' in contents
+    assert 'VLM_TIMEOUT_SECONDS="600"' in contents
     assert 'KIE_FIELD_GROUP_SIZE="3"' in contents
 
 
@@ -402,10 +408,15 @@ def test_bank_poc_template_seed_is_idempotent() -> None:
         assert nodes_by_id["kie_supporting"]["data"]["config"]["schema_id"] == payload["schema"]["id"]
         assert nodes_by_id["required_application"]["data"]["config"]["checklist_id"] == payload["checklist"]["id"]
         assert nodes_by_id["required_consent"]["data"]["config"]["checklist_id"] == payload["checklist"]["id"]
-        assert nodes_by_id["required_application"]["position"]["x"] == pytest.approx(970.3101983002833)
-        assert nodes_by_id["required_application"]["position"]["y"] == pytest.approx(43.8229461756374)
-        assert nodes_by_id["merge"]["position"]["x"] == pytest.approx(964.9985835694051)
-        assert nodes_by_id["merge"]["position"]["y"] == pytest.approx(234.41218130311614)
+        assert nodes_by_id["input"]["position"] == {"x": 40, "y": 240}
+        assert nodes_by_id["classifier"]["position"] == {"x": 250, "y": 240}
+        assert nodes_by_id["branch"]["position"] == {"x": 460, "y": 210}
+        assert nodes_by_id["kie_application"]["position"] == {"x": 670, "y": 70}
+        assert nodes_by_id["required_application"]["position"] == {"x": 900, "y": 70}
+        assert nodes_by_id["required_consent"]["position"] == {"x": 670, "y": 240}
+        assert nodes_by_id["kie_supporting"]["position"] == {"x": 670, "y": 410}
+        assert nodes_by_id["merge"]["position"] == {"x": 900, "y": 300}
+        assert nodes_by_id["export"]["position"] == {"x": 1110, "y": 300}
         assert nodes_by_id["kie_application"]["position"]["y"] < nodes_by_id["required_consent"]["position"]["y"] < nodes_by_id["kie_supporting"]["position"]["y"]
         assert {
             edge.get("sourceHandle")
@@ -471,15 +482,33 @@ def test_bank_poc_seed_migrates_legacy_english_schema() -> None:
             },
         )
         assert legacy_classifier.status_code == 200, legacy_classifier.text
+        legacy_checklist = client.post(
+            "/api/required-field-checklists",
+            json={
+                "name": "bank_required_fields",
+                "description": "legacy checklist",
+                "items": [
+                    {
+                        "item_name": "legacy_item",
+                        "description": "legacy",
+                        "evidence_type": "text_or_handwriting",
+                        "required": True,
+                    },
+                ],
+            },
+        )
+        assert legacy_checklist.status_code == 200, legacy_checklist.text
 
         seeded = client.post("/api/templates/bank-documents-poc/seed")
         assert seeded.status_code == 200, seeded.text
         payload = seeded.json()
         assert payload["created"]["schema"] is False
         assert payload["created"]["classifier"] is False
+        assert payload["created"]["checklist"] is False
         assert payload["schema"]["name"] == "은행 서류 핵심 정보"
         assert [field["key_name"] for field in payload["schema"]["fields"]] == ["문서번호", "고객명", "신청일", "금액", "발급기관"]
         assert [item["class_name"] for item in payload["classifier"]["classes"]] == ["신청서", "동의서", "증빙문서"]
+        assert [item["item_name"] for item in payload["checklist"]["items"]] == ["고객명", "작성일", "필수 동의 체크", "서명 또는 날인"]
         nodes_by_id = {node["id"]: node for node in payload["workflow"]["definition"]["nodes"]}
         assert nodes_by_id["branch"]["data"]["branchKeys"] == ["class:신청서", "class:동의서", "class:증빙문서", "unknown"]
         assert nodes_by_id["kie_application"]["data"]["config"]["schema_id"] == payload["schema"]["id"]
@@ -888,7 +917,7 @@ def test_vlm_api_style_auto_detects_google_and_base_url(monkeypatch) -> None:
         monkeypatch.setenv("VLM_PROVIDER", "auto")
         monkeypatch.setenv("VLM_API_KEY", "AIzaSyCP_test_key")
         monkeypatch.setenv("VLM_MODEL_NAME", "gemini-3.1-flash-lite")
-        monkeypatch.delenv("VLM_BASE_URL", raising=False)
+        monkeypatch.setenv("VLM_BASE_URL", "")
         get_settings.cache_clear()
         assert resolve_vlm_api_style() == "google_genai"
 
@@ -897,9 +926,49 @@ def test_vlm_api_style_auto_detects_google_and_base_url(monkeypatch) -> None:
         assert resolve_vlm_api_style() == "openai_compatible"
 
         monkeypatch.setenv("VLM_PROVIDER", "openai")
-        monkeypatch.delenv("VLM_BASE_URL", raising=False)
+        monkeypatch.setenv("VLM_BASE_URL", "")
         get_settings.cache_clear()
         assert resolve_vlm_api_style() == "google_genai"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vlm_base_url_allows_local_provider_without_api_key(monkeypatch) -> None:
+    from app.vlm import _build_llm_kwargs, _ensure_vlm_credentials
+
+    try:
+        monkeypatch.setenv("VLM_PROVIDER", "auto")
+        monkeypatch.setenv("VLM_API_KEY", "")
+        monkeypatch.setenv("OPENAI_API_KEY", "")
+        monkeypatch.setenv("VLM_MODEL_NAME", "local-model")
+        monkeypatch.setenv("VLM_BASE_URL", "http://127.0.0.1:11434/v1")
+        get_settings.cache_clear()
+
+        settings = get_settings()
+        _ensure_vlm_credentials(settings)
+        kwargs = _build_llm_kwargs()
+        assert kwargs["base_url"] == "http://127.0.0.1:11434/v1"
+        assert kwargs["api_key"] == "local-vlm"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vlm_base_url_does_not_replace_google_api_key(monkeypatch) -> None:
+    from app.vlm import VlmRuntimeError, _ensure_vlm_credentials
+
+    try:
+        monkeypatch.setenv("VLM_PROVIDER", "google_genai")
+        monkeypatch.setenv("VLM_API_KEY", "")
+        monkeypatch.setenv("GOOGLE_API_KEY", "")
+        monkeypatch.setenv("VLM_MODEL_NAME", "gemini-test-model")
+        monkeypatch.setenv("VLM_BASE_URL", "http://127.0.0.1:11434/v1")
+        get_settings.cache_clear()
+
+        settings = get_settings()
+        with pytest.raises(VlmRuntimeError) as exc:
+            _ensure_vlm_credentials(settings)
+        assert exc.value.code == "VLM_CREDENTIALS_MISSING"
+        assert "VLM API key is required" in str(exc.value)
     finally:
         get_settings.cache_clear()
 
@@ -1282,7 +1351,7 @@ def test_extraction_fails_without_vlm_credentials(monkeypatch) -> None:
         job = client.get(f"/api/extraction-jobs/{job_id}").json()
         assert job["status"] == "failed"
         assert job["result_id"] is None
-        assert "VLM API key and model name are required" in job["error_message"]
+        assert "VLM model name is required" in job["error_message"]
 
 
 def test_schema_update_replaces_current_schema() -> None:
@@ -1762,6 +1831,44 @@ def test_schema_name_conflict_and_clear_parsing_history() -> None:
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
+
+
+def test_extraction_low_confidence_requires_review(monkeypatch) -> None:
+    def fake_extract(fields, image_paths=None, image_inputs=None):
+        return {
+            "invoice_number": {
+                "value": "INV-LOW",
+                "page": 1,
+                "evidence": "low confidence evidence",
+                "confidence": 0.0,
+            },
+            "total_amount": {
+                "value": "10.00",
+                "page": 1,
+                "evidence": "high confidence evidence",
+                "confidence": 0.95,
+            },
+        }
+
+    monkeypatch.setattr("app.extraction.extract_with_vlm", fake_extract)
+
+    with get_client() as client:
+        document = upload_png(client)
+        schema = create_schema(client)
+        job_response = client.post(
+            "/api/extraction-jobs",
+            json={"document_id": document["document_id"], "schema_id": schema["id"]},
+        )
+        assert job_response.status_code == 200, job_response.text
+        job = client.get(f"/api/extraction-jobs/{job_response.json()['job_id']}").json()
+
+    assert job["status"] == "needs_review"
+    result = job["result"]
+    assert result["validated_output"]["status"] == "needs_review"
+    values = result["validated_output"]["values"]
+    assert "low_confidence" in values["invoice_number"]["warnings"]
+    assert values["total_amount"]["warnings"] == []
+    assert "invoice_number:low_confidence" in result["validation_warnings"]
 
 
 def test_extraction_releases_db_connection_during_vlm_call(monkeypatch) -> None:

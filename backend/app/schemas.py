@@ -268,6 +268,7 @@ class RawExtractionRead(BaseModel):
 class VlmSettingsRead(BaseModel):
     provider: str
     model_name: str | None
+    base_url: str | None
     libreoffice_path: str | None
     reasoning_effort: str | None
     verbosity: str | None
@@ -276,6 +277,7 @@ class VlmSettingsRead(BaseModel):
     service_tier: str | None
     workflow_max_workers: int
     vlm_max_concurrent_requests: int
+    vlm_timeout_seconds: int
     kie_field_group_size: int
     has_api_key: bool
     env_path: str
@@ -285,6 +287,7 @@ class VlmSettingsRead(BaseModel):
 class VlmSettingsUpdate(BaseModel):
     api_key: str | None = None
     model_name: str
+    base_url: str | None = None
     libreoffice_path: str | None = None
     provider: str = "auto"
     reasoning_effort: str | None = None
@@ -294,6 +297,7 @@ class VlmSettingsUpdate(BaseModel):
     service_tier: str | None = None
     workflow_max_workers: int | None = Field(default=None, ge=1, le=128)
     vlm_max_concurrent_requests: int | None = Field(default=None, ge=1, le=512)
+    vlm_timeout_seconds: int | None = Field(default=None, ge=1, le=7200)
     kie_field_group_size: int | None = Field(default=None, ge=1, le=20)
 
 
