@@ -187,6 +187,8 @@ KIE_FIELD_GROUP_SIZE=1
 
 로컬 26B급 모델은 공식 API보다 응답 시간이 길 수 있습니다. 기본 inference parameter는 reasoning/thinking off이며, KIE 단일 실행 화면은 backend job이 `completed`, `needs_review`, `failed`, `canceled`로 끝날 때까지 계속 polling합니다. provider request 자체의 최대 대기 시간은 `VLM_TIMEOUT_SECONDS`로 조정합니다.
 
+`VLM_BASE_URL`이 설정된 OpenAI-compatible 로컬 서버는 provider별 strict `json_schema` 지원 수준이 다를 수 있습니다. 이 경우 backend는 raw `message.content`를 받아 JSON object를 파싱하고, markdown fence, 앞뒤 설명, 긴 공백 후 단순 brace 누락 같은 응답은 가능한 범위에서 복구합니다. 그래도 `VLM_RESPONSE_INVALID_JSON`이 발생하면 모델이 JSON을 끝까지 생성하지 못한 것이므로 `KIE_FIELD_GROUP_SIZE=1`을 유지하고, `VLM_INFERENCE_PARAMS`의 `max_completion_tokens`를 보수적으로 제한하거나 서버/model을 바꿔 확인합니다.
+
 ## Verification
 
 Backend tests:
@@ -242,7 +244,7 @@ git diff --check
 
 Workflow local blocking work는 `WORKFLOW_MAX_WORKERS` 크기의 전용 executor 큐로 제한합니다. 대량 문서 실행에서 worker 대기 자체가 Python default threadpool을 점유하지 않도록 하기 위한 구조입니다.
 
-Workflow 화면의 `처리 중`은 workflow item이 모듈 단계에 진입한 문서 수입니다. 실제 provider 동시 호출 수는 별도 KPI인 `AI 요청 중 / AI 요청 한도`, provider 호출 대기는 `AI 요청 대기`로 표시됩니다. async VLM 호출은 `VLM_TIMEOUT_SECONDS` 안에 완료되지 않으면 실패/재시도 경로로 수렴합니다. KIE 단일 실행 화면은 frontend 자체 제한 시간으로 실패 처리하지 않고 backend job 상태를 계속 따라갑니다.
+Workflow 화면의 `처리 중`은 workflow item이 모듈 단계에 진입한 문서 수입니다. 실제 provider 동시 호출 수는 별도 KPI인 `AI 요청 중 / AI 요청 한도`, provider 호출 대기는 `AI 요청 대기`로 표시됩니다. async VLM 호출은 `VLM_TIMEOUT_SECONDS` 안에 완료되지 않으면 실패/재시도 경로로 수렴합니다. KIE 단일 실행 화면은 frontend 자체 제한 시간으로 실패 처리하지 않고 backend job 상태를 계속 따라갑니다. 로컬 OpenAI-compatible 서버는 strict structured output 대신 raw JSON fallback 경로를 사용하므로, 응답이 도착했는데 화면이 진행되지 않는다면 backend job의 `error_message`와 `VLM_RESPONSE_INVALID_JSON` 여부를 먼저 확인합니다.
 
 운영에서 5,000장 이상 대량 처리를 자주 실행한다면 SQLite보다 Postgres 사용을 권장합니다.
 

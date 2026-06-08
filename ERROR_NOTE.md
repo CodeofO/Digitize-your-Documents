@@ -59,6 +59,29 @@ Verification:
 - Backend API tests passed.
 - PoC UI smoke generated current workflow screenshots.
 
+## 2026-06-08 - Local VLM OpenAI-Compatible JSON Response Not Accepted
+
+Problem:
+
+- A locally served VLM returned an HTTP chat completion, but the KIE screen stayed in `running`/polling and the backend did not produce an extraction result.
+
+Cause:
+
+- The local OpenAI-compatible server accepted `response_format=json_schema`, but the model generated raw `message.content` that only partially formed JSON and then produced thousands of whitespace tokens.
+- LangChain strict structured output could not coerce that response into the expected object, so the extraction worker treated it as a provider response failure instead of a completed KIE result.
+
+Fix:
+
+- When `VLM_BASE_URL` is set, the OpenAI-compatible adapter now uses a local-friendly raw JSON path instead of relying only on provider-side strict `json_schema`.
+- The backend parses raw `message.content` and tolerates markdown fences, extra surrounding text, long trailing whitespace, and simple missing closing braces/brackets.
+- If the response still cannot be parsed, the job fails with `VLM_RESPONSE_INVALID_JSON` so the operator can tune the local model/server instead of waiting on repeated heavy retries.
+
+Verification:
+
+- Added local VLM JSON parser tests for markdown JSON, embedded JSON, whitespace-loop/missing-brace recovery, invalid text, and local `base_url` routing.
+- `./.venv/bin/python -m pytest backend/tests`: 150 passed.
+- `git diff --check`: passed.
+
 ## 2026-06-08 - KIE Review Mixed State And Low Confidence
 
 Problem:

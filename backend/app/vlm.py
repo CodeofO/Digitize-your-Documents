@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager, contextmanager
 import functools
 import json
 import mimetypes
+import re
 import threading
 import time
 from typing import Any, Protocol
@@ -568,6 +569,8 @@ class OpenAiCompatibleVlmClient:
         image_inputs: list[dict[str, str]],
         output_schema: dict[str, Any] | StructuredOutputSpec,
     ) -> dict[str, Any]:
+        if _uses_local_openai_compatible_server():
+            return _invoke_openai_compatible_raw_json(system_prompt, prompt, image_inputs, output_schema)
         return _invoke_openai_compatible(system_prompt, _build_multimodal_content(prompt, image_inputs), output_schema)
 
     async def ainvoke(
@@ -577,6 +580,8 @@ class OpenAiCompatibleVlmClient:
         image_inputs: list[dict[str, str]],
         output_schema: dict[str, Any] | StructuredOutputSpec,
     ) -> dict[str, Any]:
+        if _uses_local_openai_compatible_server():
+            return await _invoke_openai_compatible_raw_json_async(system_prompt, prompt, image_inputs, output_schema)
         content = await asyncio.to_thread(_build_multimodal_content, prompt, image_inputs)
         return await _invoke_openai_compatible_async(system_prompt, content, output_schema)
 
@@ -607,6 +612,10 @@ def _vlm_client_for_api_style(api_style: str) -> VlmClient:
     if api_style == "openai_compatible":
         return OpenAiCompatibleVlmClient()
     raise VlmRuntimeError("VLM_API_STYLE_UNSUPPORTED", f"Unsupported VLM API style: {api_style}")
+
+
+def _uses_local_openai_compatible_server() -> bool:
+    return bool((get_settings().vlm_base_url or "").strip())
 
 
 def _invoke_structured_llm(
@@ -705,6 +714,52 @@ async def _invoke_openai_compatible_async(system_prompt: str, content: list[dict
     if isinstance(response, str):
         raise VlmRuntimeError("VLM_RESPONSE_STRING", "VLM returned a string instead of a structured object.")
     raise VlmRuntimeError("VLM_RESPONSE_UNSUPPORTED", "VLM returned an unsupported structured response.")
+
+
+def _invoke_openai_compatible_raw_json(
+    system_prompt: str,
+    prompt: str,
+    image_inputs: list[dict[str, str]],
+    output_schema: dict[str, Any] | StructuredOutputSpec,
+) -> dict[str, Any]:
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+
+    llm = ChatOpenAI(**_build_llm_kwargs())
+    content = _build_multimodal_content(_local_json_prompt(prompt, output_schema), image_inputs)
+    try:
+        response = llm.invoke([SystemMessage(content=_local_json_system_prompt(system_prompt, output_schema)), HumanMessage(content=content)])
+    except VlmRuntimeError:
+        raise
+    except Exception as exc:
+        raise VlmRuntimeError(
+            "VLM_PROVIDER_REQUEST_FAILED",
+            f"OpenAI-compatible VLM request failed: {_sanitize_provider_error(exc)}",
+        ) from exc
+    return _coerce_raw_json_response(response)
+
+
+async def _invoke_openai_compatible_raw_json_async(
+    system_prompt: str,
+    prompt: str,
+    image_inputs: list[dict[str, str]],
+    output_schema: dict[str, Any] | StructuredOutputSpec,
+) -> dict[str, Any]:
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+
+    llm = ChatOpenAI(**_build_llm_kwargs())
+    content = await asyncio.to_thread(_build_multimodal_content, _local_json_prompt(prompt, output_schema), image_inputs)
+    try:
+        response = await llm.ainvoke([SystemMessage(content=_local_json_system_prompt(system_prompt, output_schema)), HumanMessage(content=content)])
+    except VlmRuntimeError:
+        raise
+    except Exception as exc:
+        raise VlmRuntimeError(
+            "VLM_PROVIDER_REQUEST_FAILED",
+            f"OpenAI-compatible VLM request failed: {_sanitize_provider_error(exc)}",
+        ) from exc
+    return _coerce_raw_json_response(response)
 
 
 def _invoke_google_genai(
@@ -845,6 +900,147 @@ def _build_google_generation_config(system_prompt: str, output_schema: dict[str,
 
 def _raise_vlm_inference_param_error(exc: VlmInferenceParamError) -> None:
     raise VlmRuntimeError(exc.code, str(exc)) from exc
+
+
+def _local_json_system_prompt(system_prompt: str, output_schema: dict[str, Any] | StructuredOutputSpec) -> str:
+    schema = json.dumps(_json_schema_for_provider(output_schema), ensure_ascii=False, separators=(",", ":"))
+    return "\n".join(
+        [
+            system_prompt,
+            "",
+            "You are connected through a local OpenAI-compatible VLM server.",
+            "Return exactly one valid JSON object that matches the requested schema.",
+            "Do not wrap the JSON in Markdown.",
+            "Do not append commentary or whitespace after the final JSON object.",
+            "If a field is not visible, use null for its value/evidence/page/confidence fields.",
+            f"JSON schema: {schema}",
+        ]
+    )
+
+
+def _local_json_prompt(prompt: str, output_schema: dict[str, Any] | StructuredOutputSpec) -> str:
+    title = output_schema.title if isinstance(output_schema, StructuredOutputSpec) else str(output_schema.get("title") or "StructuredOutput")
+    return "\n".join(
+        [
+            prompt,
+            "",
+            f"Return only a JSON object for {title}.",
+            "The response must start with { and end with }.",
+        ]
+    )
+
+
+def _coerce_raw_json_response(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        return response
+    text = _raw_response_text(response)
+    if not text:
+        raise VlmRuntimeError("VLM_RESPONSE_EMPTY", "VLM returned an empty response.")
+    return _json_object_from_text(text)
+
+
+def _raw_response_text(response: Any) -> str | None:
+    if isinstance(response, str):
+        return response
+    content = getattr(response, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "".join(parts) if parts else None
+    text = getattr(response, "text", None)
+    if isinstance(text, str):
+        return text
+    return None
+
+
+def _json_object_from_text(text: str) -> dict[str, Any]:
+    candidates = _json_text_candidates(text)
+    for candidate in candidates:
+        loaded = _try_load_json_object(candidate)
+        if loaded is not None:
+            return loaded
+        repaired = _repair_json_object_text(candidate)
+        if repaired != candidate:
+            loaded = _try_load_json_object(repaired)
+            if loaded is not None:
+                return loaded
+    raise VlmRuntimeError(
+        "VLM_RESPONSE_INVALID_JSON",
+        "VLM returned text that could not be parsed as a JSON object.",
+        "For local VLMs, reduce max_completion_tokens or use a model/server that can finish valid JSON.",
+    )
+
+
+def _json_text_candidates(text: str) -> list[str]:
+    stripped = text.strip()
+    candidates: list[str] = []
+    if stripped:
+        candidates.append(stripped)
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        candidates.insert(0, fenced.group(1).strip())
+    start = stripped.find("{")
+    if start >= 0:
+        candidates.append(stripped[start:])
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _try_load_json_object(text: str) -> dict[str, Any] | None:
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        loaded = None
+    if isinstance(loaded, dict):
+        return loaded
+
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        loaded, _end = decoder.raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _repair_json_object_text(text: str) -> str:
+    start = text.find("{")
+    if start < 0:
+        return text
+    candidate = text[start:].strip()
+    candidate = re.sub(r",\s*$", "", candidate)
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in candidate:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            stack.append("}")
+        elif char == "[":
+            stack.append("]")
+        elif char in {"}", "]"} and stack and stack[-1] == char:
+            stack.pop()
+    if in_string:
+        candidate += '"'
+    while stack:
+        candidate += stack.pop()
+    return candidate
 
 
 def _coerce_structured_response(response: Any) -> dict[str, Any]:

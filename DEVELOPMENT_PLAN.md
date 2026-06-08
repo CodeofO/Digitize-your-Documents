@@ -18,6 +18,7 @@
 - Draft materialization for schema/checklist assets during workflow save.
 - VLM settings now support OpenAI-compatible `base_url`, local no-key endpoints, structured inference parameters with reasoning/thinking off by default, request timeout tuning, and KIE field group tuning.
 - KIE result review marks low-confidence model output as `needs_review` and keeps frontend polling open for long local VLM inference.
+- Local OpenAI-compatible VLM calls use a raw JSON fallback path because many local servers accept `json_schema` parameters without reliably enforcing valid structured output.
 - README workflow screenshots are generated from the PoC UI smoke flow.
 - Public repository scope cleaned to focus on product features.
 
@@ -28,6 +29,7 @@
 - Improve export preset editing inside result review.
 - Add more sample document templates with clear source notes.
 - Add explicit cancel/retry controls for long-running single KIE jobs.
+- Add an operator-visible diagnostic panel for local VLM raw response parse failures.
 
 ## Working Rules
 

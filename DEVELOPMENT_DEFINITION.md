@@ -23,6 +23,8 @@ Workflow Builder supports node asset editing for KIE schemas, classifier classes
 
 The VLM settings surface supports external APIs and local OpenAI-compatible servers through `VLM_BASE_URL`. Inference parameters are configured through `VLM_INFERENCE_PARAMS`; reasoning/thinking defaults to off and is provider-routed by the backend. Slow local models must not be failed by a frontend-only timeout while the backend job is still running. Provider request timeout remains controlled by `VLM_TIMEOUT_SECONDS`.
 
+Local OpenAI-compatible servers do not always enforce `response_format=json_schema` even when they accept the parameter. For `VLM_BASE_URL` calls, the backend receives raw `message.content`, parses the first JSON object, and repairs limited local-model artifacts such as markdown fences, extra surrounding text, long trailing whitespace, and simple missing closing braces. Responses that still cannot become a JSON object fail explicitly as `VLM_RESPONSE_INVALID_JSON`.
+
 ## Core API Groups
 
 | Area | Representative endpoints |
