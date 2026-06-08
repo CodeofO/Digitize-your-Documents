@@ -180,11 +180,12 @@ VLM_PROVIDER=auto
 VLM_MODEL_NAME=google/gemma-4-26b-a4b
 VLM_BASE_URL=http://127.0.0.1:1234/v1
 VLM_API_KEY=
+VLM_INFERENCE_PARAMS='{"reasoning_effort":"off","thinking":"off","temperature":"0","verbosity":"","max_completion_tokens":"","top_p":"","service_tier":""}'
 VLM_TIMEOUT_SECONDS=600
 KIE_FIELD_GROUP_SIZE=1
 ```
 
-로컬 26B급 모델은 공식 API보다 응답 시간이 길 수 있습니다. KIE 단일 실행 화면은 backend job이 `completed`, `needs_review`, `failed`, `canceled`로 끝날 때까지 계속 polling하며, 60초 이후에는 경과 시간을 표시합니다. provider request 자체의 최대 대기 시간은 `VLM_TIMEOUT_SECONDS`로 조정합니다.
+로컬 26B급 모델은 공식 API보다 응답 시간이 길 수 있습니다. 기본 inference parameter는 reasoning/thinking off이며, KIE 단일 실행 화면은 backend job이 `completed`, `needs_review`, `failed`, `canceled`로 끝날 때까지 계속 polling합니다. provider request 자체의 최대 대기 시간은 `VLM_TIMEOUT_SECONDS`로 조정합니다.
 
 ## Verification
 
@@ -229,6 +230,7 @@ git diff --check
 | `DOCUMENT_PAGE_MAX_LONG_EDGE` | `3000` | preview/VLM용 JPEG 긴 변 제한 |
 | `DOCUMENT_PAGE_JPEG_QUALITY` | `88` | preview/VLM용 JPEG 품질 |
 | `VLM_BASE_URL` | `""` | 로컬 또는 사설 OpenAI-compatible VLM endpoint |
+| `VLM_INFERENCE_PARAMS` | reasoning/thinking `off` | VLM 추론 파라미터 JSON. `reasoning_effort`, `thinking`, `temperature`, `verbosity`, `max_completion_tokens`, `top_p`, `service_tier`를 설정 |
 | `VLM_TIMEOUT_SECONDS` | `120` | provider request 1회 최대 대기 시간. 로컬 대형 모델은 300~900 권장 |
 | `VLM_MAX_CONCURRENT_REQUESTS` | `8` | provider로 나가는 AI 동시 요청 수 |
 | `KIE_FIELD_GROUP_SIZE` | `2` | KIE 요청 1회에 묶는 field 수. 로컬 VLM은 1로 줄이면 timeout/JSON 실패를 줄일 수 있음 |

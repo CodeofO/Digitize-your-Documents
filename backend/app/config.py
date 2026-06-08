@@ -5,6 +5,8 @@ from typing import Mapping
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.vlm_params import VlmInferenceParams, default_vlm_inference_params_json
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = BACKEND_DIR.parent
@@ -48,14 +50,9 @@ DEFAULT_ENV_VALUES = {
     "VLM_API_KEY": "",
     "VLM_MODEL_NAME": "",
     "VLM_BASE_URL": "",
-    "VLM_TEMPERATURE": "0",
     "VLM_MAX_RETRIES": "2",
     "VLM_TIMEOUT_SECONDS": "120",
-    "VLM_REASONING_EFFORT": "minimal",
-    "VLM_VERBOSITY": "low",
-    "VLM_MAX_COMPLETION_TOKENS": "",
-    "VLM_TOP_P": "",
-    "VLM_SERVICE_TIER": "",
+    "VLM_INFERENCE_PARAMS": default_vlm_inference_params_json(),
     "WORKFLOW_MAX_WORKERS": "16",
     "VLM_MAX_CONCURRENT_REQUESTS": "128",
     "KIE_FIELD_GROUP_SIZE": "2",
@@ -105,8 +102,9 @@ class Settings(BaseSettings):
     vlm_temperature: float = 0
     vlm_max_retries: int = 2
     vlm_timeout_seconds: int = 120
-    vlm_reasoning_effort: str | None = "minimal"
-    vlm_verbosity: str | None = "low"
+    vlm_inference_params: str | None = None
+    vlm_reasoning_effort: str | None = None
+    vlm_verbosity: str | None = None
     vlm_max_completion_tokens: str | None = None
     vlm_top_p: str | None = None
     vlm_service_tier: str | None = None
@@ -189,6 +187,20 @@ class Settings(BaseSettings):
     @property
     def resolved_vlm_model_name(self) -> str | None:
         return self.vlm_model_name or self.openai_model_name
+
+    @property
+    def resolved_vlm_inference_params(self) -> dict[str, str]:
+        return VlmInferenceParams.from_raw_env(
+            self.vlm_inference_params,
+            legacy_values={
+                "reasoning_effort": self.vlm_reasoning_effort,
+                "verbosity": self.vlm_verbosity,
+                "max_completion_tokens": self.vlm_max_completion_tokens,
+                "top_p": self.vlm_top_p,
+                "service_tier": self.vlm_service_tier,
+            },
+            legacy_temperature=self.vlm_temperature,
+        ).as_dict()
 
 
 @lru_cache

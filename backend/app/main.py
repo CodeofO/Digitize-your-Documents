@@ -31,7 +31,7 @@ from starlette.datastructures import FormData
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.audit import log_audit_event
-from app.config import DEFAULT_LIBREOFFICE_PATH, PROJECT_ROOT, ROOT_ENV_PATH, get_settings, parse_cors_allowed_origins, resolved_cors_allow_origin_regex, upsert_root_env
+from app.config import PROJECT_ROOT, get_settings, parse_cors_allowed_origins, resolved_cors_allow_origin_regex
 from app.database import SessionLocal, get_db, init_db
 from app.document_processor import (
     DocumentProcessingError,
@@ -49,6 +49,8 @@ from app.document_modules import (
     run_required_field_check_batch,
     run_required_field_check_job,
 )
+from app.domain.module_job import ModuleJobLifecycle
+from app.domain.workflow_run import WorkflowRunLifecycle
 from app.extraction import result_to_dict, run_batch_jobs, run_extraction_job
 from app.models import (
     AuditEvent,
@@ -79,6 +81,9 @@ from app.models import (
     WorkflowRunItem,
 )
 from app.raw_extractor import RawExtractionError, RawExtractionOptions, create_raw_outputs, save_raw_upload, validate_raw_upload
+from app.repositories.sqlalchemy import SqlAlchemyWorkflowRunRepository
+from app.routers.system import router as system_router
+from app.services.workflow_runs import WorkflowRunApplicationService
 from app.schemas import (
     ArchiveSearchResult,
     BatchInitRequest,
@@ -137,9 +142,6 @@ from app.schemas import (
     SchemaRecommendationRequest,
     SchemaRead,
     SchemaUpdate,
-    SystemStatusRead,
-    VlmSettingsRead,
-    VlmSettingsUpdate,
     WorkflowAiDraftRead,
     WorkflowRunEnqueueRequest,
     WorkflowDefinitionCreate,
@@ -154,7 +156,6 @@ from app.vlm import (
     recommend_required_field_checklist_with_vlm,
     recommend_schema_description_with_vlm,
     recommend_schema_with_vlm,
-    resolve_vlm_api_style,
     vlm_error_detail,
 )
 from app.workflows import (
@@ -168,6 +169,12 @@ from app.workflows import (
     workflow_runs_to_read,
 )
 from app.storage import delete_local_tree, delete_storage_ref, is_s3_ref, materialize_storage_ref, persist_artifact, scratch_dir_for_ref
+from app.workspace import (
+    current_workspace_id as _current_workspace_id,
+    ensure_workspace_scope as _ensure_workspace_scope,
+    require_workspace_admin_mode as _require_workspace_admin_mode,
+    scope_query as _scope_query,
+)
 
 
 @asynccontextmanager
@@ -224,6 +231,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(system_router)
 
 
 @app.middleware("http")
@@ -233,57 +241,6 @@ async def security_headers_middleware(request: Request, call_next):
     if settings.security_headers_enabled:
         _apply_security_headers(response)
     return response
-
-
-@app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-def _current_workspace_id(request: Request) -> str | None:
-    return None
-
-
-def _scope_query(query, model, workspace_id: str | None):
-    if workspace_id is None:
-        return query
-    return query.filter(model.workspace_id == workspace_id)
-
-
-def _ensure_workspace_scope(row: Any, workspace_id: str | None, detail: str) -> None:
-    if not row:
-        raise HTTPException(status_code=404, detail=detail)
-    row_workspace_id = getattr(row, "workspace_id", None)
-    if workspace_id is not None and row_workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail=detail)
-
-
-def _require_workspace_admin_mode() -> None:
-    return None
-
-
-def _require_workspace_settings_admin(request: Request, db: Session) -> None:
-    return None
-
-
-@app.get("/api/system/status", response_model=SystemStatusRead)
-def system_status() -> SystemStatusRead:
-    settings = get_settings()
-    provider = resolve_vlm_api_style(settings)
-    return SystemStatusRead(
-        app_env=settings.app_env,
-        vlm_provider=provider,
-        vlm_model_name=settings.resolved_vlm_model_name,
-        has_vlm_credentials=bool(settings.resolved_vlm_api_key and settings.resolved_vlm_model_name),
-        is_mock=provider == "mock",
-        upload_max_batch_files=settings.upload_max_batch_files,
-        upload_chunk_files=settings.upload_chunk_files,
-        preprocess_max_workers=settings.preprocess_max_workers,
-        workflow_max_workers=settings.workflow_max_workers,
-        vlm_max_concurrent_requests=settings.vlm_max_concurrent_requests,
-        document_page_max_long_edge=settings.document_page_max_long_edge,
-        document_page_jpeg_quality=settings.document_page_jpeg_quality,
-    )
 
 
 @app.post("/api/templates/bank-documents-poc/seed")
@@ -324,67 +281,6 @@ def seed_bank_documents_poc(request: Request, db: Session = Depends(get_db)) -> 
         "sample_document": _document_read(documents[0]) if documents else None,
         "sample_documents": [_bank_poc_sample_document_read(document) for document in documents],
     }
-
-
-@app.get("/api/settings/vlm", response_model=VlmSettingsRead)
-def get_vlm_settings() -> VlmSettingsRead:
-    settings = get_settings()
-    return VlmSettingsRead(
-        provider=resolve_vlm_api_style(settings),
-        model_name=settings.resolved_vlm_model_name,
-        base_url=settings.vlm_base_url,
-        libreoffice_path=settings.libreoffice_path or DEFAULT_LIBREOFFICE_PATH,
-        reasoning_effort=settings.vlm_reasoning_effort,
-        verbosity=settings.vlm_verbosity,
-        max_completion_tokens=settings.vlm_max_completion_tokens,
-        top_p=settings.vlm_top_p,
-        service_tier=settings.vlm_service_tier,
-        workflow_max_workers=settings.workflow_max_workers,
-        vlm_max_concurrent_requests=settings.vlm_max_concurrent_requests,
-        vlm_timeout_seconds=settings.vlm_timeout_seconds,
-        kie_field_group_size=settings.kie_field_group_size,
-        has_api_key=bool(settings.resolved_vlm_api_key),
-        env_path=str(ROOT_ENV_PATH),
-        runtime_settings_writable=settings.runtime_settings_writable,
-    )
-
-
-@app.put("/api/settings/vlm", response_model=VlmSettingsRead)
-def update_vlm_settings(payload: VlmSettingsUpdate, request: Request, db: Session = Depends(get_db)) -> VlmSettingsRead:
-    _require_workspace_settings_admin(request, db)
-    settings = get_settings()
-    if not settings.runtime_settings_writable:
-        raise HTTPException(status_code=403, detail="Runtime settings are disabled in production. Use hosting environment variables.")
-
-    provider = payload.provider.strip().lower() or "auto"
-    if provider not in {"auto", "openai", "openai_compatible", "google", "gemini", "google_genai", "mock"}:
-        raise HTTPException(status_code=400, detail="Use auto, mock, openai_compatible, or google_genai")
-
-    updates = {
-        "VLM_PROVIDER": provider,
-        "VLM_MODEL_NAME": payload.model_name.strip(),
-        "VLM_BASE_URL": (payload.base_url or "").strip(),
-        "LIBREOFFICE_PATH": (payload.libreoffice_path or "").strip() or DEFAULT_LIBREOFFICE_PATH,
-        "VLM_REASONING_EFFORT": (payload.reasoning_effort or "minimal").strip(),
-        "VLM_VERBOSITY": (payload.verbosity or "low").strip(),
-        "VLM_MAX_COMPLETION_TOKENS": (payload.max_completion_tokens or "").strip(),
-        "VLM_TOP_P": (payload.top_p or "").strip(),
-        "VLM_SERVICE_TIER": (payload.service_tier or "").strip(),
-        "WORKFLOW_MAX_WORKERS": str(payload.workflow_max_workers or get_settings().workflow_max_workers),
-        "VLM_MAX_CONCURRENT_REQUESTS": str(payload.vlm_max_concurrent_requests or get_settings().vlm_max_concurrent_requests),
-        "VLM_TIMEOUT_SECONDS": str(payload.vlm_timeout_seconds or get_settings().vlm_timeout_seconds),
-        "KIE_FIELD_GROUP_SIZE": str(payload.kie_field_group_size or get_settings().kie_field_group_size),
-    }
-    api_key = (payload.api_key or "").strip()
-    if api_key:
-        updates["VLM_API_KEY"] = api_key
-
-    upsert_root_env(updates, include_defaults=True, remove_keys={"BATCH_MAX_WORKERS"})
-    for key, value in updates.items():
-        os.environ[key] = value
-    get_settings.cache_clear()
-    return get_vlm_settings()
-
 
 @app.post("/api/raw-extractions", response_model=RawExtractionRead)
 def upload_raw_extraction(
@@ -2237,7 +2133,8 @@ async def append_workflow_run_items(
 ) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
     form, files = await _read_batch_upload_form(request)
-    run = db.get(WorkflowRun, run_id)
+    run_repo = SqlAlchemyWorkflowRunRepository(db)
+    run = run_repo.get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status == "paused" and len(run.items) < run.total_count:
         run.status = "uploading"
@@ -2246,7 +2143,7 @@ async def append_workflow_run_items(
     if run.status not in {"uploading", "queued"}:
         raise HTTPException(status_code=409, detail="Workflow run already started")
     await _append_workflow_upload_items(run, form, files, db)
-    db.refresh(run)
+    run_repo.refresh(run)
     return WorkflowRunRead(**workflow_run_to_read(run))
 
 
@@ -2258,7 +2155,8 @@ def start_workflow_run(
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run_repo = SqlAlchemyWorkflowRunRepository(db)
+    run = run_repo.get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status not in {"uploading", "queued", "waiting"}:
         raise HTTPException(status_code=409, detail=f"Workflow run cannot be started from status {run.status}")
@@ -2266,17 +2164,7 @@ def start_workflow_run(
         _validate_waiting_workflow_run_can_start(run, db)
     _validate_owner_can_start(run, run.items)
     now = datetime.utcnow()
-    run.execution_generation = (run.execution_generation or 0) + 1
-    run.status = "running"
-    run.upload_duration_ms = _workflow_upload_duration_ms(run)
-    run.started_at = run.started_at or now
-    run.inference_started_at = now
-    for item in run.items:
-        if item.status in {"queued", "paused"}:
-            item.status = "queued"
-            item.error_message = None
-            item.completed_at = None
-            item.execution_generation = run.execution_generation
+    start_result = WorkflowRunApplicationService().start(run, now, upload_duration_ms=_workflow_upload_duration_ms(run))
     log_audit_event(
         db,
         entity_type="workflow_run",
@@ -2286,9 +2174,9 @@ def start_workflow_run(
         metadata={"workflow_id": run.workflow_id, "file_count": run.total_count},
     )
     db.commit()
-    db.refresh(run)
+    run_repo.refresh(run)
     response = WorkflowRunRead(**workflow_run_to_read(run))
-    background_tasks.add_task(run_workflow_run, run.id, run.execution_generation)
+    background_tasks.add_task(run_workflow_run, run.id, start_result.execution_generation)
     return response
 
 
@@ -2300,7 +2188,8 @@ def enqueue_workflow_run(
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    source_run = db.get(WorkflowRun, run_id)
+    run_repo = SqlAlchemyWorkflowRunRepository(db)
+    source_run = run_repo.get(run_id)
     _ensure_workspace_scope(source_run, workspace_id, "Workflow run not found")
     if not source_run.items:
         raise HTTPException(status_code=422, detail="No uploaded workflow items are available to enqueue")
@@ -2342,20 +2231,21 @@ def enqueue_workflow_run(
 @app.post("/api/workflow-runs/{run_id}/cancel-waiting", response_model=WorkflowRunRead)
 def cancel_waiting_workflow_run(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run_repo = SqlAlchemyWorkflowRunRepository(db)
+    run = run_repo.get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status != "waiting":
         raise HTTPException(status_code=409, detail="Workflow run is not waiting in the queue")
     _cancel_waiting_workflow_run(run, db)
     db.commit()
-    db.refresh(run)
+    run_repo.refresh(run)
     return WorkflowRunRead(**workflow_run_to_read(run))
 
 
 @app.delete("/api/workflow-runs/{run_id}/queue-entry")
 def delete_workflow_queue_entry(run_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run = SqlAlchemyWorkflowRunRepository(db).get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if not run.queued_from_run_id:
         raise HTTPException(status_code=409, detail="Only queued workflow run entries can be removed")
@@ -2392,14 +2282,15 @@ def delete_workflow_queue_entry(run_id: str, request: Request, db: Session = Dep
 @app.post("/api/workflow-runs/{run_id}/discard", response_model=WorkflowRunRead)
 def discard_workflow_run(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run_repo = SqlAlchemyWorkflowRunRepository(db)
+    run = run_repo.get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status in WORKFLOW_RUN_TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
     if run.status == "waiting":
         _cancel_waiting_workflow_run(run, db)
         db.commit()
-        db.refresh(run)
+        run_repo.refresh(run)
         return WorkflowRunRead(**workflow_run_to_read(run))
     _stop_workflow_run_without_deleting_documents(run, "Stopped by user; library documents were kept", db)
     log_audit_event(
@@ -2411,7 +2302,7 @@ def discard_workflow_run(run_id: str, request: Request, db: Session = Depends(ge
         metadata={"workflow_id": run.workflow_id, "kept_document_count": len(run.items)},
     )
     db.commit()
-    db.refresh(run)
+    run_repo.refresh(run)
     return WorkflowRunRead(**workflow_run_to_read(run))
 
 
@@ -2423,7 +2314,8 @@ def resume_workflow_run(
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run_repo = SqlAlchemyWorkflowRunRepository(db)
+    run = run_repo.get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
@@ -2432,37 +2324,29 @@ def resume_workflow_run(
     if not run.items:
         raise HTTPException(status_code=422, detail="No uploaded workflow items are available to continue")
     _validate_owner_upload_complete(run, run.items)
-    resumed_count = _prepare_workflow_run_resume(run)
-    run.status = "running" if resumed_count else workflow_run_to_read(run)["status"]
-    run.completed_at = None if resumed_count else run.completed_at
-    if resumed_count:
-        now = datetime.utcnow()
-        run.execution_generation = (run.execution_generation or 0) + 1
-        run.started_at = run.started_at or now
-        run.inference_started_at = now
-        for item in run.items:
-            if item.status == "queued":
-                item.execution_generation = run.execution_generation
+    now = datetime.utcnow()
+    resume_result = WorkflowRunApplicationService().resume(run, now, fallback_status=lambda: workflow_run_to_read(run)["status"])
     log_audit_event(
         db,
         entity_type="workflow_run",
         entity_id=run.id,
         action="resumed",
-        message=f"Continued workflow run with {resumed_count} queued item(s)",
-        metadata={"workflow_id": run.workflow_id, "queued_count": resumed_count},
+        message=f"Continued workflow run with {resume_result.queued_count} queued item(s)",
+        metadata={"workflow_id": run.workflow_id, "queued_count": resume_result.queued_count},
     )
     db.commit()
-    db.refresh(run)
+    run_repo.refresh(run)
     response = WorkflowRunRead(**workflow_run_to_read(run))
-    if resumed_count:
-        background_tasks.add_task(run_workflow_run, run.id, run.execution_generation)
+    if resume_result.queued_count:
+        background_tasks.add_task(run_workflow_run, run.id, resume_result.execution_generation)
     return response
 
 
 @app.post("/api/workflow-runs/{run_id}/pause", response_model=WorkflowRunRead)
 def pause_workflow_run(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run_repo = SqlAlchemyWorkflowRunRepository(db)
+    run = run_repo.get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status in {"completed", "completed_with_errors", "needs_review", "failed", "canceled"}:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
@@ -2471,30 +2355,23 @@ def pause_workflow_run(run_id: str, request: Request, db: Session = Depends(get_
     if run.status == "paused":
         return WorkflowRunRead(**workflow_run_to_read(run))
 
-    paused_count = 0
     now = datetime.utcnow()
-    run.execution_generation = (run.execution_generation or 0) + 1
-    for item in run.items:
-        if item.status in {"queued", "preprocessing", "running"}:
-            _cancel_workflow_item_active_jobs(item, db, now, "Paused by user")
-            item.status = "paused"
-            item.error_message = "Paused by user"
-            item.completed_at = now
-            paused_count += 1
-    run.status = "paused"
-    run.completed_at = None
-    run.error_message = "Paused by user"
+    pause_result = WorkflowRunApplicationService().pause(
+        run,
+        now,
+        cancel_active_job=lambda item: _cancel_workflow_item_active_jobs(item, db, now, "Paused by user"),
+    )
     _accumulate_workflow_run_inference_duration(run, now)
     log_audit_event(
         db,
         entity_type="workflow_run",
         entity_id=run.id,
         action="paused",
-        message=f"Paused workflow run; {paused_count} active item(s) held",
-        metadata={"workflow_id": run.workflow_id, "paused_count": paused_count},
+        message=f"Paused workflow run; {pause_result.paused_count} active item(s) held",
+        metadata={"workflow_id": run.workflow_id, "paused_count": pause_result.paused_count},
     )
     db.commit()
-    db.refresh(run)
+    run_repo.refresh(run)
     return WorkflowRunRead(**workflow_run_to_read(run))
 
 
@@ -2507,7 +2384,8 @@ def restart_workflow_run(
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run_repo = SqlAlchemyWorkflowRunRepository(db)
+    run = run_repo.get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if not run.items:
         raise HTTPException(status_code=422, detail="No uploaded workflow items are available to restart")
@@ -2566,7 +2444,8 @@ def retry_failed_workflow_run(
     db: Session = Depends(get_db),
 ) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run_repo = SqlAlchemyWorkflowRunRepository(db)
+    run = run_repo.get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     if run.status == "canceled":
         raise HTTPException(status_code=409, detail="Canceled workflow run cannot retry failed items")
@@ -2587,8 +2466,8 @@ def retry_failed_workflow_run(
     now = datetime.utcnow()
     _accumulate_workflow_run_inference_duration(run, now)
     run.execution_generation = (run.execution_generation or 0) + 1
-    queued_count = _prepare_workflow_run_retry_failed(run)
-    if not queued_count:
+    retry_result = WorkflowRunApplicationService().retry_failed(run, now, initial_payload=_initial_workflow_item_payload)
+    if not retry_result.queued_count:
         raise HTTPException(
             status_code=422,
             detail={
@@ -2596,21 +2475,16 @@ def retry_failed_workflow_run(
                 "failed_count": failed_count,
             },
         )
-    run.status = "running"
-    run.completed_at = None
-    run.error_message = None
-    run.started_at = run.started_at or now
-    run.inference_started_at = now
     log_audit_event(
         db,
         entity_type="workflow_run",
         entity_id=run.id,
         action="retry_failed",
-        message=f"Retried {queued_count} failed workflow item(s)",
-        metadata={"workflow_id": run.workflow_id, "queued_count": queued_count, "failed_count": failed_count},
+        message=f"Retried {retry_result.queued_count} failed workflow item(s)",
+        metadata={"workflow_id": run.workflow_id, "queued_count": retry_result.queued_count, "failed_count": failed_count},
     )
     db.commit()
-    db.refresh(run)
+    run_repo.refresh(run)
     response = WorkflowRunRead(**workflow_run_to_read(run))
     background_tasks.add_task(run_workflow_run, run.id, run.execution_generation)
     return response
@@ -2619,14 +2493,14 @@ def retry_failed_workflow_run(
 @app.get("/api/workflow-runs", response_model=list[WorkflowRunRead])
 def list_workflow_runs(request: Request, limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)) -> list[WorkflowRunRead]:
     workspace_id = _current_workspace_id(request)
-    runs = _scope_query(db.query(WorkflowRun), WorkflowRun, workspace_id).order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc()).limit(limit).all()
+    runs = SqlAlchemyWorkflowRunRepository(db).list_recent(limit=limit, workspace_id=workspace_id)
     return [WorkflowRunRead(**payload) for payload in workflow_runs_to_read(runs, include_items=False, db=db)]
 
 
 @app.get("/api/workflow-runs/{run_id}", response_model=WorkflowRunRead)
 def get_workflow_run(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run = SqlAlchemyWorkflowRunRepository(db).get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     return WorkflowRunRead(**workflow_run_to_read(run))
 
@@ -2634,7 +2508,7 @@ def get_workflow_run(run_id: str, request: Request, db: Session = Depends(get_db
 @app.get("/api/workflow-runs/{run_id}/summary", response_model=WorkflowRunRead)
 def get_workflow_run_summary(run_id: str, request: Request, db: Session = Depends(get_db)) -> WorkflowRunRead:
     workspace_id = _current_workspace_id(request)
-    run = db.get(WorkflowRun, run_id)
+    run = SqlAlchemyWorkflowRunRepository(db).get(run_id)
     _ensure_workspace_scope(run, workspace_id, "Workflow run not found")
     return WorkflowRunRead(**workflow_run_to_read(run, include_items=False, db=db))
 
@@ -5743,47 +5617,6 @@ def _close_batch_if_all_jobs_terminal(batch: Any, completed_at: datetime) -> Non
     batch.completed_at = completed_at
 
 
-def _prepare_workflow_run_resume(run: WorkflowRun) -> int:
-    queued_count = 0
-    now = datetime.utcnow()
-    for item in run.items:
-        if item.status == "queued":
-            queued_count += 1
-            continue
-        if item.status not in {"paused", "running", "preprocessing"}:
-            continue
-        if item.document and item.document.status == "ready" and item.document.pages:
-            item.status = "queued"
-            item.error_message = None
-            item.completed_at = None
-            queued_count += 1
-        else:
-            item.status = "failed"
-            item.error_message = item.document.error_message if item.document else "Document preprocessing was interrupted"
-            item.completed_at = now
-    return queued_count
-
-
-def _prepare_workflow_run_restart(run: WorkflowRun) -> int:
-    queued_count = 0
-    now = datetime.utcnow()
-    for item in run.items:
-        if item.document and item.document.status == "ready" and item.document.pages:
-            item.status = "queued"
-            item.error_message = None
-            item.completed_at = None
-            item.inference_duration_ms = None
-            item.execution_generation = run.execution_generation
-            item.result_json = _initial_workflow_item_payload(item.document)
-            queued_count += 1
-        else:
-            item.status = "failed"
-            item.error_message = item.document.error_message if item.document else "Document preprocessing was interrupted"
-            item.completed_at = now
-            item.execution_generation = run.execution_generation
-    return queued_count
-
-
 def _create_restarted_workflow_run(
     source_run: WorkflowRun,
     workflow: WorkflowDefinition,
@@ -5969,17 +5802,8 @@ def _workflow_queue_position(run: WorkflowRun) -> tuple[int, datetime, str]:
 
 def _cancel_waiting_workflow_run(run: WorkflowRun, db: Session) -> None:
     now = datetime.utcnow()
-    canceled_count = 0
-    for item in run.items:
-        if item.status in {"queued", "preprocessing", "running", "paused"}:
-            item.status = "canceled"
-            item.error_message = "Removed from workflow run queue"
-            item.completed_at = now
-            canceled_count += 1
-    run.status = "canceled"
-    run.error_message = "Removed from workflow run queue"
-    run.completed_at = now
-    run.inference_started_at = None
+    message = "Removed from workflow run queue"
+    canceled_count = WorkflowRunLifecycle(run).cancel_waiting(now, message=message)
     log_audit_event(
         db,
         entity_type="workflow_run",
@@ -5992,20 +5816,12 @@ def _cancel_waiting_workflow_run(run: WorkflowRun, db: Session) -> None:
 
 def _stop_workflow_run_without_deleting_documents(run: WorkflowRun, message: str, db: Session) -> None:
     now = datetime.utcnow()
-    stopped_count = 0
-    run.execution_generation = (run.execution_generation or 0) + 1
     _accumulate_workflow_run_inference_duration(run, now)
-    for item in run.items:
-        if item.status in {"queued", "preprocessing", "running", "paused"}:
-            _cancel_workflow_item_active_jobs(item, db, now, message)
-            item.status = "canceled"
-            item.error_message = message
-            item.completed_at = now
-            stopped_count += 1
-    run.status = "canceled"
-    run.error_message = message
-    run.completed_at = now
-    run.inference_started_at = None
+    stopped_count = WorkflowRunLifecycle(run).stop_without_deleting_documents(
+        now,
+        message=message,
+        cancel_active_job=lambda item: _cancel_workflow_item_active_jobs(item, db, now, message),
+    )
     log_audit_event(
         db,
         entity_type="workflow_run",
@@ -6049,9 +5865,7 @@ def _cancel_workflow_item_active_jobs(item: WorkflowRunItem, db: Session, now: d
             continue
         if not job or job.status in {"completed", "needs_review", "failed", "canceled"}:
             continue
-        job.status = "canceled"
-        job.error_message = message
-        job.completed_at = now
+        ModuleJobLifecycle(job).cancel(message, now)
         log_audit_event(
             db,
             entity_type=entity_type,
@@ -6073,27 +5887,6 @@ def _unshared_workflow_document_ids(run: WorkflowRun, document_ids: list[str], d
         .all()
     }
     return [document_id for document_id in unique_document_ids if document_id not in shared_document_ids]
-
-
-def _prepare_workflow_run_retry_failed(run: WorkflowRun) -> int:
-    queued_count = 0
-    now = datetime.utcnow()
-    for item in run.items:
-        if item.status != "failed":
-            continue
-        if item.document and item.document.status == "ready" and item.document.pages:
-            item.status = "queued"
-            item.error_message = None
-            item.completed_at = None
-            item.inference_duration_ms = None
-            item.execution_generation = run.execution_generation
-            item.result_json = _initial_workflow_item_payload(item.document)
-            queued_count += 1
-        else:
-            item.error_message = item.document.error_message if item.document else "Document preprocessing was interrupted"
-            item.completed_at = now
-            item.execution_generation = run.execution_generation
-    return queued_count
 
 
 def _workflow_upload_duration_ms(run: WorkflowRun) -> int | None:

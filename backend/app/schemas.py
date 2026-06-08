@@ -270,8 +270,10 @@ class VlmSettingsRead(BaseModel):
     model_name: str | None
     base_url: str | None
     libreoffice_path: str | None
+    inference_params: dict[str, str]
     reasoning_effort: str | None
     verbosity: str | None
+    temperature: str | None
     max_completion_tokens: str | None
     top_p: str | None
     service_tier: str | None
@@ -290,8 +292,10 @@ class VlmSettingsUpdate(BaseModel):
     base_url: str | None = None
     libreoffice_path: str | None = None
     provider: str = "auto"
+    inference_params: dict[str, Any] | None = None
     reasoning_effort: str | None = None
     verbosity: str | None = None
+    temperature: str | None = None
     max_completion_tokens: str | None = None
     top_p: str | None = None
     service_tier: str | None = None

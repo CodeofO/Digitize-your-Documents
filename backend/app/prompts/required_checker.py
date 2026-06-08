@@ -1,5 +1,6 @@
 from typing import Any
 
+from app.prompts.structured_output import required_field_output_spec
 from app.schemas import RequiredFieldItem, SchemaRegion
 
 
@@ -7,6 +8,7 @@ REQUIRED_FIELD_CHECKER_PROMPT = """You are a required field presence checker.
 Check whether each user-defined item is visibly present, missing, uncertain, or not applicable.
 Do not validate whether a value is correct. Only decide whether the required mark, handwriting, text, signature, stamp, checkbox, or visual evidence exists.
 Use optional region crops only for their matching items.
+Return an items object keyed by every configured item_name. Do not omit any configured item key.
 Return data that matches the requested structured output schema."""
 
 
@@ -24,6 +26,7 @@ def build_full_page_required_field_prompt(items: list[RequiredFieldItem]) -> str
     lines.append(
         "Only judge presence. Do not validate date validity, amount correctness, ID format, external database match, or signer identity."
     )
+    lines.append("Return one items object property for every listed item_name.")
     return "\n".join(lines)
 
 
@@ -39,38 +42,14 @@ def build_region_required_field_prompt(items: list[RequiredFieldItem], regions: 
             "Use the masked page context to understand each region's original page position.",
             "Use the matching crop as the primary visual evidence for the listed items.",
             "Only judge presence. Do not validate date validity, amount correctness, ID format, external database match, or signer identity.",
+            "Return one items object property for every listed item_name.",
         ]
     )
     return "\n".join(lines)
 
 
 def build_required_field_output_schema(items: list[RequiredFieldItem]) -> dict[str, Any]:
-    return {
-        "title": "RequiredFieldCheckResult",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "overall_status": {"type": "string", "enum": ["complete", "incomplete", "needs_review"]},
-            "items": {
-                "type": "array",
-                "minItems": len(items),
-                "maxItems": len(items),
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "item_name": {"type": "string", "enum": [item.item_name for item in items]},
-                        "status": {"type": "string", "enum": ["present", "missing", "uncertain", "not_applicable"]},
-                        "confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
-                        "evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                        "page": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
-                    },
-                    "required": ["item_name", "status", "confidence", "evidence", "page"],
-                },
-            },
-        },
-        "required": ["overall_status", "items"],
-    }
+    return required_field_output_spec(items)
 
 
 def full_page_required_label(page_number: int) -> str:
@@ -83,4 +62,3 @@ def masked_required_region_label(region: SchemaRegion, item_names: list[str]) ->
 
 def cropped_required_region_label(region: SchemaRegion, item_names: list[str]) -> str:
     return f"Cropped required field region '{region.name}' on page {region.page}. Use as primary visual evidence for: {', '.join(item_names)}."
-

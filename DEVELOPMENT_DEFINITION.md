@@ -21,7 +21,7 @@ The AI workflow draft API accepts up to 10 PNG/JPG/JPEG images, stores them only
 
 Workflow Builder supports node asset editing for KIE schemas, classifier classes, and required-field checklists. Asset editors use module-style table layouts and float over the canvas so node selection does not shift the graph. A KIE node can start from an AI-generated draft, an existing saved schema, or a new blank schema draft created inside the builder. Saving or running a workflow materializes draft schemas and checklists before persisting the workflow definition.
 
-The VLM settings surface supports external APIs and local OpenAI-compatible servers through `VLM_BASE_URL`. Slow local models must not be failed by a frontend-only timeout while the backend job is still running. Provider request timeout remains controlled by `VLM_TIMEOUT_SECONDS`.
+The VLM settings surface supports external APIs and local OpenAI-compatible servers through `VLM_BASE_URL`. Inference parameters are configured through `VLM_INFERENCE_PARAMS`; reasoning/thinking defaults to off and is provider-routed by the backend. Slow local models must not be failed by a frontend-only timeout while the backend job is still running. Provider request timeout remains controlled by `VLM_TIMEOUT_SECONDS`.
 
 ## Core API Groups
 

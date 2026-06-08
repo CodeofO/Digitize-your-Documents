@@ -51,7 +51,7 @@ Fix:
 
 - KIE single-run polling now follows backend job state until a terminal status is returned.
 - The busy message shows elapsed time after 60 seconds instead of failing locally.
-- Runtime settings expose `VLM_TIMEOUT_SECONDS`; local OpenAI-compatible runs can also lower `KIE_FIELD_GROUP_SIZE`.
+- Runtime settings expose `VLM_TIMEOUT_SECONDS`; local OpenAI-compatible runs can also lower `KIE_FIELD_GROUP_SIZE`. `VLM_INFERENCE_PARAMS` defaults reasoning/thinking to off so local VLM smoke tests do not accidentally enable provider reasoning modes.
 
 Verification:
 

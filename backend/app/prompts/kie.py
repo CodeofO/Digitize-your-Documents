@@ -1,7 +1,11 @@
 import json
 from typing import Any
 
-from app.prompts.common import json_schema_for_field
+from app.prompts.structured_output import (
+    kie_correction_output_spec,
+    kie_extraction_output_spec,
+    kie_judgement_output_spec,
+)
 from app.schemas import FieldDefinition
 
 
@@ -14,20 +18,7 @@ Return data that matches the requested structured output schema."""
 
 
 def build_structured_output_schema(fields: list[FieldDefinition]) -> dict[str, Any]:
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-    for field in fields:
-        properties[field.key_name] = json_schema_for_field(field)
-        required.append(field.key_name)
-
-    return {
-        "title": "KeyInformationExtraction",
-        "description": "Structured extraction result containing only user-defined schema fields.",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": properties,
-        "required": required,
-    }
+    return kie_extraction_output_spec(fields)
 
 
 def build_extraction_prompt(fields: list[FieldDefinition]) -> str:
@@ -71,31 +62,11 @@ def build_region_extraction_prompt(fields: list[FieldDefinition]) -> str:
 
 
 def build_judgement_output_schema() -> dict[str, Any]:
-    return {
-        "title": "KIEFieldJudgement",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "judgement_status": {"type": "string", "enum": ["correct", "needs_correction"]},
-            "reason": {"type": "string"},
-            "confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
-            "evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-        },
-        "required": ["judgement_status", "reason", "confidence", "evidence"],
-    }
+    return kie_judgement_output_spec()
 
 
 def build_correction_output_schema(field: FieldDefinition) -> dict[str, Any]:
-    field_schema = json_schema_for_field(field)
-    properties = dict(field_schema["properties"])
-    properties["correction_reason"] = {"type": "string"}
-    return {
-        "title": "KIEFieldCorrection",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": properties,
-        "required": ["value", "page", "evidence", "confidence", "correction_reason"],
-    }
+    return kie_correction_output_spec(field)
 
 
 def build_judgement_prompt(field: FieldDefinition, initial_value: Any, initial_evidence: str | None) -> str:

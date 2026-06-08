@@ -276,8 +276,10 @@ type VlmSettings = {
   model_name: string | null;
   base_url: string | null;
   libreoffice_path: string | null;
+  inference_params: Record<string, string>;
   reasoning_effort: string | null;
   verbosity: string | null;
+  temperature: string | null;
   max_completion_tokens: string | null;
   top_p: string | null;
   service_tier: string | null;
@@ -886,8 +888,9 @@ export default function App() {
   const [vlmModelName, setVlmModelName] = useState("");
   const [vlmBaseUrl, setVlmBaseUrl] = useState("");
   const [libreOfficePath, setLibreOfficePath] = useState("/Applications/LibreOffice.app/Contents/MacOS/soffice");
-  const [vlmReasoningEffort, setVlmReasoningEffort] = useState("minimal");
-  const [vlmVerbosity, setVlmVerbosity] = useState("low");
+  const [vlmReasoningEffort, setVlmReasoningEffort] = useState("off");
+  const [vlmVerbosity, setVlmVerbosity] = useState("");
+  const [vlmTemperature, setVlmTemperature] = useState("0");
   const [vlmMaxCompletionTokens, setVlmMaxCompletionTokens] = useState("");
   const [vlmTopP, setVlmTopP] = useState("");
   const [vlmServiceTier, setVlmServiceTier] = useState("");
@@ -1387,8 +1390,9 @@ export default function App() {
       setVlmModelName(settings.model_name ?? "");
       setVlmBaseUrl(settings.base_url ?? "");
       setLibreOfficePath(settings.libreoffice_path ?? "/Applications/LibreOffice.app/Contents/MacOS/soffice");
-      setVlmReasoningEffort(settings.reasoning_effort ?? "minimal");
-      setVlmVerbosity(settings.verbosity ?? "low");
+      setVlmReasoningEffort(settings.inference_params?.reasoning_effort ?? settings.reasoning_effort ?? "off");
+      setVlmVerbosity(settings.inference_params?.verbosity ?? settings.verbosity ?? "");
+      setVlmTemperature(settings.inference_params?.temperature ?? settings.temperature ?? "0");
       setVlmMaxCompletionTokens(settings.max_completion_tokens ?? "");
       setVlmTopP(settings.top_p ?? "");
       setVlmServiceTier(settings.service_tier ?? "");
@@ -1414,11 +1418,15 @@ export default function App() {
           model_name: vlmModelName,
           base_url: vlmBaseUrl,
           libreoffice_path: libreOfficePath,
-          reasoning_effort: vlmReasoningEffort,
-          verbosity: vlmVerbosity,
-          max_completion_tokens: vlmMaxCompletionTokens,
-          top_p: vlmTopP,
-          service_tier: vlmServiceTier,
+          inference_params: {
+            reasoning_effort: vlmReasoningEffort,
+            thinking: vlmReasoningEffort,
+            temperature: vlmTemperature,
+            verbosity: vlmVerbosity,
+            max_completion_tokens: vlmMaxCompletionTokens,
+            top_p: vlmTopP,
+            service_tier: vlmServiceTier
+          },
           workflow_max_workers: Number.parseInt(workflowMaxWorkers, 10) || 16,
           vlm_max_concurrent_requests: Number.parseInt(vlmMaxConcurrentRequests, 10) || 128,
           vlm_timeout_seconds: Number.parseInt(vlmTimeoutSeconds, 10) || 120,
@@ -1858,6 +1866,14 @@ export default function App() {
     } finally {
       setBusy(null);
     }
+  }
+
+  function prepareExtractionRetry() {
+    setJob(null);
+    clearResultReviewState();
+    setReviewFilter("needs_review");
+    setError(null);
+    setStep("schema");
   }
 
   async function loadDocument(documentId: string) {
@@ -2878,6 +2894,7 @@ export default function App() {
                 onEdit={updateEdit}
                 onToggleReviewed={toggleReviewed}
                 onSaveCorrections={saveCorrections}
+                onRetryExtraction={prepareExtractionRetry}
                 onGoToPage={goToPage}
                 onPreset={setSelectedPresetId}
                 onSavePreset={() => void saveDefaultExportPreset()}
@@ -2905,6 +2922,7 @@ export default function App() {
                 onEdit={updateEdit}
                 onToggleReviewed={toggleReviewed}
                 onSaveCorrections={saveCorrections}
+                onRetryExtraction={prepareExtractionRetry}
                 onGoToPage={goToPage}
                 onPreset={setSelectedPresetId}
                 onSavePreset={() => void saveDefaultExportPreset()}
@@ -3054,6 +3072,7 @@ export default function App() {
           libreOfficePath={libreOfficePath}
           reasoningEffort={vlmReasoningEffort}
           verbosity={vlmVerbosity}
+          temperature={vlmTemperature}
           maxCompletionTokens={vlmMaxCompletionTokens}
           topP={vlmTopP}
           serviceTier={vlmServiceTier}
@@ -3069,6 +3088,7 @@ export default function App() {
           onLibreOfficePath={setLibreOfficePath}
           onReasoningEffort={setVlmReasoningEffort}
           onVerbosity={setVlmVerbosity}
+          onTemperature={setVlmTemperature}
           onMaxCompletionTokens={setVlmMaxCompletionTokens}
           onTopP={setVlmTopP}
           onServiceTier={setVlmServiceTier}
@@ -4068,6 +4088,7 @@ function SettingsDialog(props: {
   libreOfficePath: string;
   reasoningEffort: string;
   verbosity: string;
+  temperature: string;
   maxCompletionTokens: string;
   topP: string;
   serviceTier: string;
@@ -4083,6 +4104,7 @@ function SettingsDialog(props: {
   onLibreOfficePath: (value: string) => void;
   onReasoningEffort: (value: string) => void;
   onVerbosity: (value: string) => void;
+  onTemperature: (value: string) => void;
   onMaxCompletionTokens: (value: string) => void;
   onTopP: (value: string) => void;
   onServiceTier: (value: string) => void;
@@ -4148,9 +4170,12 @@ function SettingsDialog(props: {
               onChange={(event) => props.onLibreOfficePath(event.target.value)}
             />
           </SettingsField>
-          <SettingsField label="Reasoning effort">
+          <SettingsField
+            label="Reasoning / thinking"
+            help="기본값은 off입니다. Google은 thinking_budget=0으로, OpenAI/local compatible은 reasoning 파라미터를 보내지 않는 방식으로 처리합니다."
+          >
             <select value={props.reasoningEffort} disabled={!settingsWritable} onChange={(event) => props.onReasoningEffort(event.target.value)}>
-              <option value="">기본값</option>
+              <option value="off">off</option>
               <option value="minimal">minimal</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
@@ -4159,11 +4184,20 @@ function SettingsDialog(props: {
           </SettingsField>
           <SettingsField label="Verbosity">
             <select value={props.verbosity} disabled={!settingsWritable} onChange={(event) => props.onVerbosity(event.target.value)}>
-              <option value="">기본값</option>
+              <option value="">provider 기본값</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
+          </SettingsField>
+          <SettingsField label="Temperature">
+            <input
+              inputMode="decimal"
+              value={props.temperature}
+              placeholder="0"
+              disabled={!settingsWritable}
+              onChange={(event) => props.onTemperature(event.target.value)}
+            />
           </SettingsField>
           <SettingsField label="Max tokens">
             <input
@@ -5413,6 +5447,7 @@ function ReviewPanel(props: {
   onEdit: (key: string, value: string) => void;
   onToggleReviewed: (key: string) => void;
   onSaveCorrections: () => Promise<void>;
+  onRetryExtraction: () => void;
   onGoToPage: (page: number | null) => void;
   onPreset: (presetId: string) => void;
   onSavePreset: () => void;
@@ -5443,7 +5478,13 @@ function ReviewPanel(props: {
           <p className="eyebrow">검수</p>
           <h2>추출 결과</h2>
         </div>
-        <span className={`status-badge ${props.result.validated_output.status}`}>{statusLabel(props.result.validated_output.status)}</span>
+        <div className="pane-header-actions">
+          <button className="secondary compact" type="button" onClick={props.onRetryExtraction}>
+            <RotateCw size={16} />
+            다시 추출
+          </button>
+          <span className={`status-badge ${props.result.validated_output.status}`}>{statusLabel(props.result.validated_output.status)}</span>
+        </div>
       </div>
 
       <div className="progress-card">
@@ -5743,6 +5784,7 @@ function formatFieldWarning(warning: string) {
   }
   const labels: Record<string, string> = {
     missing: "누락",
+    not_detected: "미검출",
     low_confidence: "낮은 신뢰도",
     invalid_page: "페이지 오류",
     invalid_confidence: "신뢰도 오류",

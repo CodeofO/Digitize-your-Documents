@@ -1,5 +1,10 @@
 from typing import Any
 
+from app.prompts.structured_output import (
+    required_field_checklist_recommendation_output_spec,
+    schema_description_output_spec,
+    schema_recommendation_output_spec,
+)
 from app.schemas import FieldDefinition
 
 
@@ -63,95 +68,12 @@ def build_schema_description_prompt(
 
 
 def build_schema_recommendation_output_schema() -> dict[str, Any]:
-    field_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "key_name": {
-                "type": "string",
-                "description": "User-facing key for the extracted value, written in the document's primary language.",
-            },
-            "description": {"type": "string", "description": "Field-level instruction for locating the value."},
-            "output_format": {"type": "string", "enum": ["string", "float", "date", "bool"]},
-        },
-        "required": ["key_name", "description", "output_format"],
-    }
-    return {
-        "title": "KeyInformationSchemaRecommendation",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "name": {"type": "string"},
-            "display_name": {"type": "string"},
-            "description": {"type": "string"},
-            "document_type": {"type": "string"},
-            "language": {"type": "string"},
-            "reasoning": {"type": "string"},
-            "fields": {"type": "array", "minItems": 1, "maxItems": 12, "items": field_schema},
-        },
-        "required": ["name", "display_name", "description", "document_type", "language", "reasoning", "fields"],
-    }
+    return schema_recommendation_output_spec()
 
 
 def build_schema_description_output_schema() -> dict[str, Any]:
-    return {
-        "title": "KeyInformationSchemaDescriptionRecommendation",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "description": {
-                "type": "string",
-                "description": "Concise schema-level description aligned with the current fields.",
-            },
-            "reasoning": {
-                "type": "string",
-                "description": "Brief reason for the description update.",
-            },
-        },
-        "required": ["description", "reasoning"],
-    }
+    return schema_description_output_spec()
 
 
 def build_required_field_checklist_recommendation_output_schema() -> dict[str, Any]:
-    region_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "id": {"type": "string"},
-            "name": {"type": "string"},
-            "page": {"type": "integer", "minimum": 1},
-            "x": {"type": "number", "minimum": 0, "maximum": 1},
-            "y": {"type": "number", "minimum": 0, "maximum": 1},
-            "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-            "height": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-        },
-        "required": ["id", "name", "page", "x", "y", "width", "height"],
-    }
-    item_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "item_name": {"type": "string"},
-            "description": {"type": "string"},
-            "evidence_type": {
-                "type": "string",
-                "enum": ["text_or_handwriting", "checkbox", "signature_or_stamp", "visual_mark", "other"],
-            },
-            "required": {"type": "boolean"},
-            "region_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-        },
-        "required": ["item_name", "description", "evidence_type", "required", "region_id"],
-    }
-    return {
-        "title": "RequiredFieldChecklistRecommendation",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "name": {"type": "string"},
-            "description": {"type": "string"},
-            "reasoning": {"type": "string"},
-            "regions": {"type": "array", "maxItems": 8, "items": region_schema},
-            "items": {"type": "array", "minItems": 1, "maxItems": 12, "items": item_schema},
-        },
-        "required": ["name", "description", "reasoning", "regions", "items"],
-    }
+    return required_field_checklist_recommendation_output_spec()

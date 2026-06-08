@@ -6,7 +6,7 @@ import json
 import mimetypes
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol
 
 from app.config import get_settings
 from app.prompts.classifier import (
@@ -40,8 +40,10 @@ from app.prompts.schema_recommendation import (
     build_schema_recommendation_output_schema as _schema_recommendation_output_schema,
     build_schema_recommendation_prompt as _build_schema_recommendation_prompt,
 )
+from app.prompts.structured_output import StructuredOutputSpec
 from app.schemas import ClassCandidate, FieldDefinition, RequiredFieldItem, SchemaRegion
 from app.storage import read_storage_bytes, storage_ref_name
+from app.vlm_params import VlmInferenceParamError, VlmInferenceParams
 
 
 SYSTEM_PROMPT = KIE_SYSTEM_PROMPT
@@ -149,7 +151,7 @@ def _invoke_vlm_with_limit(
     system_prompt: str,
     prompt: str,
     image_inputs: list[dict[str, str]],
-    output_schema: dict[str, Any],
+    output_schema: dict[str, Any] | StructuredOutputSpec,
     api_style: str,
 ) -> dict[str, Any]:
     max_attempts = max(1, get_settings().vlm_max_retries + 1)
@@ -168,7 +170,7 @@ async def _invoke_vlm_with_limit_async(
     system_prompt: str,
     prompt: str,
     image_inputs: list[dict[str, str]],
-    output_schema: dict[str, Any],
+    output_schema: dict[str, Any] | StructuredOutputSpec,
     api_style: str,
 ) -> dict[str, Any]:
     max_attempts = max(1, get_settings().vlm_max_retries + 1)
@@ -538,41 +540,100 @@ def _ensure_vlm_credentials(settings) -> None:
         )
 
 
+class VlmClient(Protocol):
+    def invoke(
+        self,
+        system_prompt: str,
+        prompt: str,
+        image_inputs: list[dict[str, str]],
+        output_schema: dict[str, Any] | StructuredOutputSpec,
+    ) -> dict[str, Any]:
+        ...
+
+    async def ainvoke(
+        self,
+        system_prompt: str,
+        prompt: str,
+        image_inputs: list[dict[str, str]],
+        output_schema: dict[str, Any] | StructuredOutputSpec,
+    ) -> dict[str, Any]:
+        ...
+
+
+class OpenAiCompatibleVlmClient:
+    def invoke(
+        self,
+        system_prompt: str,
+        prompt: str,
+        image_inputs: list[dict[str, str]],
+        output_schema: dict[str, Any] | StructuredOutputSpec,
+    ) -> dict[str, Any]:
+        return _invoke_openai_compatible(system_prompt, _build_multimodal_content(prompt, image_inputs), output_schema)
+
+    async def ainvoke(
+        self,
+        system_prompt: str,
+        prompt: str,
+        image_inputs: list[dict[str, str]],
+        output_schema: dict[str, Any] | StructuredOutputSpec,
+    ) -> dict[str, Any]:
+        content = await asyncio.to_thread(_build_multimodal_content, prompt, image_inputs)
+        return await _invoke_openai_compatible_async(system_prompt, content, output_schema)
+
+
+class GoogleGenAiVlmClient:
+    def invoke(
+        self,
+        system_prompt: str,
+        prompt: str,
+        image_inputs: list[dict[str, str]],
+        output_schema: dict[str, Any] | StructuredOutputSpec,
+    ) -> dict[str, Any]:
+        return _invoke_google_genai(system_prompt, prompt, image_inputs, output_schema)
+
+    async def ainvoke(
+        self,
+        system_prompt: str,
+        prompt: str,
+        image_inputs: list[dict[str, str]],
+        output_schema: dict[str, Any] | StructuredOutputSpec,
+    ) -> dict[str, Any]:
+        return await _invoke_google_genai_async(system_prompt, prompt, image_inputs, output_schema)
+
+
+def _vlm_client_for_api_style(api_style: str) -> VlmClient:
+    if api_style == "google_genai":
+        return GoogleGenAiVlmClient()
+    if api_style == "openai_compatible":
+        return OpenAiCompatibleVlmClient()
+    raise VlmRuntimeError("VLM_API_STYLE_UNSUPPORTED", f"Unsupported VLM API style: {api_style}")
+
+
 def _invoke_structured_llm(
     system_prompt: str,
     prompt: str,
     image_inputs: list[dict[str, str]],
-    output_schema: dict[str, Any],
+    output_schema: dict[str, Any] | StructuredOutputSpec,
     api_style: str,
 ) -> dict[str, Any]:
-    if api_style == "google_genai":
-        return _invoke_google_genai(system_prompt, prompt, image_inputs, output_schema)
-    if api_style != "openai_compatible":
-        raise VlmRuntimeError("VLM_API_STYLE_UNSUPPORTED", f"Unsupported VLM API style: {api_style}")
-    content = _build_multimodal_content(prompt, image_inputs)
-    return _invoke_openai_compatible(system_prompt, content, output_schema)
+    return _vlm_client_for_api_style(api_style).invoke(system_prompt, prompt, image_inputs, output_schema)
 
 
 async def _invoke_structured_llm_async(
     system_prompt: str,
     prompt: str,
     image_inputs: list[dict[str, str]],
-    output_schema: dict[str, Any],
+    output_schema: dict[str, Any] | StructuredOutputSpec,
     api_style: str,
 ) -> dict[str, Any]:
-    if api_style == "google_genai":
-        return await _invoke_google_genai_async(system_prompt, prompt, image_inputs, output_schema)
-    if api_style != "openai_compatible":
-        raise VlmRuntimeError("VLM_API_STYLE_UNSUPPORTED", f"Unsupported VLM API style: {api_style}")
-    content = await asyncio.to_thread(_build_multimodal_content, prompt, image_inputs)
-    return await _invoke_openai_compatible_async(system_prompt, content, output_schema)
+    return await _vlm_client_for_api_style(api_style).ainvoke(system_prompt, prompt, image_inputs, output_schema)
 
 
 async def _invoke_structured_llm_with_timeout_async(
     system_prompt: str,
     prompt: str,
     image_inputs: list[dict[str, str]],
-    output_schema: dict[str, Any],
+    output_schema: dict[str, Any] | StructuredOutputSpec,
     api_style: str,
 ) -> dict[str, Any]:
     timeout_seconds = max(1, get_settings().vlm_timeout_seconds)
@@ -588,13 +649,13 @@ async def _invoke_structured_llm_with_timeout_async(
         ) from exc
 
 
-def _invoke_openai_compatible(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any]) -> dict[str, Any]:
+def _invoke_openai_compatible(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any] | StructuredOutputSpec) -> dict[str, Any]:
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_openai import ChatOpenAI
 
     llm = ChatOpenAI(**_build_llm_kwargs())
     structured_llm = llm.with_structured_output(
-        output_schema,
+        _openai_structured_output_schema(output_schema),
         method="json_schema",
         strict=True,
     )
@@ -609,7 +670,7 @@ def _invoke_openai_compatible(system_prompt: str, content: list[dict[str, Any]],
             f"OpenAI-compatible VLM request failed: {_sanitize_provider_error(exc)}",
         ) from exc
     if hasattr(response, "model_dump"):
-        return response.model_dump()
+        return response.model_dump(by_alias=True)
     if isinstance(response, dict):
         return response
     if isinstance(response, str):
@@ -617,13 +678,13 @@ def _invoke_openai_compatible(system_prompt: str, content: list[dict[str, Any]],
     raise VlmRuntimeError("VLM_RESPONSE_UNSUPPORTED", "VLM returned an unsupported structured response.")
 
 
-async def _invoke_openai_compatible_async(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any]) -> dict[str, Any]:
+async def _invoke_openai_compatible_async(system_prompt: str, content: list[dict[str, Any]], output_schema: dict[str, Any] | StructuredOutputSpec) -> dict[str, Any]:
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_openai import ChatOpenAI
 
     llm = ChatOpenAI(**_build_llm_kwargs())
     structured_llm = llm.with_structured_output(
-        output_schema,
+        _openai_structured_output_schema(output_schema),
         method="json_schema",
         strict=True,
     )
@@ -638,7 +699,7 @@ async def _invoke_openai_compatible_async(system_prompt: str, content: list[dict
             f"OpenAI-compatible VLM request failed: {_sanitize_provider_error(exc)}",
         ) from exc
     if hasattr(response, "model_dump"):
-        return response.model_dump()
+        return response.model_dump(by_alias=True)
     if isinstance(response, dict):
         return response
     if isinstance(response, str):
@@ -650,7 +711,7 @@ def _invoke_google_genai(
     system_prompt: str,
     prompt: str,
     image_inputs: list[dict[str, str]],
-    output_schema: dict[str, Any],
+    output_schema: dict[str, Any] | StructuredOutputSpec,
 ) -> dict[str, Any]:
     settings = get_settings()
     try:
@@ -693,7 +754,7 @@ async def _invoke_google_genai_async(
     system_prompt: str,
     prompt: str,
     image_inputs: list[dict[str, str]],
-    output_schema: dict[str, Any],
+    output_schema: dict[str, Any] | StructuredOutputSpec,
 ) -> dict[str, Any]:
     settings = get_settings()
     try:
@@ -742,80 +803,54 @@ async def _invoke_google_genai_async(
 
 def _build_llm_kwargs() -> dict[str, Any]:
     settings = get_settings()
+    inference_params = VlmInferenceParams.from_mapping(settings.resolved_vlm_inference_params)
+    try:
+        temperature = inference_params.temperature_value(settings.vlm_temperature)
+        provider_kwargs = inference_params.openai_compatible_kwargs()
+    except VlmInferenceParamError as exc:
+        _raise_vlm_inference_param_error(exc)
     base_url = (settings.vlm_base_url or "").strip()
     api_key = settings.resolved_vlm_api_key or ("local-vlm" if base_url else None)
     llm_kwargs: dict[str, Any] = {
         "model": settings.resolved_vlm_model_name,
         "api_key": api_key,
-        "temperature": settings.vlm_temperature,
+        "temperature": temperature,
         "timeout": settings.vlm_timeout_seconds,
         "max_retries": settings.vlm_max_retries,
     }
     if base_url:
         llm_kwargs["base_url"] = base_url
 
-    reasoning_effort = _clean_optional_text(settings.vlm_reasoning_effort)
-    if reasoning_effort:
-        llm_kwargs["reasoning_effort"] = reasoning_effort
-
-    verbosity = _clean_optional_text(settings.vlm_verbosity)
-    if verbosity:
-        llm_kwargs["verbosity"] = verbosity
-
-    max_completion_tokens = _optional_int(settings.vlm_max_completion_tokens)
-    if max_completion_tokens is not None:
-        llm_kwargs["max_completion_tokens"] = max_completion_tokens
-
-    top_p = _optional_float(settings.vlm_top_p)
-    if top_p is not None:
-        llm_kwargs["top_p"] = top_p
-
-    service_tier = _clean_optional_text(settings.vlm_service_tier)
-    if service_tier:
-        llm_kwargs["service_tier"] = service_tier
-
+    llm_kwargs.update(provider_kwargs)
     return llm_kwargs
 
 
-def _build_google_generation_config(system_prompt: str, output_schema: dict[str, Any]) -> dict[str, Any]:
+def _build_google_generation_config(system_prompt: str, output_schema: dict[str, Any] | StructuredOutputSpec) -> dict[str, Any]:
     settings = get_settings()
+    inference_params = VlmInferenceParams.from_mapping(settings.resolved_vlm_inference_params)
+    try:
+        temperature = inference_params.temperature_value(settings.vlm_temperature)
+        provider_overrides = inference_params.google_generation_overrides()
+    except VlmInferenceParamError as exc:
+        _raise_vlm_inference_param_error(exc)
     config: dict[str, Any] = {
         "system_instruction": system_prompt,
-        "temperature": settings.vlm_temperature,
+        "temperature": temperature,
         "response_mime_type": "application/json",
-        "response_json_schema": output_schema,
+        "response_json_schema": _json_schema_for_provider(output_schema),
     }
-    max_output_tokens = _optional_int(settings.vlm_max_completion_tokens)
-    if max_output_tokens is not None:
-        config["max_output_tokens"] = max_output_tokens
-
-    top_p = _optional_float(settings.vlm_top_p)
-    if top_p is not None:
-        config["top_p"] = top_p
-
-    thinking_config = _google_thinking_config(settings.vlm_reasoning_effort)
-    if thinking_config:
-        config["thinking_config"] = thinking_config
-
+    config.update(provider_overrides)
     return config
 
 
-def _google_thinking_config(reasoning_effort: str | None) -> dict[str, Any] | None:
-    effort = _clean_optional_text(reasoning_effort)
-    if not effort:
-        return None
-    normalized = effort.lower()
-    if normalized in {"none", "off", "instant", "0"}:
-        return {"thinking_budget": 0}
-    if normalized in {"minimal", "low", "medium", "high"}:
-        return {"thinking_level": normalized}
-    return {"thinking_level": normalized}
+def _raise_vlm_inference_param_error(exc: VlmInferenceParamError) -> None:
+    raise VlmRuntimeError(exc.code, str(exc)) from exc
 
 
 def _coerce_structured_response(response: Any) -> dict[str, Any]:
     parsed = getattr(response, "parsed", None)
     if hasattr(parsed, "model_dump"):
-        return parsed.model_dump()
+        return parsed.model_dump(by_alias=True)
     if isinstance(parsed, dict):
         return parsed
 
@@ -836,31 +871,16 @@ def _coerce_structured_response(response: Any) -> dict[str, Any]:
     raise VlmRuntimeError("VLM_RESPONSE_UNSUPPORTED", "VLM returned an unsupported structured response.")
 
 
-def _clean_optional_text(value: str | None) -> str | None:
-    if value is None:
-        return None
-    cleaned = value.strip()
-    return cleaned or None
+def _openai_structured_output_schema(output_schema: dict[str, Any] | StructuredOutputSpec) -> Any:
+    if isinstance(output_schema, StructuredOutputSpec):
+        return output_schema.model
+    return output_schema
 
 
-def _optional_int(value: str | None) -> int | None:
-    cleaned = _clean_optional_text(value)
-    if cleaned is None:
-        return None
-    try:
-        return int(cleaned)
-    except ValueError as exc:
-        raise VlmRuntimeError("VLM_SETTING_INVALID_INTEGER", f"Invalid integer VLM setting: {cleaned}") from exc
-
-
-def _optional_float(value: str | None) -> float | None:
-    cleaned = _clean_optional_text(value)
-    if cleaned is None:
-        return None
-    try:
-        return float(cleaned)
-    except ValueError as exc:
-        raise VlmRuntimeError("VLM_SETTING_INVALID_NUMERIC", f"Invalid numeric VLM setting: {cleaned}") from exc
+def _json_schema_for_provider(output_schema: dict[str, Any] | StructuredOutputSpec) -> dict[str, Any]:
+    if isinstance(output_schema, StructuredOutputSpec):
+        return output_schema.json_schema()
+    return output_schema
 
 
 def _sanitize_provider_error(exc: Exception) -> str:

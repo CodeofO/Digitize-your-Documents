@@ -1,5 +1,6 @@
 from typing import Any
 
+from app.prompts.structured_output import classification_output_spec
 from app.schemas import ClassCandidate
 
 
@@ -23,19 +24,4 @@ def build_classification_prompt(classes: list[ClassCandidate], allow_unknown: bo
 
 
 def build_classification_output_schema(classes: list[ClassCandidate], allow_unknown: bool) -> dict[str, Any]:
-    class_names = [item.class_name for item in classes]
-    class_schema: dict[str, Any] = {"anyOf": [{"type": "string", "enum": class_names}, {"type": "null"}]}
-    return {
-        "title": "DocumentClassificationResult",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "status": {"type": "string", "enum": ["classified", "unknown"]},
-            "class_name": class_schema,
-            "confidence": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
-            "reason": {"type": "string"},
-            "evidence": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["status", "class_name", "confidence", "reason", "evidence"],
-    }
-
+    return classification_output_spec(classes, allow_unknown)

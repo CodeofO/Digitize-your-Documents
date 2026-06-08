@@ -31,12 +31,33 @@ backend/alembic/versions/*
 !backend/app/
 backend/app/*
 !backend/app/*.py
+!backend/app/domain/
+backend/app/domain/*
+!backend/app/domain/*.py
+!backend/app/ports/
+backend/app/ports/*
+!backend/app/ports/*.py
 !backend/app/prompts/
 backend/app/prompts/*
 !backend/app/prompts/*.py
+!backend/app/repositories/
+backend/app/repositories/*
+!backend/app/repositories/*.py
+!backend/app/routers/
+backend/app/routers/*
+!backend/app/routers/*.py
+!backend/app/services/
+backend/app/services/*
+!backend/app/services/*.py
 !backend/tests/
 backend/tests/*
 !backend/tests/*.py
+!backend/tests/application/
+backend/tests/application/*
+!backend/tests/application/*.py
+!backend/tests/domain/
+backend/tests/domain/*
+!backend/tests/domain/*.py
 
 # Frontend source.
 !frontend/index.html
@@ -60,6 +81,7 @@ frontend/src/*
 # Template data and final README media.
 !docs/
 docs/*
+!docs/refactor-plan.md
 !docs/readme-media.html
 !docs/project-insights.md
 !docs/templates/

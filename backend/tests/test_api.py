@@ -271,12 +271,24 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
                 "vlm_max_concurrent_requests": 7,
                 "vlm_timeout_seconds": 600,
                 "kie_field_group_size": 3,
+                "inference_params": {
+                    "reasoning_effort": "off",
+                    "thinking": "off",
+                    "temperature": "0",
+                    "verbosity": "",
+                    "max_completion_tokens": "2048",
+                    "top_p": "0.9",
+                    "service_tier": "",
+                },
             },
         )
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["base_url"] == "http://127.0.0.1:11434/v1"
         assert payload["libreoffice_path"] == "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        assert payload["inference_params"]["reasoning_effort"] == "off"
+        assert payload["inference_params"]["thinking"] == "off"
+        assert payload["inference_params"]["max_completion_tokens"] == "2048"
         assert "vlm_max_concurrent_requests" in payload
         assert payload["workflow_max_workers"] == 11
         assert payload["vlm_timeout_seconds"] == 600
@@ -292,6 +304,10 @@ def test_vlm_settings_include_libreoffice_path(monkeypatch, tmp_path) -> None:
     assert 'VLM_MAX_CONCURRENT_REQUESTS="7"' in contents
     assert 'VLM_TIMEOUT_SECONDS="600"' in contents
     assert 'KIE_FIELD_GROUP_SIZE="3"' in contents
+    assert "VLM_INFERENCE_PARAMS=" in contents
+    assert "VLM_TEMPERATURE" not in contents
+    assert "VLM_REASONING_EFFORT" not in contents
+    assert "VLM_VERBOSITY" not in contents
 
 
 def test_vlm_settings_are_readonly_in_production(monkeypatch, tmp_path) -> None:
@@ -355,6 +371,8 @@ def test_production_env_examples_disable_local_cors_regex() -> None:
     local_values = _read_env_example(root / ".env.example")
     assert local_values["APP_ENV"] == "development"
     assert local_values["VLM_PROVIDER"] == "mock"
+    assert json.loads(local_values["VLM_INFERENCE_PARAMS"].strip("'\""))["reasoning_effort"] == "off"
+    assert json.loads(production_values["VLM_INFERENCE_PARAMS"].strip("'\""))["thinking"] == "off"
 
 
 def test_production_security_headers(monkeypatch) -> None:
@@ -726,19 +744,58 @@ def test_vlm_runtime_kwargs_include_speed_controls(monkeypatch) -> None:
     try:
         monkeypatch.setenv("VLM_API_KEY", "test-secret")
         monkeypatch.setenv("VLM_MODEL_NAME", "test-model")
-        monkeypatch.setenv("VLM_REASONING_EFFORT", "minimal")
-        monkeypatch.setenv("VLM_VERBOSITY", "low")
-        monkeypatch.setenv("VLM_MAX_COMPLETION_TOKENS", "1024")
-        monkeypatch.setenv("VLM_TOP_P", "0.8")
-        monkeypatch.setenv("VLM_SERVICE_TIER", "auto")
+        monkeypatch.setenv(
+            "VLM_INFERENCE_PARAMS",
+            json.dumps(
+                {
+                    "reasoning_effort": "minimal",
+                    "thinking": "minimal",
+                    "temperature": "0.2",
+                    "verbosity": "low",
+                    "max_completion_tokens": "1024",
+                    "top_p": "0.8",
+                    "service_tier": "auto",
+                }
+            ),
+        )
         get_settings.cache_clear()
 
         kwargs = _build_llm_kwargs()
         assert kwargs["reasoning_effort"] == "minimal"
+        assert kwargs["temperature"] == 0.2
         assert kwargs["verbosity"] == "low"
         assert kwargs["max_completion_tokens"] == 1024
         assert kwargs["top_p"] == 0.8
         assert kwargs["service_tier"] == "auto"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vlm_inference_params_default_reasoning_off(monkeypatch) -> None:
+    from app.vlm import _build_google_generation_config, _build_llm_kwargs
+
+    try:
+        for key in [
+            "VLM_INFERENCE_PARAMS",
+            "VLM_REASONING_EFFORT",
+            "VLM_VERBOSITY",
+            "VLM_MAX_COMPLETION_TOKENS",
+            "VLM_TOP_P",
+            "VLM_SERVICE_TIER",
+        ]:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("VLM_API_KEY", "test-secret")
+        monkeypatch.setenv("VLM_MODEL_NAME", "test-model")
+        get_settings.cache_clear()
+
+        kwargs = _build_llm_kwargs()
+        assert "reasoning_effort" not in kwargs
+        assert "verbosity" not in kwargs
+        assert kwargs["temperature"] == 0
+
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+        config = _build_google_generation_config("system", schema)
+        assert config["thinking_config"] == {"thinking_budget": 0}
     finally:
         get_settings.cache_clear()
 
@@ -1022,14 +1079,14 @@ def test_vlm_provider_request_retries_transient_broken_pipe(monkeypatch) -> None
         get_settings.cache_clear()
 
 
-def test_google_generation_config_uses_structured_output_and_thinking_level(monkeypatch) -> None:
+def test_google_generation_config_uses_structured_output_and_explicit_thinking_level(monkeypatch) -> None:
     from app.vlm import _build_google_generation_config
 
     try:
         monkeypatch.setenv("VLM_PROVIDER", "auto")
         monkeypatch.setenv("VLM_API_KEY", "AIzaSyCP_test_key")
         monkeypatch.setenv("VLM_MODEL_NAME", "gemini-3.1-flash-lite")
-        monkeypatch.setenv("VLM_REASONING_EFFORT", "minimal")
+        monkeypatch.setenv("VLM_INFERENCE_PARAMS", json.dumps({"reasoning_effort": "minimal", "thinking": "minimal"}))
         get_settings.cache_clear()
 
         schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
@@ -1046,13 +1103,42 @@ def test_classification_schema_uses_classes_or_unknown_only() -> None:
     from app.vlm import _classification_output_schema
     from app.schemas import ClassCandidate
 
-    schema = _classification_output_schema(
+    spec = _classification_output_schema(
         classes=[ClassCandidate(class_name="contract", description="Contract", signals=[])],
         allow_unknown=False,
     )
+    schema = spec.json_schema()
     assert schema["properties"]["status"]["enum"] == ["classified", "unknown"]
     class_name_schema = schema["properties"]["class_name"]
     assert {"type": "null"} in class_name_schema["anyOf"]
+
+
+def test_dynamic_pydantic_output_schemas_require_configured_keys() -> None:
+    from app.vlm import _required_field_output_schema, build_structured_output_schema
+    from app.schemas import FieldDefinition, RequiredFieldItem
+
+    kie_spec = build_structured_output_schema(
+        [
+            FieldDefinition(key_name="본인 성명", description="우측 하단 본인 성명", output_format="string"),
+            FieldDefinition(key_name="금액", description="금액", output_format="float"),
+        ]
+    )
+    kie_schema = kie_spec.json_schema()
+    assert kie_schema["required"] == ["본인 성명", "금액"]
+    assert set(kie_schema["properties"]) == {"본인 성명", "금액"}
+
+    required_spec = _required_field_output_schema(
+        [
+            RequiredFieldItem(item_name="서명", description="서명 확인"),
+            RequiredFieldItem(item_name="작성일", description="작성일 확인"),
+        ]
+    )
+    required_schema = required_spec.json_schema()
+    item_ref = required_schema["properties"]["items"]["$ref"]
+    ref_name = item_ref.removeprefix("#/$defs/")
+    item_schema = required_schema["$defs"][ref_name]
+    assert item_schema["required"] == ["서명", "작성일"]
+    assert set(item_schema["properties"]) == {"서명", "작성일"}
 
 
 def test_classification_validation_clears_unknown_class_name() -> None:
@@ -1871,6 +1957,44 @@ def test_extraction_low_confidence_requires_review(monkeypatch) -> None:
     assert "invoice_number:low_confidence" in result["validation_warnings"]
 
 
+def test_extraction_null_without_evidence_is_not_detected(monkeypatch) -> None:
+    def fake_extract(fields, image_paths=None, image_inputs=None):
+        return {
+            "invoice_number": {
+                "value": None,
+                "page": 1,
+                "evidence": None,
+                "confidence": 0.0,
+            },
+            "total_amount": {
+                "value": "10.00",
+                "page": 1,
+                "evidence": "high confidence evidence",
+                "confidence": 0.95,
+            },
+        }
+
+    monkeypatch.setattr("app.extraction.extract_with_vlm", fake_extract)
+
+    with get_client() as client:
+        document = upload_png(client)
+        schema = create_schema(client)
+        job_response = client.post(
+            "/api/extraction-jobs",
+            json={"document_id": document["document_id"], "schema_id": schema["id"]},
+        )
+        assert job_response.status_code == 200, job_response.text
+        job = client.get(f"/api/extraction-jobs/{job_response.json()['job_id']}").json()
+
+    assert job["status"] == "needs_review"
+    values = job["result"]["validated_output"]["values"]
+    assert values["invoice_number"]["value"] is None
+    assert values["invoice_number"]["confidence"] is None
+    assert "not_detected" in values["invoice_number"]["warnings"]
+    assert "low_confidence" not in values["invoice_number"]["warnings"]
+    assert "invoice_number:not_detected" in job["result"]["validation_warnings"]
+
+
 def test_extraction_releases_db_connection_during_vlm_call(monkeypatch) -> None:
     from app.database import engine
 
@@ -1997,6 +2121,7 @@ def test_kie_prompts_are_split_by_region_presence() -> None:
     assert "user-designated extraction region" not in full_prompt
     assert "labeled extraction region images" in region_prompt
     assert "crop image is already the user-designated extraction region" in region_prompt
+    assert "masked image to confirm the region's original position" in region_prompt
     assert "verification step, not a re-extraction step" in judgement_prompt
     assert "default decision is judgement_status=correct" in judgement_prompt
     assert "If text such as 성명, 서명, 법정" in judgement_prompt
@@ -2779,6 +2904,36 @@ def test_required_field_checklist_single_job_and_region_validation() -> None:
     finally:
         os.environ["VLM_PROVIDER"] = "openai"
         get_settings.cache_clear()
+
+
+def test_required_checker_accepts_pydantic_item_object_output() -> None:
+    from app.document_modules import RequiredFieldContext, _validate_required_field_output
+    from app.extraction import DocumentSnapshot
+    from app.schemas import RequiredFieldItem
+
+    context = RequiredFieldContext(
+        document=DocumentSnapshot(id="doc_1", storage_path="", pages=[]),
+        checklist_id="checklist_1",
+        items=[
+            RequiredFieldItem(item_name="서명", description="서명 확인", required=True),
+            RequiredFieldItem(item_name="작성일", description="작성일 확인", required=True),
+        ],
+        regions=[],
+    )
+    raw_values = {
+        "overall_status": "needs_review",
+        "items": {
+            "서명": {"status": "present", "confidence": 0.9, "evidence": "서명이 보입니다.", "page": 1},
+            "작성일": {"status": "missing", "confidence": 0.8, "evidence": None, "page": None},
+        },
+    }
+
+    validated = _validate_required_field_output(raw_values, context)
+
+    assert validated["overall_status"] == "incomplete"
+    assert [item["item_name"] for item in validated["items"]] == ["서명", "작성일"]
+    assert validated["items"][0]["status"] == "present"
+    assert validated["items"][1]["status"] == "missing"
 
 
 def test_required_checker_splits_full_page_and_region_requests(monkeypatch) -> None:

@@ -3042,6 +3042,14 @@ textarea {
   padding: 14px 16px;
 }
 
+.pane-header-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .toolbar button,
 .toolbar-upload {
   background: #ffffff;

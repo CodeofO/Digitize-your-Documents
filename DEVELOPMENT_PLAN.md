@@ -16,7 +16,7 @@
 - Workflow Builder node asset editing now covers schema fields, classifier classes, and required-field checklists with module-style table editors.
 - Blank KIE nodes can now start a new schema draft directly inside Workflow Builder.
 - Draft materialization for schema/checklist assets during workflow save.
-- VLM settings now support OpenAI-compatible `base_url`, local no-key endpoints, request timeout tuning, and KIE field group tuning.
+- VLM settings now support OpenAI-compatible `base_url`, local no-key endpoints, structured inference parameters with reasoning/thinking off by default, request timeout tuning, and KIE field group tuning.
 - KIE result review marks low-confidence model output as `needs_review` and keeps frontend polling open for long local VLM inference.
 - README workflow screenshots are generated from the PoC UI smoke flow.
 - Public repository scope cleaned to focus on product features.

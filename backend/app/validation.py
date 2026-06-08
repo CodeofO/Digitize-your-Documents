@@ -2,6 +2,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from app.domain.schema_definition import FieldDefinitionValue
 from app.schemas import FieldDefinition
 
 
@@ -12,7 +13,8 @@ def validate_extracted_values(
     raw_values: dict[str, Any],
     fields: list[FieldDefinition],
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    field_map = {field.key_name: field for field in fields}
+    domain_fields = [FieldDefinitionValue.from_dto(field) for field in fields]
+    field_map = {field.key_name: field for field in domain_fields}
     values: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
 
@@ -20,7 +22,7 @@ def validate_extracted_values(
     for key in unknown_keys:
         warnings.append(f"Unexpected key ignored: {key}")
 
-    for field in fields:
+    for field in domain_fields:
         field_warnings: list[str] = []
         raw_item = raw_values.get(field.key_name)
         if field.key_name not in raw_values:
@@ -28,7 +30,11 @@ def validate_extracted_values(
 
         value, page, confidence, evidence, metadata_warnings = _unpack_extraction_item(raw_item)
         field_warnings.extend(metadata_warnings)
-        if confidence is not None and confidence < LOW_CONFIDENCE_THRESHOLD:
+        if _is_empty_value(value) and evidence is None:
+            field_warnings.append("not_detected")
+            if confidence == 0:
+                confidence = None
+        elif confidence is not None and confidence < LOW_CONFIDENCE_THRESHOLD:
             field_warnings.append("low_confidence")
         normalized_value, normalization_warnings = _normalize_value(value, field.output_format)
         field_warnings.extend(normalization_warnings)
@@ -59,6 +65,10 @@ def _matches_format(value: Any, output_format: str) -> bool:
     if output_format == "bool":
         return isinstance(value, bool)
     return False
+
+
+def _is_empty_value(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _unpack_extraction_item(raw_item: Any) -> tuple[Any, int | None, float | None, str | None, list[str]]:

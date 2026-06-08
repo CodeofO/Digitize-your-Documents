@@ -7,6 +7,7 @@ from typing import Any
 from app.audit import log_audit_event
 from app.concurrency import gather_workflow_limited, run_workflow_blocking
 from app.database import SessionLocal
+from app.domain.module_job import ModuleJobLifecycle, TERMINAL_MODULE_JOB_STATUSES
 from app.extraction import DocumentPageSnapshot, DocumentSnapshot, _crop_region_image, _mask_region_image
 from app.models import (
     ClassificationBatch,
@@ -18,6 +19,12 @@ from app.models import (
     RequiredFieldCheckJob,
     RequiredFieldCheckResult,
     RequiredFieldChecklist,
+)
+from app.module_validation import (
+    required_overall_from_items as _required_overall_from_items,
+    required_raw_items as _required_raw_items,
+    validate_classification_output as _validate_classification_output,
+    validate_required_field_output as _validate_required_field_output,
 )
 from app.prompts.required_checker import cropped_required_region_label, full_page_required_label, masked_required_region_label
 from app.schemas import ClassCandidate, RequiredFieldItem, SchemaRegion
@@ -34,9 +41,6 @@ from app.vlm import (
 
 _ORIGINAL_CLASSIFY_DOCUMENT_WITH_VLM = classify_document_with_vlm
 _ORIGINAL_CHECK_REQUIRED_FIELDS_WITH_VLM = check_required_fields_with_vlm
-
-
-TERMINAL_MODULE_JOB_STATUSES = {"completed", "needs_review", "failed", "canceled"}
 
 
 @dataclass(frozen=True)
@@ -167,8 +171,7 @@ def _prepare_classification_job(job_id: str) -> ClassificationContext | None:
         job = db.get(ClassificationJob, job_id)
         if not job or job.status != "queued":
             return None
-        job.status = "running"
-        job.started_at = datetime.utcnow()
+        ModuleJobLifecycle(job).mark_running(datetime.utcnow())
         db.commit()
         document = db.get(Document, job.document_id)
         classifier = db.get(DocumentClassifier, job.classifier_id)
@@ -193,8 +196,7 @@ def _prepare_required_field_job(job_id: str) -> RequiredFieldContext | None:
         job = db.get(RequiredFieldCheckJob, job_id)
         if not job or job.status != "queued":
             return None
-        job.status = "running"
-        job.started_at = datetime.utcnow()
+        ModuleJobLifecycle(job).mark_running(datetime.utcnow())
         db.commit()
         document = db.get(Document, job.document_id)
         checklist = db.get(RequiredFieldChecklist, job.checklist_id)
@@ -237,8 +239,7 @@ def _save_classification_result(job_id: str, context: ClassificationContext, raw
         db.add(result)
         db.flush()
         job.result_id = result.id
-        job.status = "completed"
-        job.completed_at = datetime.utcnow()
+        ModuleJobLifecycle(job).complete(datetime.utcnow())
         log_audit_event(
             db,
             entity_type="classification_job",
@@ -268,8 +269,10 @@ def _save_required_field_result(job_id: str, context: RequiredFieldContext, raw_
         db.add(result)
         db.flush()
         job.result_id = result.id
-        job.status = "needs_review" if validated["overall_status"] == "needs_review" else "completed"
-        job.completed_at = datetime.utcnow()
+        if validated["overall_status"] == "needs_review":
+            ModuleJobLifecycle(job).needs_review(datetime.utcnow())
+        else:
+            ModuleJobLifecycle(job).complete(datetime.utcnow())
         log_audit_event(
             db,
             entity_type="required_field_check_job",
@@ -311,8 +314,7 @@ async def _check_required_fields_grouped_async(context: RequiredFieldContext, jo
     for result in results:
         if not result:
             continue
-        result_items = result.get("items") if isinstance(result.get("items"), list) else []
-        merged_items.extend(item for item in result_items if isinstance(item, dict))
+        merged_items.extend(_required_raw_items(result))
     return {"overall_status": _required_overall_from_items(merged_items, context.items), "items": merged_items}
 
 
@@ -394,85 +396,6 @@ def _build_required_field_requests(
     return requests
 
 
-def _required_overall_from_items(raw_items: list[dict[str, Any]], configured_items: list[RequiredFieldItem]) -> str:
-    raw_by_name = {item.get("item_name"): item for item in raw_items if isinstance(item, dict)}
-    needs_review = False
-    incomplete = False
-    for configured in configured_items:
-        raw_item = raw_by_name.get(configured.item_name, {})
-        status = raw_item.get("status")
-        if status not in {"present", "missing", "uncertain", "not_applicable"}:
-            status = "uncertain"
-        if configured.required and status == "missing":
-            incomplete = True
-        if configured.required and status == "uncertain":
-            needs_review = True
-    return "needs_review" if needs_review else "incomplete" if incomplete else "complete"
-
-
-def _validate_classification_output(raw_values: dict[str, Any], context: ClassificationContext) -> dict[str, Any]:
-    class_names = {item.class_name for item in context.classes}
-    status = raw_values.get("status") if raw_values.get("status") in {"classified", "unknown"} else "unknown"
-    class_name = raw_values.get("class_name")
-    if status == "classified" and class_name not in class_names:
-        status = "unknown"
-        class_name = None
-    if status == "unknown":
-        class_name = None
-    confidence = raw_values.get("confidence")
-    if not isinstance(confidence, (int, float)):
-        confidence = None
-    evidence = raw_values.get("evidence")
-    return {
-        "document_id": context.document.id,
-        "classifier_id": context.classifier_id,
-        "status": status,
-        "class_name": class_name if isinstance(class_name, str) else None,
-        "confidence": max(0, min(1, float(confidence))) if confidence is not None else None,
-        "reason": str(raw_values.get("reason") or ""),
-        "evidence": evidence if isinstance(evidence, list) else [],
-    }
-
-
-def _validate_required_field_output(raw_values: dict[str, Any], context: RequiredFieldContext) -> dict[str, Any]:
-    raw_items = raw_values.get("items") if isinstance(raw_values.get("items"), list) else []
-    raw_by_name = {item.get("item_name"): item for item in raw_items if isinstance(item, dict)}
-    items: list[dict[str, Any]] = []
-    needs_review = False
-    incomplete = False
-    for configured in context.items:
-        raw_item = raw_by_name.get(configured.item_name, {})
-        status = raw_item.get("status")
-        if status not in {"present", "missing", "uncertain", "not_applicable"}:
-            status = "uncertain"
-        if configured.required and status == "missing":
-            incomplete = True
-        if configured.required and status == "uncertain":
-            needs_review = True
-        confidence = raw_item.get("confidence")
-        if not isinstance(confidence, (int, float)):
-            confidence = None
-        page = raw_item.get("page")
-        items.append(
-            {
-                "item_name": configured.item_name,
-                "status": status,
-                "required": configured.required,
-                "evidence_type": configured.evidence_type,
-                "confidence": max(0, min(1, float(confidence))) if confidence is not None else None,
-                "evidence": raw_item.get("evidence") if isinstance(raw_item.get("evidence"), str) else None,
-                "page": page if isinstance(page, int) else None,
-            }
-        )
-    overall_status = "needs_review" if needs_review else "incomplete" if incomplete else "complete"
-    return {
-        "document_id": context.document.id,
-        "checklist_id": context.checklist_id,
-        "overall_status": overall_status,
-        "items": items,
-    }
-
-
 def _mark_classification_job_failed(job_id: str, message: str) -> None:
     _mark_module_job_failed(ClassificationJob, "classification_job", job_id, message)
 
@@ -487,9 +410,7 @@ def _mark_module_job_failed(model, entity_type: str, job_id: str, message: str) 
         job = db.get(model, job_id)
         if not job or job.status in TERMINAL_MODULE_JOB_STATUSES:
             return
-        job.status = "failed"
-        job.error_message = message
-        job.completed_at = datetime.utcnow()
+        ModuleJobLifecycle(job).fail(message, datetime.utcnow())
         log_audit_event(db, entity_type=entity_type, entity_id=job.id, action="failed", message=message, metadata={})
         db.commit()
     finally:
