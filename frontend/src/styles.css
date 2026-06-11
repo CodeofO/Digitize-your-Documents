@@ -117,15 +117,39 @@ textarea {
   resize: vertical;
 }
 
-.app-shell {
+.common-app-shell {
+  --shell-content-bg: var(--tds-gray-50);
+  --shell-header-bg: #ffffff;
+  --shell-sidebar-bg: #111827;
+  --shell-nav-active-bg: #2c3344;
+  --shell-nav-hover-bg: #263244;
+}
+
+.common-layout-logo,
+.common-layout-title {
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.common-layout-logo {
+  color: #ffffff;
+  font-size: 16px;
+}
+
+.common-layout-title {
+  color: var(--tds-gray-900);
+  font-size: 15px;
+}
+
+.document-automation-shell {
   background: var(--tds-gray-50);
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   max-width: 100vw;
-  min-height: 100vh;
+  min-height: 0;
   overflow: hidden;
-  padding: 20px;
+  padding: 16px;
 }
 
 .topbar {
@@ -7109,7 +7133,7 @@ pre {
     overflow: auto;
   }
 
-  .app-shell {
+  .document-automation-shell {
     height: auto;
     min-height: 100vh;
     overflow: visible;
@@ -7348,7 +7372,7 @@ pre {
 }
 
 @media (max-width: 640px) {
-  .app-shell {
+  .document-automation-shell {
     padding: 10px;
   }
 

@@ -42,11 +42,11 @@ import {
   X
 } from "lucide-react";
 import { ChangeEvent, CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent, UIEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch } from "./apiClient";
-import { API_BASE } from "./apiConfig";
-import { DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "./DocumentLibrary";
-import { ExportJobHistory } from "./ExportJobHistory";
-import { createAndDownloadExportJob } from "./exportJobs";
+import { apiFetch } from "@/app/apis/apiClient";
+import { API_BASE } from "@/app/apis/apiConfig";
+import { DocumentPickerButton, LibraryDocument, uploadLibraryFiles } from "@/features/document-library/DocumentLibrary";
+import { ExportJobHistory } from "@/features/export-jobs/ExportJobHistory";
+import { createAndDownloadExportJob } from "@/features/export-jobs/exportJobs";
 
 const WORKFLOW_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.pptx";
 const WORKFLOW_RUN_ROW_HEIGHT = 64;
