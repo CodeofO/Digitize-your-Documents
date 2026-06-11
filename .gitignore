@@ -16,6 +16,10 @@ backend/*
 !backend/.env.production.example
 !frontend/
 frontend/*
+!frontend/AGENTS.md
+!frontend/TECHSTACK.md
+!frontend/.agent/
+!frontend/.agent/**
 !frontend/.env.production.example
 
 # Backend source.
@@ -77,6 +81,28 @@ frontend/src/*
 !frontend/src/*.ts
 !frontend/src/*.tsx
 !frontend/src/*.css
+!frontend/src/app/
+!frontend/src/app/**
+!frontend/src/components/
+!frontend/src/components/**
+!frontend/src/constants/
+!frontend/src/constants/**
+!frontend/src/contexts/
+!frontend/src/contexts/**
+!frontend/src/features/
+!frontend/src/features/**
+!frontend/src/hooks/
+!frontend/src/hooks/**
+!frontend/src/i18n/
+!frontend/src/i18n/**
+!frontend/src/layouts/
+!frontend/src/layouts/**
+!frontend/src/lib/
+!frontend/src/lib/**
+!frontend/src/pages/
+!frontend/src/pages/**
+!frontend/src/utils/
+!frontend/src/utils/**
 
 # Template data and final README media.
 !docs/
@@ -135,6 +161,7 @@ test-results/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/.npmrc
 frontend/coverage/
 frontend/*.tsbuildinfo
 backend/*.db*
