@@ -1,5 +1,5 @@
-import { apiFetch } from "./apiClient";
-import { API_BASE } from "./apiConfig";
+import { apiFetch } from "@/app/apis/apiClient";
+import { API_BASE } from "@/app/apis/apiConfig";
 
 export type ExportJobOwnerType = "workflow_run" | "batch" | "classification_batch" | "required_field_check_batch";
 export type ExportJobFormat = "csv" | "json" | "xlsx";

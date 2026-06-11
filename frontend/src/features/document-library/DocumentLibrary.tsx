@@ -20,7 +20,7 @@ import {
   X
 } from "lucide-react";
 import { ChangeEvent, DragEvent, MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch } from "./apiClient";
+import { apiFetch } from "@/app/apis/apiClient";
 
 const LIBRARY_FILE_ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,.xlsx,.pptx";
 const LIBRARY_FILE_EXTENSIONS = new Set(["pdf", "png", "jpg", "jpeg", "docx", "xlsx", "pptx"]);
